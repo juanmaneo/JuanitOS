@@ -1,0 +1,37 @@
+# JuanitOS /boot/loader.conf sample
+# Copy the relevant lines into /boot/loader.conf on the host.
+
+# Hypervisor and VM plumbing
+vmm_load="YES"
+nmdm_load="YES"
+if_bridge_load="YES"
+if_tap_load="YES"
+
+# Required for PCI passthrough (VT-d / AMD-Vi must be enabled in firmware)
+hw.vmm.iommu.enable=1
+
+# Devices reserved for passthrough, as bus/slot/function.
+# Find candidates with `jos pci list --gpus` and generate this line with
+# `jos pci pptdevs 1/0/0 1/0/1`. For NVIDIA cards pass the audio function too.
+#pptdevs="1/0/0 1/0/1"
+
+# Keep bhyve from stealing a NIC the host still needs: only list NICs that
+# belong to sys-net.
+#pptdevs="1/0/0 1/0/1 5/0/0"
+
+# Larger guests with wired memory (-S) benefit from this
+#vm.max_wired=-1
+
+# ZFS
+zfs_load="YES"
+
+# Graphical boot (docs/boot-splash.md). The kernel draws this PNG while it
+# boots muted; jos-boot.efi passes -m, so boot_mute is NOT set here and a
+# direct loader.efi boot stays verbose. Do not set console= here either:
+# it would override the pre-loader's console=nullconsole.
+splash="/boot/images/juanitos-splash.png"
+shutdown_splash="/boot/images/juanitos-splash.png"
+kern.vt.splash_cpu="0"
+# Serial console in addition to the screen (kernel side):
+#boot_multicons="YES"
+#hw.uart.console="io:0x3f8,br:115200"

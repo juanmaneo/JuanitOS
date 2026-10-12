@@ -1,0 +1,18 @@
+[package]
+name = "jos-gfx"
+description = "JuanitOS boot artwork: a tiny no_std rasterizer shared by the UEFI pre-loader, the kernel splash generator and the splash daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# PNG export; requires std.
+png = ["dep:png"]
+
+[dependencies]
+png = { workspace = true, optional = true }
+
+[lints]
+workspace = true

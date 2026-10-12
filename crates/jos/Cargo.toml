@@ -1,0 +1,20 @@
+[package]
+name = "jos"
+description = "JuanitOS management CLI: create, start, stop and inspect qubes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "jos"
+path = "src/main.rs"
+
+[dependencies]
+juanitos-core = { path = "../juanitos-core" }
+jos-fwcfg = { path = "../jos-fwcfg", features = ["serde"] }
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

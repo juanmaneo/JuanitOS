@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# PROVIDE: jos-splash-network
+# REQUIRE: NETWORKING
+# BEFORE: LOGIN
+#
+# Lights the "network" icon of the boot splash once the host network is
+# configured. Harmless when the splash is not running.
+
+. /etc/rc.subr
+
+name="jos_splash_network"
+rcvar="jos_splash_enable"
+
+load_rc_config jos_splash
+
+: ${jos_splash_enable:="NO"}
+: ${jos_splash_bin:="/usr/local/bin/jos-splash"}
+
+start_cmd="jos_splash_network_start"
+stop_cmd=":"
+
+jos_splash_network_start()
+{
+	[ -x "${jos_splash_bin}" ] || return 0
+	"${jos_splash_bin}" stage network
+}
+
+run_rc_command "$1"

@@ -1,0 +1,37 @@
+# JuanitOS release profile, read by `jos-release`.
+#
+# The dom0 is a stock FreeBSD release plus packages plus the JuanitOS
+# binaries; nothing is compiled from the FreeBSD source tree. See
+# docs/bootstrap.md for the stage-1 (on FreeBSD) and stage-2 (on JuanitOS)
+# builds.
+
+# Image version stamped into the ISO name and /usr/local/share/juanitos/release.toml
+version = "0.1.0"
+
+# FreeBSD release the dom0 is built from.
+freebsd_version = "15.1-RELEASE"
+arch = "amd64"
+mirror = "https://download.freebsd.org/releases"
+
+# Distribution sets taken from the FreeBSD release (verified against its MANIFEST).
+dists = ["base.txz", "kernel.txz"]
+
+# ISO9660 volume label; the live /etc/fstab refers to /dev/iso9660/<label>.
+label = "JUANITOS"
+
+# Also make the ISO bootable on legacy BIOS when boot/cdboot exists.
+bios = true
+
+[packages]
+# Install the COSMIC desktop packages (best effort, missing ports are skipped).
+gui = true
+# Install rust + git so the installed system can rebuild JuanitOS (stage 2).
+selfhost = true
+# Anything else you want in every dom0.
+extra = ["tmux", "vim"]
+
+[source]
+# Copy this repository into /usr/local/src/juanitos and vendor its crates so
+# stage 2 can build offline.
+include = true
+vendor = true

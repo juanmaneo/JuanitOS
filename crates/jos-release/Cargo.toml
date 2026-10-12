@@ -1,0 +1,22 @@
+[package]
+name = "jos-release"
+description = "JuanitOS release builder: assembles the dom0 tarball and the live/install ISO from FreeBSD release artifacts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "jos-release"
+path = "src/main.rs"
+
+[dependencies]
+juanitos-core = { path = "../juanitos-core" }
+jos-gfx = { path = "../jos-gfx", features = ["png"] }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

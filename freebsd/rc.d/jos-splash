@@ -1,0 +1,59 @@
+#!/bin/sh
+#
+# PROVIDE: jos-splash
+# REQUIRE: FILESYSTEMS
+# BEFORE: hostname
+#
+# Starts the JuanitOS boot splash as early as rc(8) allows: the file
+# systems are mounted (so /var/run exists and /usr/local/bin is readable),
+# nothing else has run yet. The kernel left its own splash on the screen
+# while booting muted (loader.conf: splash=, boot_mute via jos-boot), so the
+# first thing the daemon does is redraw the very same picture with the
+# "storage" icon lit.
+#
+# /etc/rc.conf:
+#   jos_splash_enable="YES"
+#   jos_splash_vt="10"          (optional: VT to draw on, 10 = /dev/ttyv9)
+
+. /etc/rc.subr
+
+name="jos_splash"
+rcvar="jos_splash_enable"
+
+load_rc_config $name
+
+: ${jos_splash_enable:="NO"}
+: ${jos_splash_vt:="10"}
+: ${jos_splash_bin:="/usr/local/bin/jos-splash"}
+
+pidfile="/var/run/jos-splash.pid"
+start_cmd="jos_splash_start"
+stop_cmd="jos_splash_stop"
+status_cmd="jos_splash_status"
+
+jos_splash_start()
+{
+	[ -x "${jos_splash_bin}" ] || return 0
+	# Only worth it on a graphics console.
+	[ -c /dev/ttyv0 ] || return 0
+	/usr/sbin/daemon -f -p "${pidfile}" "${jos_splash_bin}" run \
+	    --vt "${jos_splash_vt}" --reached storage
+}
+
+jos_splash_stop()
+{
+	[ -x "${jos_splash_bin}" ] || return 0
+	"${jos_splash_bin}" finish --console
+}
+
+jos_splash_status()
+{
+	if [ -S /var/run/jos-splash.sock ]; then
+		echo "jos-splash is running."
+	else
+		echo "jos-splash is not running."
+		return 1
+	fi
+}
+
+run_rc_command "$1"

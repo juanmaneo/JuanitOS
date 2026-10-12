@@ -1,0 +1,43 @@
+[package]
+name = "jos-firewall"
+description = "JuanitOS sys-firewall unikernel: a UEFI application running the jos-fwnet engine"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+repository = "https://github.com/juanmaneo/JuanitOS"
+
+# Standalone workspace: this crate only builds for x86_64-unknown-uefi
+# (see .cargo/config.toml) and must not be pulled into the host workspace.
+[workspace]
+
+[[bin]]
+name = "jos-firewall"
+path = "src/main.rs"
+# A no_std/no_main binary has nothing to test and its panic handler
+# clashes with the test harness.
+test = false
+bench = false
+
+[dependencies]
+jos-fwcfg = { path = "../jos-fwcfg" }
+jos-fwnet = { path = "../jos-fwnet" }
+log = { version = "0.4", default-features = false }
+uefi = { version = "0.41", default-features = false, features = ["alloc", "global_allocator", "logger"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+unreachable = "warn"
+todo = "warn"
+unimplemented = "warn"

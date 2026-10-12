@@ -1,0 +1,13 @@
+[package]
+name = "jos-fwnet"
+description = "Packet parsing, filtering, NAT and DHCP logic for the jos-firewall unikernel (no_std + alloc, host-testable)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+jos-fwcfg = { path = "../jos-fwcfg" }
+
+[lints]
+workspace = true

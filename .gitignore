@@ -1,0 +1,5 @@
+/target
+/release/out
+# Downloads, QEMU test output and logs from tools/ (survive `cargo clean`)
+/work
+__pycache__/

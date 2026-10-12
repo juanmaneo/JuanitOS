@@ -1,0 +1,6 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# UEFI: jos-boot and jos-firewall. FreeBSD: cross-checking the dom0 tools
+# (`cargo clippy --target x86_64-unknown-freebsd`) from any host.
+targets = ["x86_64-unknown-uefi", "x86_64-unknown-freebsd"]

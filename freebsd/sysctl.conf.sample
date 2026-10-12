@@ -1,0 +1,40 @@
+# JuanitOS /etc/sysctl.conf sample
+# Hardening knobs in the spirit of HardenedBSD. Review before applying;
+# some may need to be relaxed for specific workloads.
+
+# Hide processes belonging to other users / other jails
+security.bsd.see_other_uids=0
+security.bsd.see_other_gids=0
+security.bsd.see_jail_proc=0
+
+# Restrict debugging of setuid and unprivileged processes
+security.bsd.unprivileged_read_msgbuf=0
+security.bsd.unprivileged_proc_debug=0
+kern.randompid=1
+
+# Disable core dumps for setuid binaries and in general on the host
+kern.sugid_coredump=0
+kern.coredump=0
+
+# Stack guard pages / ASLR (FreeBSD 13+)
+kern.elf64.aslr.enable=1
+kern.elf64.aslr.pie_enable=1
+kern.elf64.aslr.stack=1
+kern.elf64.aslr.honor_sbrk=0
+security.bsd.stack_guard_page=1
+
+# W^X and mprotect hardening where supported
+kern.elf64.allow_wx=0
+
+# Network: the host should not forward packets; routing is sys-net/sys-firewall's job
+net.inet.ip.forwarding=0
+net.inet6.ip6.forwarding=0
+net.inet.ip.redirect=0
+net.inet6.ip6.redirect=0
+net.inet.icmp.drop_redirect=1
+net.inet.tcp.blackhole=2
+net.inet.udp.blackhole=1
+net.inet.ip.random_id=1
+
+# bhyve: allow tap interfaces to come up when opened by the VM
+net.link.tap.up_on_open=1

@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# PROVIDE: jos
+# REQUIRE: LOGIN zfs netif
+# KEYWORD: shutdown
+#
+# Add the following to /etc/rc.conf to enable JuanitOS qube autostart:
+#
+# jos_enable="YES"
+# jos_config="/usr/local/etc/juanitos/jos.toml"   (optional)
+
+. /etc/rc.subr
+
+name="jos"
+rcvar="jos_enable"
+
+load_rc_config $name
+
+: ${jos_enable:="NO"}
+: ${jos_config:="/usr/local/etc/juanitos/jos.toml"}
+: ${jos_bin:="/usr/local/bin/jos"}
+
+start_cmd="jos_start"
+stop_cmd="jos_stop"
+status_cmd="jos_status"
+
+: ${jos_splash_bin:="/usr/local/bin/jos-splash"}
+
+jos_start()
+{
+	echo "Starting JuanitOS qubes."
+	if [ -x "${jos_splash_bin}" ]; then
+		"${jos_splash_bin}" status "Starting qubes"
+	fi
+	# Each qube gets its own detached `jos supervise` process, logging to
+	# /var/run/juanitos/<name>.log.
+	"${jos_bin}" --config "${jos_config}" autostart
+	if [ -x "${jos_splash_bin}" ]; then
+		"${jos_splash_bin}" stage qubes
+		"${jos_splash_bin}" status
+	fi
+}
+
+jos_stop()
+{
+	echo "Stopping JuanitOS qubes."
+	# Supervised qubes are known by their pidfiles; anything else left in
+	# /dev/vmm (e.g. started by hand) is destroyed too.
+	for pid in /var/run/juanitos/*.pid; do
+		[ -e "${pid}" ] || continue
+		vm=$(basename "${pid}" .pid)
+		"${jos_bin}" --config "${jos_config}" kill "${vm}"
+	done
+	for vm in /dev/vmm/*; do
+		[ -e "${vm}" ] || continue
+		"${jos_bin}" --config "${jos_config}" kill "$(basename "${vm}")"
+	done
+}
+
+jos_status()
+{
+	"${jos_bin}" --config "${jos_config}" ls
+}
+
+run_rc_command "$1"

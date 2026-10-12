@@ -1,0 +1,19 @@
+[package]
+name = "jos-fwcfg"
+description = "Firewall rule grammar and config-disk format shared by jos and the jos-firewall unikernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables String conversions and the serde (de)serialisation of rules.
+std = []
+serde = ["dep:serde", "std"]
+
+[lints]
+workspace = true

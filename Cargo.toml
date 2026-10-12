@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jos-fwcfg",
+    "crates/jos-fwnet",
+    "crates/jos-gfx",
+    "crates/jos-splash",
+    "crates/juanitos-core",
+    "crates/jos",
+    "crates/jos-install",
+    "crates/jos-release",
+]
+# UEFI applications are their own workspaces: they only build for
+# x86_64-unknown-uefi.
+exclude = ["crates/jos-firewall", "crates/jos-boot"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+repository = "https://github.com/juanmaneo/JuanitOS"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+png = "0.17"
+libc = "0.2"
+
+# An OS cannot afford a panic in critical code: every crate opts in with
+# `[lints] workspace = true`. Tests are exempt via clippy.toml.
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+unreachable = "warn"
+todo = "warn"
+unimplemented = "warn"
