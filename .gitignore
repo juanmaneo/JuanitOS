@@ -1,4 +1,6 @@
-/target
+# Root workspace, and the standalone UEFI workspaces' own target/ dirs
+# (crates/jos-boot, crates/jos-firewall)
+target/
 /release/out
 # Downloads, QEMU test output and logs from tools/ (survive `cargo clean`)
 /work

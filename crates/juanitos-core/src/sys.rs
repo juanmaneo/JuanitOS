@@ -236,7 +236,8 @@ pub fn shell_join(program: &str, args: &[&str]) -> String {
     parts.join(" ")
 }
 
-fn shell_quote(s: &str) -> String {
+/// Quote `s` for a POSIX shell (unchanged when it needs no quoting).
+pub fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }

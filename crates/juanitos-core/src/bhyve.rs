@@ -6,9 +6,11 @@
 //! |------|-------------------------------------------------------------|
 //! | 0    | hostbridge                                                  |
 //! | 2    | virtio-blk: root zvol, or the read-only unikernel image     |
-//! | 3    | virtio-net: upstream tap (to the NetVM), if any             |
+//! | 3    | virtio-net: upstream tap (to the NetVM or a host `uplink`)  |
 //! | 4    | virtio-net: downstream tap (own bridge), for net/firewall   |
+//! |      | (Redox qubes: `nvme` and `e1000` in the same slots)         |
 //! | 4+   | passthru devices, after the last network slot               |
+//! | 29   | ahci-cd: cloud-init seed while a template is provisioned    |
 //! | 30   | virtio-blk: raw config disk of a unikernel firewall         |
 //! | 31   | lpc (com1 console, bootrom)                                 |
 
@@ -52,18 +54,37 @@ pub const FIRST_NET_SLOT: u32 = 3;
 pub const MIN_PASSTHRU_SLOT: u32 = 4;
 /// Guest PCI slot of a unikernel firewall's raw config disk.
 pub const CONFIG_DISK_SLOT: u32 = crate::firewall::CONFIG_DISK_SLOT;
+/// Guest PCI slot of the cloud-init seed CD (NoCloud `cidata` ISO)
+/// attached while a template is provisioned.
+pub const SEED_SLOT: u32 = 29;
+/// Reboots tolerated while a template is maintained (a package upgrade
+/// may restart the guest) before giving up.
+pub const MAX_MAINTENANCE_BOOTS: u32 = 5;
+
+/// `cmd` with a CD drive holding `iso` (inserted before the VM name).
+pub fn with_cdrom(mut cmd: BhyveCommand, iso: &str) -> BhyveCommand {
+    let at = cmd.args.len().saturating_sub(1);
+    cmd.args.insert(at, "-s".into());
+    cmd.args
+        .insert(at + 1, format!("{SEED_SLOT},ahci,cd:{iso}"));
+    cmd
+}
 
 /// The image attached as the boot disk: the qube's zvol, or for unikernels
-/// the read-only `kernel` image.
+/// the per-boot copy of its `kernel` image (see [`Vm::stage_kernel`]).
+///
+/// Nothing is attached read-only: the bhyve UEFI firmware does not boot
+/// from a `virtio-blk,...,ro` device ("UEFI Misc Device: Not Found"),
+/// which is why the unikernel boots a fresh copy instead.
 fn boot_disk(q: &Qube, cfg: &GlobalConfig) -> Result<String> {
     if q.is_unikernel() {
-        match q.kernel.as_deref() {
-            Some(k) => Ok(format!("{k},ro")),
-            None => Err(Error::Other(format!(
+        if q.kernel.is_none() {
+            return Err(Error::Other(format!(
                 "{} is a unikernel qube but has no `kernel` image",
                 q.name
-            ))),
+            )));
         }
+        Ok(cfg.unikernel_boot_image(&q.name))
     } else {
         Ok(cfg.zvol_path(q))
     }
@@ -94,11 +115,14 @@ pub fn build_run_command(q: &Qube, cfg: &GlobalConfig, taps: &[&str]) -> Result<
     }
     add(&mut args, &["-s", "0,hostbridge"]);
     add(&mut args, &["-s", "31,lpc"]);
-    add(&mut args, &["-s", &format!("2,virtio-blk,{disk}")]);
-    let has_upstream = q.kind != crate::config::QubeKind::Net;
+    add(
+        &mut args,
+        &["-s", &format!("2,{},{disk}", q.os.disk_emulation())],
+    );
+    let has_upstream = q.kind != crate::config::QubeKind::Net || q.uplink.is_some();
     for (i, tap) in taps.iter().enumerate() {
         let slot = FIRST_NET_SLOT + i as u32;
-        let mut dev = format!("{slot},virtio-net,{tap}");
+        let mut dev = format!("{slot},{},{tap}", q.os.nic_emulation());
         if i == 0 && has_upstream {
             if let Some(mac) = &q.mac {
                 dev.push_str(&format!(",mac={mac}"));
@@ -112,7 +136,7 @@ pub fn build_run_command(q: &Qube, cfg: &GlobalConfig, taps: &[&str]) -> Result<
             &[
                 "-s",
                 &format!(
-                    "{CONFIG_DISK_SLOT},virtio-blk,{},ro",
+                    "{CONFIG_DISK_SLOT},virtio-blk,{}",
                     cfg.firewall_config_disk(&q.name)
                 ),
             ],
@@ -239,12 +263,11 @@ impl<'a> Vm<'a> {
     }
 
     /// Resolve the NetVM for `q`: explicit `netvm`, else the global default,
-    /// unless `q` is itself a NetVM (which owns physical NICs instead).
+    /// unless `q` is itself a NetVM (which owns physical NICs instead) or
+    /// has `netvm = "none"`.
     pub fn effective_netvm(&self, q: &Qube) -> Option<String> {
-        if q.kind == crate::config::QubeKind::Net {
-            return None;
-        }
-        q.netvm.clone().or_else(|| self.cfg.default_netvm.clone())
+        q.resolve_netvm(self.cfg.default_netvm.as_deref())
+            .map(String::from)
     }
 
     /// Create the tap interfaces `q` needs (upstream to its NetVM, plus a
@@ -253,7 +276,9 @@ impl<'a> Vm<'a> {
     pub fn setup_taps(&self, q: &Qube) -> Result<Vec<String>> {
         let net = Net::new(self.runner);
         let mut taps: Vec<String> = Vec::new();
-        if let Some(netvm) = self.effective_netvm(q) {
+        if let Some(iface) = &q.uplink {
+            taps.push(net.create_uplink_tap(&q.name, iface)?);
+        } else if let Some(netvm) = self.effective_netvm(q) {
             taps.push(net.create_tap(&q.name, &netvm)?);
         }
         if q.provides_network() {
@@ -276,6 +301,7 @@ impl<'a> Vm<'a> {
         }
         let taps = self.setup_taps(q)?;
         let tap_refs: Vec<&str> = taps.iter().map(String::as_str).collect();
+        self.stage_kernel(q)?;
         let cmd = build_run_command(q, self.cfg, &tap_refs)?;
         let out = cmd.run(self.runner)?;
         let _ = build_destroy_command(&q.name).run(self.runner);
@@ -289,6 +315,75 @@ impl<'a> Vm<'a> {
                 stderr: out.stderr,
             })
         }
+    }
+
+    /// A unikernel boots a fresh copy of its `kernel` image under the run
+    /// directory: the shipped image stays pristine whatever the guest (or
+    /// the firmware, which wants the disk writable) does to its copy.
+    pub fn stage_kernel(&self, q: &Qube) -> Result<()> {
+        let Some(kernel) = q.kernel.as_deref().filter(|_| q.is_unikernel()) else {
+            return Ok(());
+        };
+        self.runner
+            .run_checked("mkdir", &["-p", &self.cfg.run_dir])?;
+        self.runner
+            .run_checked("cp", &[kernel, &self.cfg.unikernel_boot_image(&q.name)])?;
+        Ok(())
+    }
+
+    /// Boot a template for maintenance (provisioning with a cloud-init
+    /// `seed` ISO, or updates) until it powers off, following reboots.
+    /// Templates are never started otherwise: app qubes run clones of them.
+    pub fn maintain(&self, q: &Qube, seed: Option<&str>) -> Result<GuestExit> {
+        let cmd = self.maintenance_command(q, seed)?;
+        let mut result = Ok(GuestExit::Reboot);
+        for _ in 0..MAX_MAINTENANCE_BOOTS {
+            let out = cmd.run(self.runner);
+            let _ = build_destroy_command(&q.name).run(self.runner);
+            result = match out {
+                Ok(out) => {
+                    let exit = GuestExit::from_status(out.status);
+                    // Only an orderly end (or a reboot, followed below)
+                    // counts: a crashed template must never be snapshotted.
+                    if matches!(
+                        exit,
+                        GuestExit::Poweroff | GuestExit::Halt | GuestExit::Reboot
+                    ) {
+                        Ok(exit)
+                    } else {
+                        Err(Error::Command {
+                            program: cmd.to_shell(),
+                            code: out.status,
+                            stderr: out.stderr,
+                        })
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            if !matches!(result, Ok(GuestExit::Reboot)) {
+                break;
+            }
+        }
+        let _ = Net::new(self.runner).destroy_taps(&q.name);
+        match result {
+            Ok(GuestExit::Reboot) => Err(Error::Other(format!(
+                "{} kept rebooting ({MAX_MAINTENANCE_BOOTS} boots); see `jos console {}`",
+                q.name, q.name
+            ))),
+            other => other,
+        }
+    }
+
+    /// Set up the taps and build the command [`Vm::maintain`] runs (a dry
+    /// run prints it instead of waiting for a guest that never boots).
+    pub fn maintenance_command(&self, q: &Qube, seed: Option<&str>) -> Result<BhyveCommand> {
+        let taps = self.setup_taps(q)?;
+        let tap_refs: Vec<&str> = taps.iter().map(String::as_str).collect();
+        let cmd = build_run_command(q, self.cfg, &tap_refs)?;
+        Ok(match seed {
+            Some(iso) => with_cdrom(cmd, iso),
+            None => cmd,
+        })
     }
 
     /// Boot the guest once and tear down its taps afterwards. Use the
@@ -405,12 +500,13 @@ mod tests {
         let a = &cmd.args;
         assert_eq!(a[1], "1");
         assert_eq!(a[3], "128M");
-        assert!(
-            a.contains(&"2,virtio-blk,/usr/local/share/juanitos/jos-firewall.img,ro".to_string())
-        );
+        // The boot disk is the per-boot copy, and nothing is read-only
+        // (the bhyve firmware would not boot it).
+        assert!(a.contains(&"2,virtio-blk,/var/run/juanitos/sys-firewall.boot.img".to_string()));
         assert!(a.contains(&"3,virtio-net,tap-sys-firewall".to_string()));
         assert!(a.contains(&"4,virtio-net,tapd-sys-firewal".to_string()));
-        assert!(a.contains(&"30,virtio-blk,/var/run/juanitos/sys-firewall.fwcfg,ro".to_string()));
+        assert!(a.contains(&"30,virtio-blk,/var/run/juanitos/sys-firewall.fwcfg".to_string()));
+        assert!(!a.iter().any(|x| x.ends_with(",ro")));
         assert!(!a.iter().any(|x| x.contains("zvol")));
         assert!(!a.contains(&"-S".to_string()));
         assert!(a.iter().any(|x| x.starts_with("bootrom,")));
@@ -421,6 +517,32 @@ mod tests {
         let cfg = GlobalConfig::default();
         let q = Qube::new("sys-firewall", QubeKind::Firewall, OsType::Unikernel);
         assert!(build_run_command(&q, &cfg, &[]).is_err());
+    }
+
+    #[test]
+    fn unikernel_boots_a_fresh_copy_of_its_image() {
+        use crate::sys::{CmdOutput, MockRunner};
+        let cfg = GlobalConfig::default();
+        let mut q = Qube::new("sys-firewall", QubeKind::Firewall, OsType::Unikernel);
+        q.kernel = Some("/usr/local/share/juanitos/jos-firewall.img".into());
+        q.netvm = Some("sys-net".into());
+        let m = MockRunner::new().respond("bhyve", &[], CmdOutput::failed(1, ""));
+        Vm::new(&m, &cfg).run_once(&q).unwrap();
+        let calls = m.calls();
+        let cp = calls
+            .iter()
+            .position(|c| {
+                c == "cp /usr/local/share/juanitos/jos-firewall.img /var/run/juanitos/sys-firewall.boot.img"
+            })
+            .expect("the image is copied");
+        let boot = calls.iter().position(|c| c.starts_with("bhyve ")).unwrap();
+        assert!(cp < boot, "copied before booting");
+        assert!(calls[boot].contains("2,virtio-blk,/var/run/juanitos/sys-firewall.boot.img"));
+        // Not a unikernel: nothing to stage.
+        let app = Qube::new("work", QubeKind::App, OsType::Freebsd);
+        let m = MockRunner::new();
+        Vm::new(&m, &cfg).stage_kernel(&app).unwrap();
+        assert!(m.calls().is_empty());
     }
 
     #[test]
@@ -466,6 +588,10 @@ mod tests {
         assert_eq!(vm.effective_netvm(&fw).as_deref(), Some("sys-net"));
         let net = Qube::new("sys-net", QubeKind::Net, OsType::Freebsd);
         assert_eq!(vm.effective_netvm(&net), None);
+        // `netvm = "none"` is no network, not the default one.
+        let mut offline = Qube::new("vault", QubeKind::App, OsType::Freebsd);
+        offline.netvm = Some(crate::config::NO_NETVM.into());
+        assert_eq!(vm.effective_netvm(&offline), None);
     }
 
     #[test]
@@ -547,5 +673,119 @@ mod tests {
         let t = Qube::new("tmpl", QubeKind::Template, OsType::Freebsd);
         assert!(Vm::new(&m, &cfg).start(&t).is_err());
         assert!(m.calls().is_empty());
+    }
+
+    #[test]
+    fn net_qube_with_uplink_gets_two_taps() {
+        use crate::sys::{CmdOutput, MockRunner};
+        let cfg = GlobalConfig::default();
+        let mut net = Qube::new("sys-net", QubeKind::Net, OsType::Freebsd);
+        net.uplink = Some("em0".into());
+        // Nothing exists yet: the bare `ifconfig <name>` probes fail.
+        let probes_fail = || {
+            let mut m = MockRunner::new();
+            for name in [
+                "bru-em0",
+                "tap-sys-net",
+                "br-sys-net",
+                "tapd-sys-net",
+                "tap-fbsd15-net",
+            ] {
+                m = m.respond("ifconfig", &[name], CmdOutput::failed(1, ""));
+                // Longer prefixes win: configuring the interfaces succeeds.
+                for verb in ["up", "addm", "destroy"] {
+                    m = m.respond("ifconfig", &[name, verb], CmdOutput::ok(""));
+                }
+            }
+            m
+        };
+        let m = probes_fail();
+        let taps = Vm::new(&m, &cfg).setup_taps(&net).unwrap();
+        assert_eq!(
+            taps,
+            vec!["tap-sys-net".to_string(), "tapd-sys-net".to_string()]
+        );
+        assert!(m.calls().contains(&"ifconfig bru-em0 addm em0".to_string()));
+        let refs: Vec<&str> = taps.iter().map(String::as_str).collect();
+        let cmd = build_run_command(&net, &cfg, &refs).unwrap();
+        assert!(cmd.args.contains(&"3,virtio-net,tap-sys-net".to_string()));
+        assert!(cmd.args.contains(&"4,virtio-net,tapd-sys-net".to_string()));
+        // A template provisioned over an uplink skips the NetVM.
+        let mut t = Qube::new("fbsd15-net", QubeKind::Template, OsType::Freebsd);
+        t.uplink = Some("em0".into());
+        let m = probes_fail();
+        assert_eq!(
+            Vm::new(&m, &cfg).setup_taps(&t).unwrap(),
+            vec!["tap-fbsd15-net"]
+        );
+        assert!(!m.calls().iter().any(|c| c.contains("br-sys-firewall")));
+    }
+
+    #[test]
+    fn redox_gets_nvme_and_e1000_instead_of_virtio() {
+        let cfg = GlobalConfig::default();
+        let mut q = Qube::new("redox", QubeKind::App, OsType::Redox);
+        q.mac = Some("02:4a:00:00:00:01".into());
+        let cmd = build_run_command(&q, &cfg, &["tap-redox"]).unwrap();
+        assert!(cmd
+            .args
+            .contains(&"2,nvme,/dev/zvol/zroot/juanitos/qubes/redox".to_string()));
+        assert!(cmd
+            .args
+            .contains(&"3,e1000,tap-redox,mac=02:4a:00:00:00:01".to_string()));
+        assert!(!cmd.to_shell().contains("virtio"));
+        assert_eq!(OsType::Freebsd.disk_emulation(), "virtio-blk");
+        assert_eq!(OsType::Linux.nic_emulation(), "virtio-net");
+        assert!(OsType::Redox.has_console_shell());
+        assert!(OsType::Linux.has_console_shell());
+        assert!(!OsType::Unikernel.has_console_shell());
+        assert_eq!(
+            OsType::Redox.console_login().map(|l| l.user),
+            Some("user".to_string())
+        );
+        assert!(OsType::Freebsd.console_login().is_none());
+    }
+
+    #[test]
+    fn maintenance_boot_of_a_template() {
+        use crate::sys::{CmdOutput, MockRunner};
+        let cfg = GlobalConfig::default();
+        let t = Qube::new("dev", QubeKind::Template, OsType::Linux);
+
+        // Powers off: one boot, seed attached before the VM name, taps gone.
+        let m = MockRunner::new().respond("bhyve", &[], CmdOutput::failed(1, ""));
+        let exit = Vm::new(&m, &cfg).maintain(&t, Some("/s.iso")).unwrap();
+        assert_eq!(exit, GuestExit::Poweroff);
+        let calls = m.calls();
+        let boots: Vec<_> = calls.iter().filter(|c| c.starts_with("bhyve ")).collect();
+        assert_eq!(boots.len(), 1);
+        assert!(
+            boots[0].ends_with("-s 29,ahci,cd:/s.iso dev"),
+            "{}",
+            boots[0]
+        );
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("destroy") && c.contains("tap-dev")));
+
+        // Keeps rebooting: bounded, then an error.
+        let m = MockRunner::new().respond("bhyve", &[], CmdOutput::ok(""));
+        let err = Vm::new(&m, &cfg).maintain(&t, None).unwrap_err();
+        assert!(err.to_string().contains("kept rebooting"), "{err}");
+        let boots = m.calls().iter().filter(|c| c.starts_with("bhyve ")).count();
+        assert_eq!(boots, MAX_MAINTENANCE_BOOTS as usize);
+        assert!(!m.calls().iter().any(|c| c.contains("ahci")));
+
+        // Crashes: reported.
+        let m = MockRunner::new().respond("bhyve", &[], CmdOutput::failed(3, "fault"));
+        let err = Vm::new(&m, &cfg).maintain(&t, None).unwrap_err();
+        assert!(matches!(err, Error::Command { code: Some(3), .. }));
+
+        // The command alone, for dry runs.
+        let m = MockRunner::new();
+        let cmd = Vm::new(&m, &cfg)
+            .maintenance_command(&t, Some("/s.iso"))
+            .unwrap();
+        assert!(cmd.to_shell().contains("29,ahci,cd:/s.iso"));
     }
 }

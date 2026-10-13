@@ -21,7 +21,7 @@ use std::path::Path;
 use anyhow::{bail, Context};
 use jos_gfx::Image;
 
-use crate::fb::{ioc, pack_row, Display, RgbOffsets};
+use crate::{ioc, pack_row, Display, RgbOffsets};
 
 /// `struct fbtype` from `sys/fbio.h`.
 #[repr(C)]
@@ -43,6 +43,10 @@ struct FbRgbOffs {
     green: i32,
     blue: i32,
 }
+
+/// How long the kernel is given to finish its own post-switch repaint
+/// before the first frame is written (vt(4) timer: 25 Hz, so a few ticks).
+pub const POST_SWITCH_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub struct VtDisplay {
     tty: File,
@@ -137,6 +141,11 @@ impl VtDisplay {
         ioctl_int(fd, ioc::VT_ACTIVATE, vt, "VT_ACTIVATE")?;
         ioctl_int(fd, ioc::VT_WAITACTIVE, vt, "VT_WAITACTIVE")?;
         ioctl_int(fd, ioc::KDSETMODE, ioc::KD_GRAPHICS, "KDSETMODE")?;
+        // vt(4) marks the screen invalid on a window switch and repaints it
+        // (black cells, border) from its 25 Hz timer, after VT_WAITACTIVE
+        // returns and regardless of KD_GRAPHICS. A frame drawn before that
+        // repaint is wiped, so let the timer run a few ticks first.
+        std::thread::sleep(POST_SWITCH_SETTLE);
 
         // SAFETY: mapping `map_len` bytes of the device at offset 0; vt(4)
         // validates the range against the framebuffer size.

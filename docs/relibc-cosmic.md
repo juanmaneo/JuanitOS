@@ -12,7 +12,8 @@ v0.1 and what is deferred.
 | `jos`, `juanitos-core` | host        | Rust `std`; libc-agnostic         |
 | COSMIC desktop      | host           | FreeBSD libc via ports (Rust apps)|
 | FreeBSD guests      | app/net/fw qubes | FreeBSD libc                    |
-| Linux guests        | app/gpu qubes  | **Relibc** where the image allows; glibc for the CUDA image |
+| Linux guests        | app/gpu qubes  | glibc (Debian; NVIDIA's CUDA stack is only validated there) |
+| Redox guests        | app qubes (`redox` template) | **Relibc** — Redox's own libc, the whole userland is built on it |
 
 ## Why Relibc is not on the host (yet)
 
@@ -29,20 +30,35 @@ Decision for v0.1:
   effort (`x11-wm/cosmic-*` and friends) against it.
 - Our own tooling is pure Rust on `std` and deliberately avoids libc-specific
   behaviour, so it is ready to be rebuilt against Relibc when a target exists.
-- **Relibc-based userland lives inside guests.** A Linux template built on
-  Relibc (e.g. a minimal Rust-centric rootfs) is a supported template type;
-  the CUDA `gpu` qube uses a conventional glibc distribution because NVIDIA's
-  driver and toolkit are only validated there.
+- **Relibc-based userland lives inside guests, as Redox OS.** Rather than
+  grafting Relibc onto a Linux rootfs, the Relibc template is Redox itself:
+  the `redox` recipe (`jos template install redox`, `docs/templates.md`)
+  installs the upstream `server` nightly, whose every program — `init`,
+  the drivers, `ion`, `coreutils` — is linked against Relibc. The CUDA
+  `gpu` qube uses a conventional glibc distribution because NVIDIA's driver
+  and toolkit are only validated there.
+
+## Redox as a guest: where it stands
+
+`jos` knows Redox as `--os redox`: such qubes get an NVMe disk and an
+e1000 NIC (bhyve's virtio is the legacy transport Redox's drivers do not
+speak). The nightly boots on bhyve with the UEFI bootrom to the serial
+login, gets a DHCP lease on the e1000 and answers `jos run` (which logs
+in as Redox's password-less `user` and speaks `ion`'s dialect). What is
+missing is a display: bhyve's `fbuf` framebuffer makes bhyve assert when
+Redox's `pcid` programs it, so Redox qubes are console-only for now.
+`docs/templates.md` has the details.
 
 ## Future goals
 
-1. Track Relibc's Linux ABI maturity and ship a Relibc-based Linux template
-   as the default for app qubes.
+1. A Redox `desktop` recipe once bhyve's `fbuf` and Redox's `pcid` get
+   along (today bhyve asserts in its BAR registration when Redox programs
+   the framebuffer device); Orbital in a qube window is the natural
+   COSMIC integration target.
 2. Evaluate a Relibc FreeBSD port (platform layer: `src/platform/`), starting
    with what `jos` and COSMIC actually need.
-3. Experiment with Redox itself as a guest OS once bhyve + Redox's drivers
-   are a stable combination; it would be the natural home for a
-   Relibc-only qube.
+3. Redox's own package manager (`pkg`) inside the qube for a Redox
+   development template, mirroring `debian-13-dev` and `fbsd15-dev`.
 
 ## COSMIC notes
 

@@ -41,15 +41,6 @@ impl Check {
     }
 }
 
-/// Module names from `kldstat` output (e.g. `vmm.ko` -> `vmm`).
-pub fn parse_kldstat(text: &str) -> Vec<String> {
-    text.lines()
-        .skip_while(|l| l.trim_start().starts_with("Id"))
-        .filter_map(|l| l.split_whitespace().last())
-        .map(|name| name.strip_suffix(".ko").unwrap_or(name).to_string())
-        .collect()
-}
-
 /// Value from `sysctl name` output (`hw.vmm.iommu.enable: 1` -> `1`),
 /// or the raw trimmed text when `sysctl -n` style output is given.
 pub fn parse_sysctl_value(text: &str) -> String {
@@ -69,7 +60,11 @@ pub fn parse_zpool_list(text: &str) -> Vec<String> {
         .collect()
 }
 
-const REQUIRED_MODULES: &[&str] = crate::dom0::KERNEL_MODULES;
+/// Kernel modules a dom0 needs. Checked by *module* name (`kldstat -q -m`,
+/// as rc.subr's `load_kld` does), which also finds modules compiled into
+/// GENERIC such as `if_tap` (part of `if_tuntap`), unlike the file names a
+/// plain `kldstat` lists.
+const REQUIRED_MODULES: &[&str] = &["vmm", "nmdm", "if_bridge", "if_tap"];
 
 /// All checks: hardware/kernel readiness followed by storage.
 pub fn run_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
@@ -91,27 +86,25 @@ pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
     let mut checks = Vec::new();
 
     // Kernel modules
-    match runner.run("kldstat", &[]) {
-        Ok(out) if out.success() => {
-            let loaded = parse_kldstat(&out.stdout);
-            for &m in REQUIRED_MODULES {
-                let name = format!("kernel module {m}");
-                if loaded.iter().any(|l| l == m) {
-                    checks.push(Check::new(&name, Status::Ok, "loaded"));
-                } else {
-                    checks.push(Check::new(
-                        &name,
-                        Status::Fail,
-                        format!("not loaded; run `kldload {m}` and add `{m}_load=\"YES\"` to /boot/loader.conf"),
-                    ));
-                }
+    for &m in REQUIRED_MODULES {
+        let name = format!("kernel module {m}");
+        match runner.run("kldstat", &["-q", "-m", m]) {
+            Ok(out) if out.success() => {
+                checks.push(Check::new(&name, Status::Ok, "loaded"));
             }
+            Ok(_) => checks.push(Check::new(
+                &name,
+                Status::Fail,
+                format!(
+                    "not loaded; run `kldload {m}` and add `{m}_load=\"YES\"` to /boot/loader.conf"
+                ),
+            )),
+            Err(_) => checks.push(Check::new(
+                &name,
+                Status::Fail,
+                "could not run kldstat (not FreeBSD?)",
+            )),
         }
-        _ => checks.push(Check::new(
-            "kernel modules",
-            Status::Fail,
-            "could not run kldstat (not FreeBSD?)",
-        )),
     }
 
     // IOMMU
@@ -243,19 +236,6 @@ mod tests {
     use crate::sys::{CmdOutput, MockRunner};
 
     #[test]
-    fn kldstat_parsing() {
-        let text = "\
-Id Refs Address                Size Name
- 1   40 0xffffffff80200000  1f3c8c8 kernel
- 2    1 0xffffffff82b00000   3e2b40 zfs.ko
- 3    1 0xffffffff82f00000    6a3c0 vmm.ko
- 4    1 0xffffffff82f80000     2200 nmdm.ko
-";
-        assert_eq!(parse_kldstat(text), vec!["kernel", "zfs", "vmm", "nmdm"]);
-        assert!(parse_kldstat("").is_empty());
-    }
-
-    #[test]
     fn sysctl_parsing() {
         assert_eq!(parse_sysctl_value("hw.vmm.iommu.enable: 1\n"), "1");
         assert_eq!(parse_sysctl_value("0\n"), "0");
@@ -270,12 +250,11 @@ Id Refs Address                Size Name
     #[test]
     fn run_checks_reports_failures() {
         let cfg = GlobalConfig::default();
+        // Only vmm and if_tap (compiled into GENERIC) are present.
         let m = MockRunner::new()
-            .respond(
-                "kldstat",
-                &[],
-                CmdOutput::ok("Id Refs Address Size Name\n1 1 0x0 0 vmm.ko\n"),
-            )
+            .respond("kldstat", &[], CmdOutput::failed(1, ""))
+            .respond("kldstat", &["-q", "-m", "vmm"], CmdOutput::ok(""))
+            .respond("kldstat", &["-q", "-m", "if_tap"], CmdOutput::ok(""))
             .respond("sysctl", &[], CmdOutput::ok("hw.vmm.iommu.enable: 0\n"))
             .respond("zpool", &[], CmdOutput::ok("tank\n"))
             .respond("zfs", &[], CmdOutput::failed(1, ""))
@@ -287,7 +266,10 @@ Id Refs Address                Size Name
         let checks = run_checks(&m, &cfg);
         let get = |n: &str| checks.iter().find(|c| c.name == n).unwrap();
         assert_eq!(get("kernel module vmm").status, Status::Ok);
+        assert_eq!(get("kernel module if_tap").status, Status::Ok);
         assert_eq!(get("kernel module nmdm").status, Status::Fail);
+        assert_eq!(get("kernel module if_bridge").status, Status::Fail);
+        assert!(m.calls().iter().any(|c| c == "kldstat -q -m if_tap"));
         assert_eq!(get("iommu").status, Status::Fail);
         assert_eq!(get("zpool").status, Status::Fail);
         assert_eq!(get("dataset zroot/juanitos/qubes").status, Status::Warn);

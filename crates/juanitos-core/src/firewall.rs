@@ -53,11 +53,13 @@ pub fn used_ips(qubes: &[Qube]) -> BTreeSet<Ipv4Addr> {
 }
 
 /// Give `q` an address and MAC if it is a network client and has none.
+/// Templates are clients too: they are only booted to be provisioned or
+/// updated (`jos template install|run`), which needs the network.
 pub fn assign_address(q: &mut Qube, others: &[Qube], default_netvm: Option<&str>) -> Result<()> {
-    if q.is_template() || q.kind == QubeKind::Net {
+    if q.kind == QubeKind::Net {
         return Ok(());
     }
-    if q.netvm.is_none() && default_netvm.is_none() {
+    if q.resolve_netvm(default_netvm).is_none() {
         return Ok(());
     }
     if q.mac.is_none() {
@@ -81,8 +83,10 @@ pub fn clients_of<'a>(
 ) -> Vec<&'a Qube> {
     qubes
         .iter()
-        .filter(|q| !q.is_template() && q.kind != QubeKind::Net)
-        .filter(|q| q.netvm.as_deref().or(default_netvm) == Some(netvm))
+        .filter(|q| q.kind != QubeKind::Net)
+        // Templates defined before they became clients have no address.
+        .filter(|q| !q.is_template() || q.ip.is_some())
+        .filter(|q| q.resolve_netvm(default_netvm) == Some(netvm))
         .collect()
 }
 
@@ -223,6 +227,22 @@ mod tests {
     }
 
     #[test]
+    fn offline_qubes_get_no_address_and_are_nobodys_client() {
+        let mut vault = Qube::new("vault", QubeKind::App, OsType::Freebsd);
+        vault.netvm = Some(crate::config::NO_NETVM.into());
+        assign_address(&mut vault, &[], Some("sys-firewall")).unwrap();
+        assert_eq!(vault.ip, None);
+        assert_eq!(vault.mac, None);
+        let mut work = Qube::new("work", QubeKind::App, OsType::Freebsd);
+        assign_address(&mut work, &[], Some("sys-firewall")).unwrap();
+        assert!(work.ip.is_some());
+        let all = [vault, work];
+        let clients = clients_of(&all, "sys-firewall", Some("sys-firewall"));
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].name, "work");
+    }
+
+    #[test]
     fn assign_address_rules() {
         let fw = {
             let mut q = Qube::new("sys-firewall", QubeKind::Firewall, OsType::Unikernel);
@@ -241,7 +261,7 @@ mod tests {
 
         let mut tmpl = Qube::new("t", QubeKind::Template, OsType::Freebsd);
         assign_address(&mut tmpl, &[], Some("sys-firewall")).unwrap();
-        assert!(tmpl.ip.is_none());
+        assert!(tmpl.ip.is_some(), "templates reach the network for updates");
 
         let mut isolated = Qube::new("iso", QubeKind::App, OsType::Freebsd);
         assign_address(&mut isolated, &[], None).unwrap();
@@ -264,11 +284,16 @@ mod tests {
         other.ip = Some(Ipv4Addr::new(10, 137, 0, 4));
         let net = Qube::new("sys-net", QubeKind::Net, OsType::Freebsd);
         let tmpl = Qube::new("fbsd14", QubeKind::Template, OsType::Freebsd);
-        let all = vec![fw.clone(), work.clone(), other, net, tmpl];
+        let mut dev = Qube::new("debian-13-dev", QubeKind::Template, OsType::Linux);
+        dev.ip = Some(Ipv4Addr::new(10, 137, 0, 9));
+        let all = vec![fw.clone(), work.clone(), other, net, tmpl, dev];
 
-        let clients = clients_of(&all, "sys-firewall", Some("sys-firewall"));
-        let names: Vec<&str> = clients.iter().map(|q| q.name.as_str()).collect();
-        assert_eq!(names, vec!["work"]);
+        let names: Vec<&str> = clients_of(&all, "sys-firewall", Some("sys-firewall"))
+            .iter()
+            .map(|q| q.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["work", "debian-13-dev"]);
+        let clients: Vec<&Qube> = all.iter().filter(|q| q.name == "work").collect();
         let upstream = clients_of(&all, "sys-net", Some("sys-firewall"));
         assert_eq!(upstream.len(), 1);
         assert_eq!(upstream[0].name, "sys-firewall");

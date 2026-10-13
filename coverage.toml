@@ -1,0 +1,24 @@
+# Line-coverage floors (%) checked by `cargo xtask coverage`.
+#
+# The gate fails when the total or a crate drops below its floor.
+# `cargo xtask coverage --ratchet` raises the floors to the measured
+# values (rounded down, never lowered): coverage only goes up.
+# Commit the updated file together with the tests that earned it.
+
+[gate]
+total = 93.3
+# Floor for a crate that is not listed below yet.
+new_crate = 60.0
+# Points kept below the measurement when ratcheting (host variance).
+slack = 0.5
+
+[crates]
+jos = 82.3
+jos-fb = 97.6
+jos-fwcfg = 96.9
+jos-fwnet = 91.7
+jos-gfx = 96.2
+jos-install = 95.4
+jos-release = 85.6
+jos-splash = 91.6
+juanitos-core = 95.6

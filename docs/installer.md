@@ -21,11 +21,11 @@ target.
 ## ISO layout
 
 ```text
-/                         FreeBSD 14.x base + kernel (live root, cd9660)
-/boot/loader.conf         vmm/nmdm/if_bridge/if_tap, hw.vmm.iommu.enable=1, comconsole
+/                         FreeBSD 15.x base + kernel (live root, cd9660)
+/boot/loader.conf         vmm/nmdm/if_bridge, hw.vmm.iommu.enable=1, serial console
 /etc/rc.conf              root_rw_mount=NO, varmfs, tmpmfs, seatd/dbus
 /etc/rc.local             → jos-install --live
-/usr/local/bin/           jos, jos-install, jos-release
+/usr/local/bin/           jos, jos-install, jos-release, jos-splash
 /usr/local/etc/rc.d/jos   autostart script (disabled on the live medium)
 /usr/local/share/juanitos/
     release.toml          version, FreeBSD release, build stage, package list
@@ -35,18 +35,67 @@ target.
 El Torito: EFI (efiboot.img: jos-boot.efi as BOOTX64.EFI + EFI/FREEBSD/LOADER.EFI) and, when present, BIOS cdboot
 ```
 
-## Running the installer
+## The graphical installer
 
-It starts automatically on the console. Exit it (Ctrl-C or answer no) for a
-shell; re-run with `jos-install`. Every answer can be given as a flag, so an
-unattended install is:
+`rc.local` starts `jos-install --live` once the boot splash has finished.
+On a machine with a framebuffer console it opens a full-screen wizard on
+`vt(4)` (virtual terminal 10, `--vt` to change it), drawn with the same
+font, palette and logo as the boot splash, so the hand-over from boot to
+installer is seamless.
+
+The flow borrows from the two installers QubesOS users know:
+
+- **Calamares**: a sidebar of steps walked in order (Welcome, Hardware,
+  Disk, System, Users, Summary, Install, Finish), with Back/Next at the
+  bottom and Next disabled until the page is valid;
+- **Anaconda**: nothing is written to disk before the Summary page, where
+  the erase has to be confirmed explicitly; the hardware check comes first,
+  so you learn whether the machine can run qubes before choosing a disk.
+
+| | |
+|---|---|
+| ![welcome](images/installer-1-welcome.png) | ![hardware](images/installer-2-hardware.png) |
+| ![disk](images/installer-3-disk.png) | ![system](images/installer-4-system.png) |
+| ![users](images/installer-5-users.png) | ![summary](images/installer-6-summary.png) |
+| ![install](images/installer-7-install.png) | ![finish](images/installer-8-finish.png) |
+
+Keyboard only (the live medium has no pointer driver in the console):
+`Tab`/`Shift-Tab` or `Up`/`Down` move between fields, `Up`/`Down` pick a
+disk in the list, `Enter`/`Space` press buttons and tick boxes, `Esc`
+goes back. Fields filter what they accept (digits for the swap size,
+host-name and user-name characters), passwords are masked.
+
+The installation runs on a background thread and reports each step, so
+the progress page stays responsive during the long extraction; keys typed
+during the install are discarded so a stray Enter cannot reboot the
+machine on the Finish page. **Exit to console** leaves for a login prompt
+(the full log is on `ttyv0`); **Reboot** restarts into the new system.
+
+The code is split so all of it is tested without a screen:
+
+```text
+crates/jos-install/src/wizard.rs   pages, fields, focus, validation (pure state machine)
+crates/jos-install/src/ui.rs       rendering into a jos-gfx Image (1280x800 logical, integer-scaled)
+crates/jos-install/src/gui.rs      event loop: keys -> wizard, frames -> display, installer thread
+crates/jos-fb                      vt(4) framebuffer + keyboard decoder, shared with jos-splash
+```
+
+`jos-install --screenshots DIR` renders every page to PNG on any host
+(`cargo xtask screenshots` refreshes the ones above).
+
+## Text and unattended installs
+
+Without a framebuffer (serial console, or `--ui text`) the same steps are
+asked as line prompts. Exit (Ctrl-C or answer no) for a shell; re-run with
+`jos-install`. Every answer can be given as a flag, so an unattended
+install is:
 
 ```sh
 jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
     --root-password '...' --user juan --user-password '...'
 ```
 
-What it does:
+## What it does
 
 1. Host checks (see above). Fails hard unless `--ignore-doctor`.
 2. Disk selection from `kern.disks` (optical/memory disks filtered out).

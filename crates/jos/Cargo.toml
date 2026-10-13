@@ -16,5 +16,8 @@ jos-fwcfg = { path = "../jos-fwcfg", features = ["serde"] }
 anyhow.workspace = true
 clap.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true

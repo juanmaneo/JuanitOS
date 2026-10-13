@@ -33,8 +33,12 @@ done
 [ -n "$ovmf" ] || { echo "OVMF not found (apt install ovmf)"; exit 1; }
 vars="$out/OVMF_VARS.fd"
 if [ ! -f "$vars" ]; then
-	v=$(dirname "$ovmf")/OVMF_VARS_4M.fd
-	[ -f "$v" ] || v=$(dirname "$ovmf")/OVMF_VARS.fd
+	# Debian: OVMF_VARS_4M.fd; Arch: OVMF_VARS.4m.fd; Fedora: OVMF_VARS.fd.
+	v=""
+	for f in OVMF_VARS_4M.fd OVMF_VARS.4m.fd OVMF_VARS.fd; do
+		[ -f "$(dirname "$ovmf")/$f" ] && { v=$(dirname "$ovmf")/$f; break; }
+	done
+	[ -n "$v" ] || { echo "OVMF_VARS not found next to $ovmf"; exit 1; }
 	cp "$v" "$vars"
 fi
 
@@ -58,7 +62,9 @@ fat_image() {
 		p=""
 		for comp in $(echo "$d" | tr '/' ' '); do
 			p="$p/$comp"
-			mmd -i "$img" "::$p" 2>/dev/null || true
+			# -D s: skip silently when the directory exists (mtools
+			# otherwise asks on the terminal, even with stdin closed).
+			mmd -D s -i "$img" "::$p" 2>/dev/null || true
 		done
 		mcopy -i "$img" -o "$src" "::$dst"
 	done
@@ -70,16 +76,18 @@ run() {
 	name=$1; secs=$2; shift 2
 	client_status=0
 	log="$out/$name.serial.log"
-	# Unix sockets cannot live on some mounts (WSL's DrvFs), so use /tmp.
-	mon="${TMPDIR:-/tmp}/jos-uefi-test-$name-$$.mon"
-	rm -f "$log" "$mon"
+	# The monitor is a loopback TCP port derived from our pid: Unix sockets
+	# cannot live on some mounts (WSL's DrvFs) and are refused by some
+	# sandboxes altogether.
+	monport=$((40000 + $$ % 20000))
+	rm -f "$log"
 	display="-display none"
 	[ "${DISPLAY_QEMU:-}" = 1 ] && display=""
 	qemu-system-x86_64 $accel -m 256 -machine q35 \
 		-drive if=pflash,format=raw,readonly=on,file="$ovmf" \
 		-drive if=pflash,format=raw,file="$vars" \
 		-serial file:"$log" $display -vga std \
-		-monitor unix:"$mon",server,nowait \
+		-monitor tcp:127.0.0.1:$monport,server,nowait \
 		-no-reboot "$@" &
 	pid=$!
 	i=0
@@ -89,16 +97,15 @@ run() {
 			echo "--- $name: client ---"
 			sh -c "$RUN_CLIENT" || client_status=$?
 		fi
-		if [ -S "$mon" ] && [ $((i % 2)) -eq 0 ]; then
+		if [ $((i % 2)) -eq 0 ]; then
 			printf 'screendump %s/%s-%02d.ppm\n' "$out" "$name" "$i" | \
-				socat - UNIX-CONNECT:"$mon" >/dev/null 2>&1 || \
+				socat -T2 - TCP:127.0.0.1:$monport >/dev/null 2>&1 || \
 			printf 'screendump %s/%s-%02d.ppm\n' "$out" "$name" "$i" | \
-				nc -U -q0 "$mon" >/dev/null 2>&1 || true
+				nc -w1 127.0.0.1 $monport >/dev/null 2>&1 || true
 		fi
 	done
 	kill $pid 2>/dev/null || true
 	wait $pid 2>/dev/null || true
-	rm -f "$mon"
 	echo "--- $name: serial log ---"
 	cat "$log" 2>/dev/null || true
 	ls "$out"/"$name"-*.ppm 2>/dev/null | tail -3

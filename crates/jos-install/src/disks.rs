@@ -19,11 +19,16 @@ impl Disk {
 
 /// Disk names from `sysctl -n kern.disks`, excluding optical drives
 /// (`cd*`) and memory disks (`md*`), which are never install targets.
+/// The kernel lists the most recently attached disk first; sorted by name
+/// so the first disk of the machine comes first.
 pub fn parse_kern_disks(text: &str) -> Vec<String> {
-    text.split_whitespace()
+    let mut disks: Vec<String> = text
+        .split_whitespace()
         .filter(|d| !d.starts_with("cd") && !d.starts_with("md"))
         .map(String::from)
-        .collect()
+        .collect();
+    disks.sort();
+    disks
 }
 
 /// `diskinfo -v` output: tab-separated `value\t# comment` lines.
@@ -73,8 +78,8 @@ mod tests {
     #[test]
     fn kern_disks_filters_media() {
         assert_eq!(
-            parse_kern_disks("vtbd0 cd0 ada0 md0 nda0\n"),
-            vec!["vtbd0", "ada0", "nda0"]
+            parse_kern_disks("vtbd1 vtbd0 cd0 ada0 md0 nda0\n"),
+            vec!["ada0", "nda0", "vtbd0", "vtbd1"]
         );
         assert!(parse_kern_disks("").is_empty());
     }

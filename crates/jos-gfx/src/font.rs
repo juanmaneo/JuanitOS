@@ -1,7 +1,12 @@
 //! A 5×7 bitmap font, enough for a boot menu and status lines.
 //!
-//! Lowercase letters render as uppercase; unknown characters render as a
-//! small box so a typo is visible rather than silently blank.
+//! Uppercase, digits and punctuation for the boot card, plus lowercase
+//! letters for the installer (user names must be shown as typed). A
+//! character without a glyph of its own falls back to its uppercase form;
+//! unknown characters render as a small box so a typo is visible rather
+//! than silently blank.
+
+use alloc::string::String;
 
 use crate::color::Rgba;
 use crate::image::{Image, Rect};
@@ -410,14 +415,75 @@ const GLYPHS: &[(char, Glyph)] = &[
     ),
 ];
 
-/// Look a glyph up; lowercase folds to uppercase.
-pub fn glyph(c: char) -> &'static Glyph {
-    let c = c.to_ascii_uppercase();
+/// Lowercase letters and a few symbols the installer needs. 7 rows leave
+/// no room for a separate descender line, so `g j p q y` sit one row
+/// higher (the HD44780 compromise).
+#[rustfmt::skip]
+const EXTRA: &[(char, Glyph)] = &[
+    ('a', [".....", ".....", ".###.", "....#", ".####", "#...#", ".####"]),
+    ('b', ["#....", "#....", "#.##.", "##..#", "#...#", "#...#", "####."]),
+    ('c', [".....", ".....", ".###.", "#....", "#....", "#...#", ".###."]),
+    ('d', ["....#", "....#", ".##.#", "#..##", "#...#", "#...#", ".####"]),
+    ('e', [".....", ".....", ".###.", "#...#", "#####", "#....", ".###."]),
+    ('f', ["..##.", ".#..#", ".#...", "###..", ".#...", ".#...", ".#..."]),
+    ('g', [".....", ".####", "#...#", "#...#", ".####", "....#", ".###."]),
+    ('h', ["#....", "#....", "#.##.", "##..#", "#...#", "#...#", "#...#"]),
+    ('i', ["..#..", ".....", ".##..", "..#..", "..#..", "..#..", ".###."]),
+    ('j', ["...#.", ".....", "..##.", "...#.", "...#.", "#..#.", ".##.."]),
+    ('k', ["#....", "#....", "#..#.", "#.#..", "##...", "#.#..", "#..#."]),
+    ('l', [".##..", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."]),
+    ('m', [".....", ".....", "##.#.", "#.#.#", "#.#.#", "#...#", "#...#"]),
+    ('n', [".....", ".....", "#.##.", "##..#", "#...#", "#...#", "#...#"]),
+    ('o', [".....", ".....", ".###.", "#...#", "#...#", "#...#", ".###."]),
+    ('p', [".....", "####.", "#...#", "#...#", "####.", "#....", "#...."]),
+    ('q', [".....", ".####", "#...#", "#...#", ".####", "....#", "....#"]),
+    ('r', [".....", ".....", "#.##.", "##..#", "#....", "#....", "#...."]),
+    ('s', [".....", ".....", ".####", "#....", ".###.", "....#", "####."]),
+    ('t', [".#...", ".#...", "###..", ".#...", ".#...", ".#..#", "..##."]),
+    ('u', [".....", ".....", "#...#", "#...#", "#...#", "#..##", ".##.#"]),
+    ('v', [".....", ".....", "#...#", "#...#", "#...#", ".#.#.", "..#.."]),
+    ('w', [".....", ".....", "#...#", "#...#", "#.#.#", "#.#.#", ".#.#."]),
+    ('x', [".....", ".....", "#...#", ".#.#.", "..#..", ".#.#.", "#...#"]),
+    ('y', [".....", "#...#", "#...#", "#...#", ".####", "....#", ".###."]),
+    ('z', [".....", ".....", "#####", "...#.", "..#..", ".#...", "#####"]),
+    ('`', [".#...", "..#..", ".....", ".....", ".....", ".....", "....."]),
+    (';', [".....", "..#..", ".....", ".....", "..#..", "..#..", ".#..."]),
+    ('$', ["..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."]),
+    ('{', ["...#.", "..#..", "..#..", ".#...", "..#..", "..#..", "...#."]),
+    ('}', [".#...", "..#..", "..#..", "...#.", "..#..", "..#..", ".#..."]),
+];
+
+fn lookup(c: char) -> Option<&'static Glyph> {
     GLYPHS
         .iter()
+        .chain(EXTRA)
         .find(|(g, _)| *g == c)
         .map(|(_, rows)| rows)
+}
+
+/// Look a glyph up; a character without its own glyph folds to uppercase.
+pub fn glyph(c: char) -> &'static Glyph {
+    lookup(c)
+        .or_else(|| lookup(c.to_ascii_uppercase()))
         .unwrap_or(&UNKNOWN)
+}
+
+/// `text` cut to at most `max_width` pixels at `scale`, with a trailing
+/// `...` when something was cut.
+pub fn ellipsize(text: &str, max_width: i32, scale: i32) -> String {
+    if text_width(text, scale) <= max_width {
+        return String::from(text);
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        out.push(ch);
+        if text_width(&out, scale) + text_width("...", scale) + ADVANCE * scale > max_width {
+            out.pop();
+            break;
+        }
+    }
+    out.push_str("...");
+    out
 }
 
 /// Width in pixels of `text` at integer `scale`.
@@ -466,7 +532,7 @@ mod tests {
 
     #[test]
     fn every_glyph_is_well_formed() {
-        for (ch, rows) in GLYPHS {
+        for (ch, rows) in GLYPHS.iter().chain(EXTRA) {
             for row in rows {
                 assert_eq!(row.len(), 5, "glyph {ch:?} row {row:?}");
                 assert!(
@@ -476,18 +542,32 @@ mod tests {
             }
         }
         // No duplicates.
-        for (i, (a, _)) in GLYPHS.iter().enumerate() {
+        let all: alloc::vec::Vec<_> = GLYPHS.iter().chain(EXTRA).collect();
+        for (i, (a, _)) in all.iter().enumerate() {
             assert!(
-                GLYPHS.iter().skip(i + 1).all(|(b, _)| b != a),
+                all.iter().skip(i + 1).all(|(b, _)| b != a),
                 "duplicate glyph {a:?}"
             );
         }
     }
 
     #[test]
-    fn lowercase_folds_and_unknown_is_boxed() {
-        assert_eq!(glyph('a'), glyph('A'));
+    fn lowercase_has_glyphs_and_unknown_is_boxed() {
+        assert_ne!(glyph('a'), glyph('A'));
+        for c in 'a'..='z' {
+            assert_ne!(glyph(c), &UNKNOWN, "{c}");
+        }
         assert_eq!(glyph('é'), &UNKNOWN);
+        assert_eq!(glyph('`'), lookup('`').unwrap());
+    }
+
+    #[test]
+    fn ellipsize_cuts_long_text() {
+        assert_eq!(ellipsize("short", 1000, 1), "short");
+        let cut = ellipsize("a fairly long line of text", 60, 1);
+        assert!(cut.ends_with("..."));
+        assert!(text_width(&cut, 1) <= 60, "{cut}");
+        assert_eq!(ellipsize("abc", 0, 1), "...");
     }
 
     #[test]

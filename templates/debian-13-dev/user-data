@@ -1,0 +1,78 @@
+#cloud-config
+# JuanitOS template "debian-13-dev": Debian 13 (trixie) for development,
+# with Docker Engine, Compose and Buildx from Debian's own (signed)
+# archive.
+#
+# `jos template install debian-13-dev` writes Debian's official
+# genericcloud image to the template's zvol and boots it once with this
+# file on a NoCloud seed disk ("cidata"); cloud-init provisions the system
+# and powers it off, then jos snapshots the template as @base. App qubes are
+# ZFS clones of that snapshot.
+
+hostname: debian-13-dev
+
+users:
+  - default
+  # QubesOS convention: one unprivileged "user" with passwordless sudo. The
+  # only way in is the serial console, reachable from dom0 alone.
+  - name: user
+    gecos: JuanitOS user
+    shell: /bin/bash
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+
+package_update: true
+package_upgrade: true
+packages:
+  # containers
+  - docker.io
+  - docker-compose
+  - docker-buildx
+  - containerd
+  # everyday development
+  - build-essential
+  - pkg-config
+  - git
+  - curl
+  - ca-certificates
+  - jq
+  - tmux
+  - vim
+  - htop
+  - unzip
+  - openssh-client
+  - python3
+  - python3-venv
+
+write_files:
+  # `jos console <qube>` lands in a shell: autologin on the serial console.
+  - path: /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+    permissions: "0644"
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=-/sbin/agetty --autologin user --keep-baud 115200,57600,38400,9600 - $TERM
+  # Docker's data on the qube's own disk, logs bounded.
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {
+        "log-driver": "local",
+        "log-opts": { "max-size": "10m" }
+      }
+
+runcmd:
+  - [usermod, -aG, docker, user]
+  - [systemctl, enable, containerd.service, docker.service]
+  - [systemctl, daemon-reload]
+  - [apt-get, clean]
+  # App qubes are clones of this template: cloud-init must not run again
+  # in them (no seed disk there, and they keep the template's identity).
+  - [touch, /etc/cloud/cloud-init.disabled]
+
+power_state:
+  mode: poweroff
+  message: JuanitOS template debian-13-dev provisioned
+  timeout: 60
+  condition: true

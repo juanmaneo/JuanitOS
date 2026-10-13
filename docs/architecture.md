@@ -64,9 +64,17 @@ tables on the host.
   tap `tapd-<qube>` on their own bridge `br-<qube>` (guest slot 4); that is
   where their clients plug in.
 - `sys-net` has no upstream tap; it gets the physical NIC via passthrough
-  and offers `br-sys-net` to `sys-firewall`.
+  and offers `br-sys-net` to `sys-firewall`. Inside, the `fbsd15-net`
+  template runs DHCP on the NIC and dnsmasq + pf NAT on `10.138.0.0/24`
+  towards the bridge (`docs/templates.md`).
 - `sys-firewall` plugs into `br-sys-net` and offers `br-sys-firewall` to
   app qubes.
+- A qube with `uplink = "<iface>"` (`jos create --uplink em0`) gets its
+  upstream tap on a bridge `bru-<qube>` shared with that host interface
+  instead of a NetVM's bridge. That is how `sys-net` reaches the world on
+  a machine without IOMMU (no NIC passthrough), and how a template is
+  provisioned before any NetVM exists (`jos template install --uplink`).
+  Less isolating than passthrough: the NIC driver runs in dom0.
 - The host never enables IP forwarding; all routing happens inside VMs.
 
 Interface names are truncated to FreeBSD's 15-character limit.
@@ -81,9 +89,12 @@ and loops:
 1. Resolve the NetVM (explicit `netvm`, else `default_netvm`, none for `net`).
 2. `ifconfig` the bridge(s) and tap(s) into existence.
 3. Run `bhyve` with the guest PCI layout documented in
-   `crates/juanitos-core/src/bhyve.rs`. UEFI boot uses the `edk2-bhyve`
-   bootrom; the serial console is an `nmdm` pair reachable via
-   `jos console <name>`.
+   `crates/juanitos-core/src/bhyve.rs` (virtio disk and NICs; NVMe and
+   e1000 for Redox guests). UEFI boot uses the `edk2-bhyve` bootrom; the
+   serial console is an `nmdm` pair reachable via `jos console <name>`,
+   and `jos run <name> <command>` types a command there and returns its
+   output and exit status (`crates/juanitos-core/src/console.rs`: the
+   templates' autologin shell, or a login for Redox).
 4. On exit, `bhyvectl --destroy` releases the VM slot. bhyve's exit code
    says why the guest left: `0` reset → boot again, `1` poweroff / `2` halt
    → finish, `3` triple fault → finish (reported), anything else → error.

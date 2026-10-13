@@ -64,6 +64,10 @@ impl std::fmt::Display for QubeKind {
 pub enum OsType {
     Freebsd,
     Linux,
+    /// Redox OS (the Relibc-based guest). Redox's virtio drivers need the
+    /// modern (1.0) transport that bhyve does not emulate, so these qubes
+    /// get an NVMe disk and an e1000 NIC instead of virtio devices.
+    Redox,
     /// A single-purpose Rust unikernel booted from a read-only image
     /// (`Qube::kernel`) instead of a zvol. See `docs/unikernel-firewall.md`.
     Unikernel,
@@ -74,7 +78,52 @@ impl OsType {
         match self {
             OsType::Freebsd => "freebsd",
             OsType::Linux => "linux",
+            OsType::Redox => "redox",
             OsType::Unikernel => "unikernel",
+        }
+    }
+
+    /// bhyve emulation of the boot disk (`-s N,<emulation>,<path>`).
+    pub fn disk_emulation(&self) -> &'static str {
+        match self {
+            OsType::Redox => "nvme",
+            _ => "virtio-blk",
+        }
+    }
+
+    /// bhyve emulation of the network interfaces.
+    pub fn nic_emulation(&self) -> &'static str {
+        match self {
+            OsType::Redox => "e1000",
+            _ => "virtio-net",
+        }
+    }
+
+    /// True when the guest can have a shell on its serial console for
+    /// `jos run` to type commands into (everything but a unikernel; Redox's
+    /// `ion` understands the marker script too).
+    pub fn has_console_shell(&self) -> bool {
+        !matches!(self, OsType::Unikernel)
+    }
+
+    /// How `jos run` frames a command for the guest's shell.
+    pub fn console_dialect(&self) -> crate::console::Dialect {
+        match self {
+            OsType::Redox => crate::console::Dialect::Ion,
+            _ => crate::console::Dialect::Posix,
+        }
+    }
+
+    /// Credentials `jos run` types when the console shows a login prompt:
+    /// the stock Redox image has a password-less `user`; the FreeBSD and
+    /// Linux templates log their user in automatically.
+    pub fn console_login(&self) -> Option<crate::console::Login> {
+        match self {
+            OsType::Redox => Some(crate::console::Login {
+                user: "user".into(),
+                password: String::new(),
+            }),
+            _ => None,
         }
     }
 }
@@ -85,6 +134,7 @@ impl std::str::FromStr for OsType {
         match s.to_ascii_lowercase().as_str() {
             "freebsd" => Ok(OsType::Freebsd),
             "linux" => Ok(OsType::Linux),
+            "redox" => Ok(OsType::Redox),
             "unikernel" => Ok(OsType::Unikernel),
             other => Err(Error::Other(format!("unknown os type: {other}"))),
         }
@@ -136,6 +186,12 @@ pub struct Qube {
     pub netvm: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pci_passthrough: Vec<PciAddr>,
+    /// Host interface bridged into the qube's upstream NIC instead of a
+    /// NetVM: how a `net` qube reaches the world on a machine without
+    /// IOMMU (no NIC passthrough), and how a template is provisioned
+    /// before any NetVM exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink: Option<String>,
     #[serde(default)]
     pub autostart: bool,
     #[serde(default = "default_true")]
@@ -182,6 +238,7 @@ impl Qube {
             disk_gb: if unikernel { 0 } else { default_disk_gb() },
             netvm: None,
             pci_passthrough: Vec::new(),
+            uplink: None,
             autostart: false,
             uefi: true,
             extra_bhyve_args: Vec::new(),
@@ -221,12 +278,30 @@ impl Qube {
     pub fn provides_network(&self) -> bool {
         matches!(self.kind, QubeKind::Net | QubeKind::Firewall)
     }
+
+    /// The qube's NetVM: its own `netvm`, else `default` (the global
+    /// `default_netvm`). NetVMs own physical NICs instead, and a qube set
+    /// to [`NO_NETVM`] has no network at all.
+    pub fn resolve_netvm<'a>(&'a self, default: Option<&'a str>) -> Option<&'a str> {
+        if self.kind == QubeKind::Net {
+            return None;
+        }
+        match self.netvm.as_deref() {
+            Some(NO_NETVM) => None,
+            Some(n) => Some(n),
+            None => default,
+        }
+    }
 }
+
+/// `netvm` value of a qube without network. Stored explicitly, because an
+/// absent `netvm` means "the default NetVM". Reserved as a qube name.
+pub const NO_NETVM: &str = "none";
 
 pub fn validate_name(name: &str) -> Result<()> {
     let bad = || Error::InvalidName(name.to_string());
     let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > 31 {
+    if bytes.is_empty() || bytes.len() > 31 || name == NO_NETVM {
         return Err(bad());
     }
     let ok_first = bytes
@@ -259,11 +334,17 @@ fn default_config_dir() -> String {
 fn default_run_dir() -> String {
     "/var/run/juanitos".into()
 }
+fn default_cache_dir() -> String {
+    "/var/cache/juanitos".into()
+}
 fn default_uefi_firmware() -> String {
     "/usr/local/share/uefi-firmware/BHYVE_UEFI.fd".into()
 }
 fn default_netvm() -> Option<String> {
     Some("sys-firewall".into())
+}
+fn default_console_dir() -> String {
+    "/dev".into()
 }
 
 /// Host-wide settings, normally loaded from `/usr/local/etc/juanitos/jos.toml`.
@@ -277,10 +358,17 @@ pub struct GlobalConfig {
     pub config_dir: String,
     #[serde(default = "default_run_dir")]
     pub run_dir: String,
+    /// Downloaded guest images (`jos template install`).
+    #[serde(default = "default_cache_dir")]
+    pub cache_dir: String,
     #[serde(default = "default_uefi_firmware")]
     pub uefi_firmware: String,
     #[serde(default = "default_netvm", skip_serializing_if = "Option::is_none")]
     pub default_netvm: Option<String>,
+    /// Where the `nmdm(4)` console pairs live (`/dev`; tests point it at
+    /// a directory of pseudo-terminals).
+    #[serde(default = "default_console_dir")]
+    pub console_dir: String,
 }
 
 impl Default for GlobalConfig {
@@ -290,8 +378,10 @@ impl Default for GlobalConfig {
             dataset_root: default_dataset_root(),
             config_dir: default_config_dir(),
             run_dir: default_run_dir(),
+            cache_dir: default_cache_dir(),
             uefi_firmware: default_uefi_firmware(),
             default_netvm: default_netvm(),
+            console_dir: default_console_dir(),
         }
     }
 }
@@ -333,17 +423,23 @@ impl GlobalConfig {
 
     /// Guest side of the nmdm console pair (passed to bhyve).
     pub fn console_device(&self, name: &str) -> String {
-        format!("/dev/nmdm-{name}.1A")
+        format!("{}/nmdm-{name}.1A", self.console_dir)
     }
 
-    /// Host side of the nmdm console pair (used by `cu`).
+    /// Host side of the nmdm console pair (used by `cu` and `jos run`).
     pub fn console_host_device(&self, name: &str) -> String {
-        format!("/dev/nmdm-{name}.1B")
+        format!("{}/nmdm-{name}.1B", self.console_dir)
     }
 
     /// Raw disk image carrying a unikernel firewall's generated config.
     pub fn firewall_config_disk(&self, name: &str) -> String {
         format!("{}/{name}.fwcfg", self.run_dir)
+    }
+
+    /// The copy of a unikernel's `kernel` image it boots from (refreshed
+    /// before every boot).
+    pub fn unikernel_boot_image(&self, name: &str) -> String {
+        format!("{}/{name}.boot.img", self.run_dir)
     }
 }
 
@@ -493,6 +589,7 @@ mod tests {
         for ok in valid {
             assert!(validate_name(ok).is_ok(), "{ok} should be valid");
         }
+        assert!(validate_name(NO_NETVM).is_err(), "reserved");
         let invalid: [&str; 9] = [
             "",
             "-x",

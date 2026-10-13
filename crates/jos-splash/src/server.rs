@@ -1,7 +1,7 @@
 //! The daemon: a scene, a display, and a message loop.
 //!
 //! [`Splash`] is the pure part (state transitions, redraw policy) and is
-//! tested with a [`NullDisplay`](crate::fb::NullDisplay). [`serve`] wires
+//! tested with a [`NullDisplay`](jos_fb::NullDisplay). [`serve`] wires
 //! it to a Unix datagram socket and the keyboard on hosts that have them.
 
 use std::time::Duration;
@@ -10,11 +10,9 @@ use anyhow::Context;
 use jos_gfx::scene::render_screen;
 use jos_gfx::{Scene, Stage};
 
-use crate::fb::Display;
 use crate::proto::{Finish, Message};
-
-/// Escape key, the only one the splash listens to.
-pub const KEY_ESC: u8 = 0x1b;
+use jos_fb::keys::{Decoder, Key};
+use jos_fb::Display;
 
 /// Poll period for the socket and the keyboard.
 pub const TICK: Duration = Duration::from_millis(50);
@@ -92,14 +90,21 @@ impl<D: Display> Splash<D> {
         }
     }
 
-    /// Consume pending keys: Esc ends the splash on the console.
+    /// Consume pending keys: Esc ends the splash on the console. Escape
+    /// sequences (arrows, function keys) are decoded and ignored, so only
+    /// the Escape key itself counts.
     pub fn handle_keys(&mut self) -> Flow {
-        while let Some(key) = self.display.poll_key() {
-            if key == KEY_ESC {
-                return Flow::ExitConsole;
-            }
+        let mut decoder = Decoder::new();
+        let mut keys = Vec::new();
+        while let Some(b) = self.display.poll_key() {
+            keys.extend(decoder.feed(b));
         }
-        Flow::Continue
+        keys.extend(decoder.flush());
+        if keys.contains(&Key::Esc) {
+            Flow::ExitConsole
+        } else {
+            Flow::Continue
+        }
     }
 
     /// Redraw if anything changed since the last frame.
@@ -213,7 +218,7 @@ pub fn send(_msg: &Message, _socket_path: &std::path::Path) -> anyhow::Result<bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fb::NullDisplay;
+    use jos_fb::NullDisplay;
 
     #[test]
     fn stages_light_up_and_only_changes_redraw() {
@@ -264,11 +269,12 @@ mod tests {
     #[test]
     fn escape_key_ends_on_console() {
         let mut d = NullDisplay::new(640, 480);
-        d.keys = vec![KEY_ESC, b'a'];
+        d.type_bytes(b"a\x1b");
         let mut s = Splash::new(d, None);
         assert_eq!(s.handle_keys(), Flow::ExitConsole);
         let mut d = NullDisplay::new(640, 480);
-        d.keys = vec![b'x'];
+        // Arrow keys start with ESC but are not Escape.
+        d.type_bytes(b"x\x1b[A\x1b[B");
         let mut s = Splash::new(d, None);
         assert_eq!(s.handle_keys(), Flow::Continue);
     }

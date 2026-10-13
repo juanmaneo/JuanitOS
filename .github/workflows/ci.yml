@@ -1,0 +1,34 @@
+# Everything is in `cargo xtask ci` (xtask/src/main.rs), so CI and a
+# developer's machine run exactly the same checks.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml selects the toolchain, its components and the
+      # UEFI/FreeBSD targets; `rustup show` installs them.
+      - run: rustup show && rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # OVMF lets the jos-release QEMU tests run instead of being skipped.
+      - run: sudo apt-get update && sudo apt-get install -y ovmf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/jos-boot
+            crates/jos-firewall
+      - run: cargo xtask ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lcov
+          path: target/coverage/lcov.info

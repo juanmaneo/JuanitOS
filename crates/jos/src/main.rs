@@ -73,6 +73,20 @@ enum Cmd {
     Kill { name: String },
     /// Attach to a qube's serial console.
     Console { name: String },
+    /// Run a command inside a qube over its serial console and print the
+    /// output (the templates log a shell in on the console).
+    Run {
+        name: String,
+        /// Seconds to wait for the command to finish.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+        /// Log in as USER[:PASSWORD] if the console shows a login prompt
+        /// (default: the guest OS's stock user; Redox: `user`).
+        #[arg(long, value_name = "USER[:PASSWORD]")]
+        login: Option<String>,
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
     /// PCI passthrough helpers.
     Pci {
         #[command(subcommand)]
@@ -118,6 +132,10 @@ struct CreateArgs {
     /// PCI devices to pass through (B/S/F), repeatable.
     #[arg(long = "pci", value_name = "B/S/F", value_parser = parse_pci)]
     pci: Vec<PciAddr>,
+    /// Host interface bridged straight into the qube's upstream NIC (a
+    /// `net` qube on a machine without NIC passthrough).
+    #[arg(long, value_name = "IFACE")]
+    uplink: Option<String>,
     #[arg(long)]
     autostart: bool,
     /// Boot with the legacy bhyveload path instead of UEFI.
@@ -156,6 +174,41 @@ enum PciCmd {
 
 #[derive(Subcommand)]
 enum TemplateCmd {
+    /// List the templates `jos template install` can build.
+    Recipes,
+    /// Build a template from its distribution's cloud image: download and
+    /// verify, write to a zvol, provision on first boot, snapshot @base.
+    Install {
+        /// Recipe name (see `jos template recipes`).
+        recipe: String,
+        /// Template qube name (default: the recipe's).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        disk_gb: Option<u64>,
+        /// Write the image and the seed but skip the provisioning boot.
+        #[arg(long)]
+        no_boot: bool,
+        /// Provision through this host interface instead of the NetVM
+        /// (before sys-net exists, or on a dom0 that has the NIC).
+        #[arg(long, value_name = "IFACE")]
+        uplink: Option<String>,
+        /// Use an already downloaded image (with --checksums) instead of
+        /// fetching: a dom0 without network gets it from a USB stick.
+        #[arg(long, value_name = "FILE", requires = "checksums")]
+        image: Option<PathBuf>,
+        /// The distribution's checksum list that covers --image.
+        #[arg(long, value_name = "FILE")]
+        checksums: Option<PathBuf>,
+    },
+    /// Boot a template for maintenance (updates) until it powers off; take
+    /// a snapshot afterwards so new clones get the changes.
+    Run {
+        name: String,
+        /// Attach a cloud-init seed ISO (NoCloud `cidata`).
+        #[arg(long)]
+        seed: Option<String>,
+    },
     /// Snapshot a template so future clones use its current state.
     Snapshot {
         name: String,
@@ -292,12 +345,13 @@ impl App {
             } else {
                 "stopped"
             };
-            let netvm = if q.is_template() {
-                "-".to_string()
-            } else {
-                self.vm()
+            // Templates use theirs only while being provisioned or updated.
+            let netvm = match &q.uplink {
+                Some(iface) => format!("uplink:{iface}"),
+                None => self
+                    .vm()
                     .effective_netvm(&q)
-                    .unwrap_or_else(|| "none".into())
+                    .unwrap_or_else(|| "none".into()),
             };
             let pci: Vec<String> = q.pci_passthrough.iter().map(|a| a.to_string()).collect();
             let ip = q.ip.map(|i| i.to_string()).unwrap_or_else(|| "-".into());
@@ -344,12 +398,13 @@ impl App {
             q.disk_gb = d;
         }
         q.netvm = match a.netvm.as_deref() {
-            Some("none") => None,
+            // Kept explicitly: an absent netvm means the default one.
             Some(n) => Some(n.to_string()),
             None if a.kind == QubeKind::Net => None,
             None => self.cfg.default_netvm.clone(),
         };
         q.pci_passthrough = a.pci;
+        q.uplink = a.uplink;
         q.autostart = a.autostart;
         q.uefi = !a.no_uefi;
         q.label = a.label;
@@ -378,7 +433,7 @@ impl App {
                 bail!("{t} is not a template qube");
             }
         }
-        if let Some(n) = &q.netvm {
+        if let Some(n) = q.resolve_netvm(None) {
             if let Ok(nq) = self.store.get(n) {
                 if !nq.provides_network() {
                     bail!("{n} is not a net or firewall qube");
@@ -605,6 +660,39 @@ impl App {
         Ok(())
     }
 
+    fn template_install(
+        &self,
+        recipe: &str,
+        opts: &juanitos_core::template::InstallOptions,
+    ) -> Result<()> {
+        let Some(r) = juanitos_core::template::find(recipe) else {
+            bail!("unknown template recipe {recipe:?} (see `jos template recipes`)");
+        };
+        juanitos_core::template::TemplateInstaller {
+            runner: self.runner.as_ref(),
+            cfg: &self.cfg,
+            store: &self.store,
+            dry_run: self.dry_run,
+        }
+        .install(r, opts)?;
+        Ok(())
+    }
+
+    fn template_run(&self, name: &str, seed: Option<&str>) -> Result<()> {
+        let q = self.store.get(name)?;
+        if !q.is_template() {
+            bail!("{name} is not a template qube (use `jos start`)");
+        }
+        self.check_not_running(name)?;
+        if self.dry_run {
+            println!("+ {}", self.vm().maintenance_command(&q, seed)?.to_shell());
+            return Ok(());
+        }
+        let exit = self.vm().maintain(&q, seed)?;
+        println!("{name}: {exit}; `jos template snapshot {name} <snap>` to publish the changes");
+        Ok(())
+    }
+
     fn template_snapshot(&self, name: &str, snap: Option<String>) -> Result<()> {
         let q = self.store.get(name)?;
         if !q.is_template() {
@@ -614,6 +702,89 @@ impl App {
         let full = self.storage().snapshot_template(name, &snap)?;
         println!("created {full}");
         Ok(())
+    }
+}
+
+/// `jos run` on the host: the nmdm device, read without blocking.
+/// `USER[:PASSWORD]` of `jos run --login`.
+fn parse_login(s: &str) -> juanitos_core::console::Login {
+    let (user, password) = s.split_once(':').unwrap_or((s, ""));
+    juanitos_core::console::Login {
+        user: user.to_string(),
+        password: password.to_string(),
+    }
+}
+
+#[cfg(unix)]
+fn console_run(
+    dev: &str,
+    command: &str,
+    timeout: std::time::Duration,
+    login: Option<&juanitos_core::console::Login>,
+    dialect: juanitos_core::console::Dialect,
+) -> Result<juanitos_core::console::Outcome> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(dev)
+        .with_context(|| format!("opening {dev} (is the qube running?)"))?;
+    set_raw(&file).with_context(|| format!("setting {dev} to raw mode"))?;
+    let poll = |f: &mut std::fs::File| -> std::io::Result<Vec<u8>> {
+        let mut buf = [0u8; 4096];
+        match f.read(&mut buf) {
+            Ok(n) => Ok(buf.get(..n).unwrap_or(&[]).to_vec()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    };
+    Ok(juanitos_core::console::run(
+        &mut file, command, timeout, login, dialect, poll,
+    )?)
+}
+
+/// The host side of an nmdm pair is a tty: without raw mode its line
+/// discipline would echo the guest's output straight back to the guest
+/// as input (the guest shell would then try to run its own prompt).
+#[cfg(unix)]
+fn set_raw(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: termios is plain data filled in by tcgetattr; the fd is open
+    // for the lifetime of `file`.
+    unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut t) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        libc::cfmakeraw(&mut t);
+        if libc::tcsetattr(fd, libc::TCSANOW, &t) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn console_run(
+    _dev: &str,
+    _command: &str,
+    _timeout: std::time::Duration,
+    _login: Option<&juanitos_core::console::Login>,
+    _dialect: juanitos_core::console::Dialect,
+) -> Result<juanitos_core::console::Outcome> {
+    bail!("jos run needs a FreeBSD host (nmdm console devices)")
+}
+
+fn template_recipes() {
+    println!("{:<16} {:<8} {:>5}  DESCRIPTION", "RECIPE", "OS", "DISK");
+    for r in juanitos_core::template::RECIPES {
+        println!(
+            "{:<16} {:<8} {:>4}G  {}",
+            r.name, r.os, r.disk_gb, r.summary
+        );
     }
 }
 
@@ -655,6 +826,50 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Run {
+            name,
+            timeout,
+            login,
+            command,
+        } => {
+            let q = app.store.get(&name)?;
+            if !q.os.has_console_shell() {
+                bail!(
+                    "{name} runs {} which has no shell on its serial console; `jos run` needs one",
+                    q.os
+                );
+            }
+            let dev = app.cfg.console_host_device(&name);
+            let command = command.join(" ");
+            let login = login
+                .as_deref()
+                .map(parse_login)
+                .or_else(|| q.os.console_login());
+            let dialect = q.os.console_dialect();
+            if cli.dry_run {
+                println!(
+                    "+ type on {dev}: {}",
+                    juanitos_core::console::script_for(dialect, &command).trim_end()
+                );
+                if let Some(l) = &login {
+                    println!("  (logging in as {} first if asked)", l.user);
+                }
+                return Ok(());
+            }
+            let outcome = console_run(
+                &dev,
+                &command,
+                std::time::Duration::from_secs(timeout),
+                login.as_ref(),
+                dialect,
+            )?;
+            print!("{}", outcome.output);
+            match outcome.status {
+                Some(0) => Ok(()),
+                Some(code) => std::process::exit(code),
+                None => bail!("{name}: could not read the exit status"),
+            }
+        }
         Cmd::Pci { cmd } => match cmd {
             PciCmd::List { gpus, ready } => app.pci_list(gpus, ready),
             PciCmd::Pptdevs { addrs } => {
@@ -663,6 +878,30 @@ fn main() -> Result<()> {
             }
         },
         Cmd::Template { cmd } => match cmd {
+            TemplateCmd::Recipes => {
+                template_recipes();
+                Ok(())
+            }
+            TemplateCmd::Install {
+                recipe,
+                name,
+                disk_gb,
+                no_boot,
+                uplink,
+                image,
+                checksums,
+            } => app.template_install(
+                &recipe,
+                &juanitos_core::template::InstallOptions {
+                    name,
+                    disk_gb,
+                    no_boot,
+                    uplink,
+                    image,
+                    checksums,
+                },
+            ),
+            TemplateCmd::Run { name, seed } => app.template_run(&name, seed.as_deref()),
             TemplateCmd::Snapshot { name, snap } => app.template_snapshot(&name, snap),
         },
         Cmd::Firewall { cmd } => app.firewall(cmd),

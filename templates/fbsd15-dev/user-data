@@ -1,0 +1,49 @@
+#cloud-config
+# JuanitOS template "fbsd15-dev": FreeBSD 15.1 for development, with
+# Podman (OCI containers on FreeBSD jails, `podman-suite`).
+#
+# `jos template install fbsd15-dev` writes FreeBSD's official
+# BASIC-CLOUDINIT ZFS image to the template's zvol and boots it once with
+# this file on a NoCloud seed disk ("cidata"). FreeBSD's nuageinit(7)
+# applies it on that first boot only (`firstboot`), so app qubes cloned
+# from the template never re-run it. The last command powers the template
+# off; jos then snapshots it as @base.
+#
+# Everything is done in `runcmd`, in order: nuageinit's other keys run in
+# an order of its own, and Podman's setup depends on its packages.
+#
+# Two things learnt booting this on FreeBSD 15.1:
+# - the image uses pkgbase, so `pkg upgrade` may install a newer kernel:
+#   do not load kernel modules in this boot (fdescfs and pf come up from
+#   fstab/rc.conf on the next one, i.e. in every app qube);
+# - nuageinit's scripts run while /firstboot exists, and /etc/rc only
+#   removes it at the very end of the boot. Remove it here before powering
+#   off, or a slow boot gets cut short and everything runs again.
+
+hostname: fbsd15-dev
+
+runcmd:
+  # Packages: Podman with the ocijail runtime and buildah, plus tools.
+  - env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
+  - env ASSUME_ALWAYS_YES=yes pkg update
+  - env ASSUME_ALWAYS_YES=yes pkg upgrade
+  - env ASSUME_ALWAYS_YES=yes pkg install podman-suite git curl jq tmux vim htop doas rust python3
+  # QubesOS convention: one unprivileged "user", root via doas without a
+  # password. The only way in is the serial console, reachable from dom0.
+  - pw useradd user -m -c "JuanitOS user" -G wheel -s /bin/sh
+  - echo 'permit nopass :wheel' > /usr/local/etc/doas.conf
+  # Podman needs fdescfs and pf (NAT for container networks), both from the
+  # next boot on.
+  - echo 'fdesc /dev/fd fdescfs rw 0 0' >> /etc/fstab
+  - sed -e 's/^v4egress_if = .*/v4egress_if = "vtnet0"/' -e 's/^v6egress_if = .*/v6egress_if = "vtnet0"/' /usr/local/etc/containers/pf.conf.sample > /etc/pf.conf
+  # linux_enable: Linux images run too (`podman run --os=linux ...`).
+  - sysrc pf_enable=YES podman_enable=YES linux_enable=YES
+  - echo 'net.pf.filter_local=1' >> /etc/sysctl.conf
+  # Container storage on its own dataset (the zfs storage driver).
+  - zfs create -o mountpoint=/var/db/containers zroot/containers
+  # `jos console <qube>` lands in a shell: autologin on the serial console.
+  - printf 'jos.autologin:\\\n\t:al=user:tc=3wire:\n' >> /etc/gettytab
+  - sed -i '' -e 's|^ttyu0.*|ttyu0 "/usr/libexec/getty jos.autologin" vt100 onifconsole secure|' /etc/ttys
+  - pkg clean -ay
+  - rm -f /firstboot /var/cache/nuageinit/runcmds
+  - shutdown -p now

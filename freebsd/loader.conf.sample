@@ -1,11 +1,10 @@
 # JuanitOS /boot/loader.conf sample
 # Copy the relevant lines into /boot/loader.conf on the host.
 
-# Hypervisor and VM plumbing
+# Hypervisor and VM plumbing (if_tap is built into GENERIC)
 vmm_load="YES"
 nmdm_load="YES"
 if_bridge_load="YES"
-if_tap_load="YES"
 
 # Required for PCI passthrough (VT-d / AMD-Vi must be enabled in firmware)
 hw.vmm.iommu.enable=1

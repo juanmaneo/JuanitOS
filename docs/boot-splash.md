@@ -86,10 +86,18 @@ this with `jos_splash_enable="YES"` and `rc_startmsgs="NO"` in `rc.conf`.
 The live medium does the same but always ends on the console, where the
 installer runs.
 
-All FreeBSD-specific calls (`ioctl`, `mmap`, termios) are in `src/vt.rs`
-behind `cfg(target_os = "freebsd")`; the state machine, protocol and pixel
-packing are tested on any host. `jos-splash run --dry-run` serves the
-socket with a fake display for testing the rc.d plumbing.
+All FreeBSD-specific calls (`ioctl`, `mmap`, termios) are in
+`crates/jos-fb/src/vt.rs` behind `cfg(target_os = "freebsd")`, shared with
+the graphical installer; the state machine, protocol, pixel packing and
+keyboard decoding are tested on any host. `jos-splash run --dry-run` serves
+the socket with a fake display for testing the rc.d plumbing.
+
+After switching to its virtual terminal the daemon waits a few `vt(4)`
+timer ticks before drawing: the kernel repaints a freshly activated
+terminal (blank cells and border) from its 25 Hz timer *after*
+`VT_WAITACTIVE` returns, which otherwise wipes the first frame (seen on a
+real FreeBSD 15.1 boot under QEMU: a black screen until the next stage
+redrew).
 
 ## What the loader and kernel do (verified against FreeBSD 15.1 sources)
 

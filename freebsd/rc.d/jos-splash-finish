@@ -27,7 +27,10 @@ jos_splash_finish_start()
 {
 	[ -x "${jos_splash_bin}" ] || return 0
 	"${jos_splash_bin}" stage desktop
-	if checkyesno cosmic_greeter_enable; then
+	# Keep the picture only for a greeter that will actually take the
+	# screen: COSMIC may be enabled in rc.conf but not (yet) installed.
+	if checkyesno cosmic_greeter_enable && \
+	    [ -x /usr/local/etc/rc.d/cosmic_greeter ]; then
 		"${jos_splash_bin}" finish
 	else
 		"${jos_splash_bin}" finish --console

@@ -1,20 +1,24 @@
-//! Display abstraction and the pure parts of talking to `vt(4)`'s
-//! framebuffer: pixel packing and ioctl numbers. The FreeBSD-only system
-//! calls live in `vt.rs`; everything here is unit-tested on any host.
+//! Full-screen graphics on FreeBSD's `vt(4)` console, shared by the boot
+//! splash (`jos-splash`) and the graphical installer (`jos-install`).
+//!
+//! The [`Display`] trait, pixel packing, ioctl numbers and the keyboard
+//! decoder ([`keys`]) are pure and unit-tested on any host; the system
+//! calls live in [`vt`] (FreeBSD only).
 
-// The packing helpers and ioctl numbers only have a consumer on FreeBSD,
-// but they are kept portable so the tests run everywhere.
-#![cfg_attr(not(target_os = "freebsd"), allow(dead_code))]
+pub mod keys;
+#[cfg(target_os = "freebsd")]
+pub mod vt;
 
 use jos_gfx::{Image, Rgba};
 
-/// Something the splash can be presented on.
+/// Something a full-screen program can be presented on.
 pub trait Display {
     fn size(&self) -> (u32, u32);
     fn present(&mut self, frame: &Image) -> anyhow::Result<()>;
     /// Restore the text console (end of the splash, console mode).
     fn restore_console(&mut self) -> anyhow::Result<()>;
-    /// A key was pressed since the last call (Esc → `Some(0x1b)`).
+    /// Next byte typed on the terminal, if any (Esc → `Some(0x1b)`;
+    /// arrows etc. arrive as escape sequences, see [`keys::Decoder`]).
     fn poll_key(&mut self) -> Option<u8>;
 }
 
@@ -84,7 +88,11 @@ pub struct NullDisplay {
     pub height: u32,
     pub presented: usize,
     pub restored: bool,
-    pub keys: Vec<u8>,
+    /// Bytes `poll_key` returns, in order.
+    pub keys: std::collections::VecDeque<u8>,
+    /// The last frame presented, when [`NullDisplay::keep_frames`] is set.
+    pub last_frame: Option<Image>,
+    pub keep_frames: bool,
 }
 
 impl NullDisplay {
@@ -94,6 +102,11 @@ impl NullDisplay {
             height,
             ..Default::default()
         }
+    }
+
+    /// Queue `bytes` as if typed.
+    pub fn type_bytes(&mut self, bytes: &[u8]) {
+        self.keys.extend(bytes);
     }
 }
 
@@ -108,6 +121,9 @@ impl Display for NullDisplay {
             "frame size mismatch"
         );
         self.presented += 1;
+        if self.keep_frames {
+            self.last_frame = Some(frame.clone());
+        }
         Ok(())
     }
 
@@ -117,7 +133,7 @@ impl Display for NullDisplay {
     }
 
     fn poll_key(&mut self) -> Option<u8> {
-        self.keys.pop()
+        self.keys.pop_front()
     }
 }
 
@@ -162,5 +178,16 @@ mod tests {
         assert!(d.present(&Image::new(4, 4, Rgba::TRANSPARENT)).is_ok());
         assert!(d.present(&Image::new(5, 4, Rgba::TRANSPARENT)).is_err());
         assert_eq!(d.presented, 1);
+        assert!(d.last_frame.is_none());
+        d.keep_frames = true;
+        d.present(&Image::new(4, 4, Rgba::TRANSPARENT)).unwrap();
+        assert!(d.last_frame.is_some());
+        assert_eq!(d.size(), (4, 4));
+        d.type_bytes(b"ab");
+        assert_eq!(d.poll_key(), Some(b'a'));
+        assert_eq!(d.poll_key(), Some(b'b'));
+        assert_eq!(d.poll_key(), None);
+        d.restore_console().unwrap();
+        assert!(d.restored);
     }
 }

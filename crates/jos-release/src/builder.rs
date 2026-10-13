@@ -423,10 +423,13 @@ impl<'a> Builder<'a> {
                     &Self::s(&vendor),
                 ],
             )?;
+            // Keep the repository's own config (the `cargo xtask` alias)
+            // and add the vendored source on top.
+            let repo_config =
+                std::fs::read_to_string(self.repo.join(".cargo/config.toml")).unwrap_or_default();
             self.fs.write(
                 &dst.join(".cargo/config.toml"),
-                "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n\
-                 [source.vendored-sources]\ndirectory = \"vendor\"\n",
+                &vendored_cargo_config(&repo_config),
             )?;
         }
         Ok(())
@@ -594,6 +597,21 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// `.cargo/config.toml` of the installed source tree: the repository's
+/// own settings (the `cargo xtask` alias) plus the vendored crates as
+/// the source for crates.io, so stage 2 builds offline.
+pub fn vendored_cargo_config(repo_config: &str) -> String {
+    let mut out = repo_config.trim_end().to_string();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(
+        "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n\
+         [source.vendored-sources]\ndirectory = \"vendor\"\n",
+    );
+    out
+}
+
 /// The picture `vt(4)` centres on the screen while the kernel boots muted.
 pub fn kernel_splash_card() -> jos_gfx::Image {
     let mut scene = jos_gfx::Scene::new();
@@ -675,6 +693,15 @@ pub fn format_utc(secs: u64) -> String {
 mod tests {
     use super::*;
     use juanitos_core::sys::MockRunner;
+
+    #[test]
+    fn vendored_config_keeps_the_repo_aliases() {
+        let c = vendored_cargo_config("[alias]\nxtask = \"run --package xtask --\"\n");
+        assert!(c.starts_with("[alias]\nxtask"));
+        assert!(c.contains("\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n"));
+        assert!(c.ends_with("directory = \"vendor\"\n"));
+        assert!(vendored_cargo_config("").starts_with("[source.crates-io]"));
+    }
 
     #[test]
     fn utc_formatting() {

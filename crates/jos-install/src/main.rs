@@ -5,20 +5,42 @@
 //! IOMMU and the kernel modules work here, they work after installation.
 //! Then it partitions a disk, creates a ZFS pool and extracts the dom0
 //! tarball the medium booted from.
+//!
+//! Two front ends drive the same [`install::Installer`]:
+//!
+//! * a graphical wizard on the `vt(4)` framebuffer (`--ui gui`, the
+//!   default on the live medium), modelled on Calamares and Anaconda:
+//!   see `wizard.rs`, `ui.rs` and `gui.rs`;
+//! * line-oriented prompts (`--ui text`), for serial consoles, and flags
+//!   only (`--non-interactive`) for automated installs.
 
 mod disks;
+mod gui;
 mod install;
+mod prompt;
+mod ui;
+mod wizard;
 
-use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use juanitos_core::doctor::{self, Check};
 use juanitos_core::sys::{DryRunner, RealRunner, Runner};
 
 use crate::disks::{list_disks, Disk};
 use crate::install::{dist_available, InstallPlan, Installer};
+use crate::prompt::Prompter;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Ui {
+    /// The graphical wizard when a framebuffer console is available,
+    /// otherwise the text prompts.
+    Auto,
+    Gui,
+    Text,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "jos-install", version, about = "Install JuanitOS")]
@@ -35,6 +57,19 @@ struct Cli {
     /// Answer no questions; every value must come from flags.
     #[arg(long)]
     non_interactive: bool,
+
+    /// Front end for interactive installs.
+    #[arg(long, value_enum, default_value_t = Ui::Auto)]
+    ui: Ui,
+
+    /// Virtual terminal the graphical installer draws on (10 = ttyv9).
+    #[arg(long, default_value_t = 10)]
+    vt: i32,
+
+    /// Render every page of the graphical installer as PNG files into DIR
+    /// and exit (works on any host; used for the documentation).
+    #[arg(long, value_name = "DIR")]
+    screenshots: Option<PathBuf>,
 
     /// Target disk (e.g. ada0, nda0, vtbd0). Erased completely.
     #[arg(long)]
@@ -100,11 +135,17 @@ fn main() {
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
+    if let Some(dir) = &cli.screenshots {
+        for file in ui::screenshots(dir, ui::LOGICAL_W as u32, ui::LOGICAL_H as u32)? {
+            println!("wrote {file}");
+        }
+        return Ok(());
+    }
+
     let dry = DryRunner::new();
     let real = RealRunner;
     let runner: &dyn Runner = if cli.dry_run { &dry } else { &real };
     let interactive = !cli.non_interactive;
-    let live = cli.live;
 
     banner();
 
@@ -115,44 +156,25 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     };
     let checks = doctor::run_host_checks(runner, &cfg);
     let report = render_checks(&checks);
-    print!("{report}");
-    if !doctor::all_passed(&checks) {
-        println!(
-            "Some checks FAILED: this machine (or its firmware settings) cannot run\n\
-             JuanitOS qubes as-is. Typical fixes: enable VT-x/AMD-V and VT-d/AMD-Vi\n\
-             in the firmware setup.\n"
-        );
-        if cli.ignore_doctor {
-            println!("Continuing anyway (--ignore-doctor).\n");
-        } else if interactive {
-            if !ask_yes_no("Install anyway?", false)? {
-                bail!("aborted: host checks failed");
-            }
-        } else {
-            bail!("host checks failed (use --ignore-doctor to proceed)");
-        }
-    } else {
-        println!("All host checks passed: this hardware can run JuanitOS.\n");
-    }
 
-    // 2. Plan.
-    let user = match (cli.user, cli.user_password) {
+    // 2. Defaults for the plan, from the flags.
+    let user = match (cli.user.clone(), cli.user_password.clone()) {
         (Some(u), Some(p)) => Some((u, p)),
         (Some(u), None) if !interactive => bail!("--user {u} requires --user-password"),
         (Some(u), None) => Some((u, String::new())),
         (None, _) => None,
     };
-    let mut plan = InstallPlan {
-        disk: cli.disk.unwrap_or_default(),
-        pool: cli.pool,
-        hostname: cli.hostname,
+    let plan = InstallPlan {
+        disk: cli.disk.clone().unwrap_or_default(),
+        pool: cli.pool.clone(),
+        hostname: cli.hostname.clone(),
         swap_gb: cli.swap_gb,
         gui: !cli.no_gui,
         serial_console: !cli.no_serial,
-        root_password: cli.root_password,
+        root_password: cli.root_password.clone(),
         user,
-        dist_dir: cli.dist,
-        target: cli.target,
+        dist_dir: cli.dist.clone(),
+        target: cli.target.clone(),
         ..InstallPlan::default()
     };
 
@@ -163,13 +185,122 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             plan.dist_dir
         );
     }
-
     let disks = list_disks(runner).context("listing disks")?;
+
+    if interactive && wants_gui(cli.ui, cli.dry_run)? {
+        match run_graphical(&cli, runner, plan.clone(), &checks, &disks, &report) {
+            Ok(()) => return Ok(()),
+            Err(e) if cli.ui == Ui::Auto => {
+                eprintln!("jos-install: graphical installer unavailable ({e:#}); using text mode");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    let stdin = std::io::stdin();
+    let mut prompter = Prompter::new(stdin.lock(), std::io::stdout(), runner);
+    text_install(&cli, runner, plan, &checks, &disks, &report, &mut prompter)
+}
+
+/// Should an interactive install use the graphical front end?
+fn wants_gui(ui: Ui, dry_run: bool) -> anyhow::Result<bool> {
+    let framebuffer = cfg!(target_os = "freebsd") && std::path::Path::new("/dev/ttyv0").exists();
+    match ui {
+        Ui::Text => Ok(false),
+        Ui::Auto => Ok(framebuffer && !dry_run),
+        Ui::Gui if framebuffer => Ok(true),
+        Ui::Gui => bail!(
+            "the graphical installer needs a FreeBSD framebuffer console; \
+             use --screenshots DIR to preview it on this host"
+        ),
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+fn run_graphical(
+    cli: &Cli,
+    runner: &dyn Runner,
+    plan: InstallPlan,
+    checks: &[Check],
+    disks: &[Disk],
+    report: &str,
+) -> anyhow::Result<()> {
+    use jos_fb::Display;
+
+    let mut display = jos_fb::vt::VtDisplay::open(cli.vt)?;
+    let mut wizard = wizard::Wizard::new(plan, checks.to_vec(), disks.to_vec());
+    let outcome = gui::run(
+        &mut display,
+        &mut wizard,
+        runner,
+        cli.dry_run,
+        report,
+        gui::LoopOptions::default(),
+    );
+    display.restore_console()?;
+    drop(display);
+    match outcome? {
+        gui::Outcome::Reboot => {
+            runner.run("shutdown", &["-r", "now"])?;
+        }
+        gui::Outcome::Exit => {
+            if let wizard::InstallState::Failed(e) = &wizard.install {
+                bail!("installation failed: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "freebsd"))]
+fn run_graphical(
+    _cli: &Cli,
+    _runner: &dyn Runner,
+    _plan: InstallPlan,
+    _checks: &[Check],
+    _disks: &[Disk],
+    _report: &str,
+) -> anyhow::Result<()> {
+    bail!("no framebuffer console on this host")
+}
+
+/// The line-oriented installer (serial consoles, `--ui text`) and the
+/// unattended one (`--non-interactive`).
+fn text_install<R: std::io::BufRead, W: std::io::Write>(
+    cli: &Cli,
+    runner: &dyn Runner,
+    mut plan: InstallPlan,
+    checks: &[Check],
+    disks: &[Disk],
+    report: &str,
+    p: &mut Prompter<'_, R, W>,
+) -> anyhow::Result<()> {
+    let interactive = !cli.non_interactive;
+    p.say(report)?;
+    if !doctor::all_passed(checks) {
+        p.say(
+            "Some checks FAILED: this machine (or its firmware settings) cannot run\n\
+             JuanitOS qubes as-is. Typical fixes: enable VT-x/AMD-V and VT-d/AMD-Vi\n\
+             in the firmware setup.\n\n",
+        )?;
+        if cli.ignore_doctor {
+            p.say("Continuing anyway (--ignore-doctor).\n\n")?;
+        } else if interactive {
+            if !p.ask_yes_no("Install anyway?", false)? {
+                bail!("aborted: host checks failed");
+            }
+        } else {
+            bail!("host checks failed (use --ignore-doctor to proceed)");
+        }
+    } else {
+        p.say("All host checks passed: this hardware can run JuanitOS.\n\n")?;
+    }
+
     if plan.disk.is_empty() {
         if !interactive {
             bail!("--disk is required with --non-interactive");
         }
-        plan.disk = choose_disk(&disks)?;
+        plan.disk = p.choose_disk(disks)?;
     } else if !cli.dry_run && !disks.iter().any(|d| d.name == plan.disk) {
         bail!(
             "disk {} not found (available: {})",
@@ -183,23 +314,24 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     }
 
     if interactive {
-        plan.hostname = prompt_default("Hostname", &plan.hostname)?;
-        plan.swap_gb = prompt_default("Swap size in GiB (0 = none)", &plan.swap_gb.to_string())?
+        plan.hostname = p.prompt_default("Hostname", &plan.hostname)?;
+        plan.swap_gb = p
+            .prompt_default("Swap size in GiB (0 = none)", &plan.swap_gb.to_string())?
             .parse()
             .context("swap size must be a number")?;
-        plan.gui = ask_yes_no("Start the COSMIC desktop at boot?", plan.gui)?;
+        plan.gui = p.ask_yes_no("Start the COSMIC desktop at boot?", plan.gui)?;
         if plan.root_password.is_none() {
-            plan.root_password = Some(prompt_password(runner, "Root password")?);
+            plan.root_password = Some(p.password("Root password")?);
         }
         match &mut plan.user {
             Some((name, pw)) if pw.is_empty() => {
-                *pw = prompt_password(runner, &format!("Password for {name}"))?;
+                *pw = p.password(&format!("Password for {name}"))?;
             }
             Some(_) => {}
             None => {
-                let name = prompt_default("Create a user (empty to skip)", "")?;
+                let name = p.prompt_default("Create a user (empty to skip)", "")?;
                 if !name.is_empty() {
-                    let pw = prompt_password(runner, &format!("Password for {name}"))?;
+                    let pw = p.password(&format!("Password for {name}"))?;
                     plan.user = Some((name, pw));
                 }
             }
@@ -207,15 +339,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     }
 
     plan.validate()?;
-    println!("\nInstallation plan:\n{}", plan.summary());
-    if interactive && !ask_yes_no("Proceed? This erases the disk.", false)? {
+    p.say(&format!("\nInstallation plan:\n{}\n", plan.summary()))?;
+    if interactive && !p.ask_yes_no("Proceed? This erases the disk.", false)? {
         bail!("aborted");
     }
 
     // 3. Install.
-    Installer::new(runner, cli.dry_run, &plan).run(&report)?;
+    Installer::new(runner, cli.dry_run, &plan).run(report)?;
 
-    if live && interactive && ask_yes_no("Reboot now?", true)? {
+    if cli.live && interactive && p.ask_yes_no("Reboot now?", true)? {
         runner.run("shutdown", &["-r", "now"])?;
     }
     Ok(())
@@ -242,92 +374,195 @@ fn render_checks(checks: &[Check]) -> String {
     s
 }
 
-fn choose_disk(disks: &[Disk]) -> anyhow::Result<String> {
-    if disks.is_empty() {
-        bail!("no disks found");
-    }
-    println!("Disks:");
-    for (i, d) in disks.iter().enumerate() {
-        println!(
-            "  {}) {:<8} {:>8.1} GiB  {}",
-            i + 1,
-            d.name,
-            d.size_gib(),
-            d.description
-        );
-    }
-    loop {
-        let answer = prompt_default("Install to disk (number or name)", "")?;
-        if let Some(d) = answer
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|i| disks.get(i))
-        {
-            return Ok(d.name.clone());
-        }
-        if disks.iter().any(|d| d.name == answer) {
-            return Ok(answer);
-        }
-        println!("  no such disk");
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use juanitos_core::doctor::Status;
+    use juanitos_core::sys::MockRunner;
 
-fn read_line() -> anyhow::Result<String> {
-    let mut line = String::new();
-    io::stdout().flush()?;
-    let n = io::stdin().lock().read_line(&mut line)?;
-    if n == 0 {
-        bail!("end of input");
+    fn cli(args: &[&str]) -> Cli {
+        let mut argv = vec!["jos-install"];
+        argv.extend_from_slice(args);
+        Cli::parse_from(argv)
     }
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
-}
 
-fn prompt_default(question: &str, default: &str) -> anyhow::Result<String> {
-    if default.is_empty() {
-        print!("{question}: ");
-    } else {
-        print!("{question} [{default}]: ");
+    fn disks() -> Vec<Disk> {
+        vec![Disk {
+            name: "vtbd0".into(),
+            size_bytes: 20 << 30,
+            description: "VirtIO".into(),
+        }]
     }
-    let answer = read_line()?;
-    Ok(if answer.is_empty() {
-        default.to_string()
-    } else {
-        answer
-    })
-}
 
-fn ask_yes_no(question: &str, default: bool) -> anyhow::Result<bool> {
-    let hint = if default { "Y/n" } else { "y/N" };
-    loop {
-        print!("{question} [{hint}] ");
-        match read_line()?.to_ascii_lowercase().as_str() {
-            "" => return Ok(default),
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
-            _ => {}
+    fn checks(status: Status) -> Vec<Check> {
+        vec![Check {
+            name: "iommu".into(),
+            status,
+            detail: "x".into(),
+        }]
+    }
+
+    fn plan_for(c: &Cli) -> InstallPlan {
+        InstallPlan {
+            disk: c.disk.clone().unwrap_or_default(),
+            root_password: c.root_password.clone(),
+            target: std::env::temp_dir()
+                .join(format!("jos-install-main-{}", std::process::id()))
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
         }
     }
-}
 
-/// Read a password with echo off (via `stty`, so no libc dependency).
-fn prompt_password(runner: &dyn Runner, label: &str) -> anyhow::Result<String> {
-    loop {
-        print!("{label}: ");
-        let _ = runner.run("stty", &["-echo"]);
-        let first = read_line();
-        println!();
-        print!("Repeat: ");
-        let second = read_line();
-        let _ = runner.run("stty", &["echo"]);
-        println!();
-        let (a, b) = (first?, second?);
-        if a.is_empty() {
-            println!("  password must not be empty");
-        } else if a != b {
-            println!("  passwords do not match");
-        } else {
-            return Ok(a);
+    fn text(
+        c: &Cli,
+        m: &MockRunner,
+        checks: &[Check],
+        input: &str,
+    ) -> (anyhow::Result<()>, String) {
+        let mut out = Vec::new();
+        let r = {
+            let mut p = Prompter::new(input.as_bytes(), &mut out, m);
+            text_install(c, m, plan_for(c), checks, &disks(), "REPORT\n", &mut p)
+        };
+        (r, String::from_utf8_lossy(&out).into_owned())
+    }
+
+    #[test]
+    fn render_checks_table() {
+        let s = render_checks(&checks(Status::Fail));
+        assert!(s.starts_with("Host checks:\n"));
+        assert!(s.contains("[FAIL] iommu"));
+    }
+
+    #[test]
+    fn ui_selection() {
+        assert!(!wants_gui(Ui::Text, false).unwrap());
+        if !cfg!(target_os = "freebsd") {
+            assert!(!wants_gui(Ui::Auto, false).unwrap());
+            assert!(wants_gui(Ui::Gui, false).is_err());
         }
+        assert!(!wants_gui(Ui::Auto, true).unwrap());
+    }
+
+    #[test]
+    fn non_interactive_install() {
+        let c = cli(&[
+            "--dry-run",
+            "--non-interactive",
+            "--disk",
+            "vtbd0",
+            "--root-password",
+            "pw",
+        ]);
+        let m = MockRunner::new();
+        let (r, out) = text(&c, &m, &checks(Status::Ok), "");
+        r.unwrap();
+        assert!(out.contains("REPORT"));
+        assert!(out.contains("All host checks passed"));
+        assert!(out.contains("Installation plan"));
+        assert!(m.calls().iter().any(|c| c == "gpart create -s gpt vtbd0"));
+    }
+
+    #[test]
+    fn non_interactive_refusals() {
+        let m = MockRunner::new();
+        let c = cli(&["--dry-run", "--non-interactive", "--disk", "vtbd0"]);
+        let (r, _) = text(&c, &m, &checks(Status::Fail), "");
+        assert!(r.unwrap_err().to_string().contains("--ignore-doctor"));
+
+        let c = cli(&["--dry-run", "--non-interactive", "--ignore-doctor"]);
+        let (r, out) = text(&c, &m, &checks(Status::Fail), "");
+        assert!(r.unwrap_err().to_string().contains("--disk is required"));
+        assert!(out.contains("Continuing anyway"));
+
+        // A disk that does not exist (real run).
+        let c = cli(&["--non-interactive", "--disk", "ada9"]);
+        let (r, _) = text(&c, &m, &checks(Status::Ok), "");
+        assert!(r.unwrap_err().to_string().contains("not found"));
+        assert!(m.calls().is_empty());
+    }
+
+    #[test]
+    fn interactive_text_install() {
+        let c = cli(&["--dry-run", "--live"]);
+        let m = MockRunner::new();
+        // failed checks: install anyway; disk 1; hostname; swap; desktop;
+        // root password twice; user; user password twice; proceed; reboot.
+        let input = "y\n1\nbox\n0\nn\nr00t\nr00t\njuan\npw\npw\ny\ny\n";
+        let (r, out) = text(&c, &m, &checks(Status::Fail), input);
+        r.unwrap();
+        assert!(out.contains("vtbd0"));
+        assert!(out.contains("hostname  box"));
+        assert!(out.contains("console only"));
+        let calls = m.calls();
+        assert!(calls
+            .iter()
+            .any(|c| c.starts_with("chroot") && c.contains("useradd juan")));
+        assert!(!calls.iter().any(|c| c.contains("freebsd-swap")));
+        assert_eq!(calls.last().map(String::as_str), Some("shutdown -r now"));
+    }
+
+    #[test]
+    fn interactive_aborts() {
+        let m = MockRunner::new();
+        let c = cli(&["--dry-run"]);
+        let (r, _) = text(&c, &m, &checks(Status::Fail), "n\n");
+        assert!(r.unwrap_err().to_string().contains("host checks failed"));
+        let (r, _) = text(&c, &m, &checks(Status::Ok), "1\n\nnot-a-number\n");
+        assert!(r.unwrap_err().to_string().contains("swap size"));
+        // Declining at the final question touches nothing.
+        let input = "1\n\n\n\npw\npw\n\nn\n";
+        let (r, _) = text(&c, &m, &checks(Status::Ok), input);
+        assert_eq!(r.unwrap_err().to_string(), "aborted");
+        assert!(!m.calls().iter().any(|c| c.starts_with("gpart")));
+    }
+
+    #[test]
+    fn user_from_flags_gets_its_password_prompted() {
+        let m = MockRunner::new();
+        let c = cli(&[
+            "--dry-run",
+            "--disk",
+            "vtbd0",
+            "--root-password",
+            "r",
+            "--user",
+            "ana",
+        ]);
+        let mut p = plan_for(&c);
+        p.user = Some(("ana".into(), String::new()));
+        let mut out = Vec::new();
+        let input: &[u8] = b"\n\n\nsecret\nsecret\ny\n";
+        let r = {
+            let mut pr = Prompter::new(input, &mut out, &m);
+            text_install(&c, &m, p, &checks(Status::Ok), &disks(), "", &mut pr)
+        };
+        r.unwrap();
+        assert!(String::from_utf8_lossy(&out).contains("Password for ana"));
+    }
+
+    #[test]
+    fn screenshots_flag_writes_pngs() {
+        let dir =
+            std::env::temp_dir().join(format!("jos-install-cli-shots-{}", std::process::id()));
+        let d = dir.to_string_lossy().into_owned();
+        run(cli(&["--screenshots", &d])).unwrap();
+        assert!(dir.join("installer-1-welcome.png").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_without_password_is_rejected_non_interactively() {
+        let err = run(cli(&[
+            "--dry-run",
+            "--non-interactive",
+            "--user",
+            "juan",
+            "--disk",
+            "vtbd0",
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("--user-password"));
     }
 }

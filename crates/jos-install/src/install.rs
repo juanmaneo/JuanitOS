@@ -136,6 +136,30 @@ pub const DATASETS: &[(&str, &[&str])] = &[
     ("var/tmp", &["-o", "setuid=off"]),
 ];
 
+/// What [`Installer::run_with`] reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Progress {
+    /// Step `index` (0-based) of `total` is starting.
+    Step {
+        index: usize,
+        total: usize,
+        title: String,
+    },
+    Done,
+}
+
+/// Installation steps, as shown to the user.
+pub const STEP_TITLES: [&str; 8] = [
+    "Verifying the dom0 distribution",
+    "Partitioning the disk",
+    "Creating the ZFS pool",
+    "Extracting the dom0",
+    "Writing the configuration",
+    "Installing the boot loader",
+    "Creating the accounts",
+    "Finishing",
+];
+
 pub struct Installer<'a> {
     pub runner: &'a dyn Runner,
     pub fs: FsOps,
@@ -166,15 +190,35 @@ impl<'a> Installer<'a> {
 
     /// Run the whole installation.
     pub fn run(&self, doctor_report: &str) -> Result<()> {
+        self.run_with(doctor_report, &mut |_| {})
+    }
+
+    /// Run the whole installation, reporting each step to `progress`
+    /// before it starts (the graphical installer draws a progress bar
+    /// from these).
+    pub fn run_with(&self, doctor_report: &str, progress: &mut dyn FnMut(Progress)) -> Result<()> {
         self.plan.validate()?;
-        self.verify_dist()?;
-        self.partition()?;
-        self.create_pool()?;
-        self.extract()?;
-        self.configure(doctor_report)?;
-        self.install_bootloader()?;
-        self.accounts()?;
-        self.finish()
+        let steps: [(&str, &dyn Fn() -> Result<()>); 8] = [
+            (STEP_TITLES[0], &|| self.verify_dist()),
+            (STEP_TITLES[1], &|| self.partition()),
+            (STEP_TITLES[2], &|| self.create_pool()),
+            (STEP_TITLES[3], &|| self.extract()),
+            (STEP_TITLES[4], &|| self.configure(doctor_report)),
+            (STEP_TITLES[5], &|| self.install_bootloader()),
+            (STEP_TITLES[6], &|| self.accounts()),
+            (STEP_TITLES[7], &|| self.finish()),
+        ];
+        let total = steps.len();
+        for (index, (title, step)) in steps.iter().enumerate() {
+            progress(Progress::Step {
+                index,
+                total,
+                title: (*title).to_string(),
+            });
+            step()?;
+        }
+        progress(Progress::Done);
+        Ok(())
     }
 
     fn tarball(&self) -> String {
@@ -540,6 +584,141 @@ mod tests {
             m.calls()[0],
             "tar -xpf /nonexistent/juanitos-dom0.txz -C /mnt --unlink"
         );
+    }
+
+    #[test]
+    fn run_with_reports_every_step_in_order() {
+        let p = plan();
+        let m = MockRunner::new().respond("zfs", &["list"], CmdOutput::failed(1, ""));
+        let mut seen = Vec::new();
+        let dir = std::env::temp_dir().join(format!("jos-install-run-{}", std::process::id()));
+        let p = InstallPlan {
+            target: dir.to_string_lossy().into_owned(),
+            ..p
+        };
+        Installer::new(&m, true, &p)
+            .run_with("report", &mut |e| seen.push(e))
+            .unwrap();
+        assert_eq!(seen.len(), STEP_TITLES.len() + 1);
+        for (i, e) in seen.iter().take(STEP_TITLES.len()).enumerate() {
+            assert_eq!(
+                *e,
+                Progress::Step {
+                    index: i,
+                    total: STEP_TITLES.len(),
+                    title: STEP_TITLES[i].to_string()
+                }
+            );
+        }
+        assert_eq!(seen.last(), Some(&Progress::Done));
+        let calls = m.calls();
+        assert!(calls.iter().any(|c| c.starts_with("tar -xpf")));
+        assert!(calls.iter().any(|c| c.starts_with("efibootmgr -c")));
+        assert_eq!(calls.last().map(String::as_str), Some("sync"));
+        // Same sequence without a progress sink.
+        Installer::new(&MockRunner::new(), true, &p)
+            .run("r")
+            .unwrap();
+    }
+
+    #[test]
+    fn failing_step_stops_the_run() {
+        let p = plan();
+        let m = MockRunner::new().respond("gpart", &["create"], CmdOutput::failed(1, "busy"));
+        let mut steps = 0;
+        let err = Installer::new(&m, true, &p)
+            .run_with("", &mut |e| {
+                if matches!(e, Progress::Step { .. }) {
+                    steps += 1
+                }
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("busy"), "{err}");
+        assert_eq!(steps, 2, "stopped in partitioning");
+        assert!(!m.calls().iter().any(|c| c.starts_with("zpool")));
+    }
+
+    #[test]
+    fn invalid_plan_runs_nothing() {
+        let mut p = plan();
+        p.disk.clear();
+        let m = MockRunner::new();
+        assert!(Installer::new(&m, true, &p).run("").is_err());
+        assert!(m.calls().is_empty());
+        let mut p = plan();
+        p.hostname.clear();
+        assert!(p.validate().is_err());
+        let mut p = plan();
+        p.user = Some((String::new(), "x".into()));
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn dist_detection_and_verification() {
+        let dir = std::env::temp_dir().join(format!("jos-install-dist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        assert!(!dist_available(&d));
+        // Real run without a MANIFEST: a clear error.
+        let p = InstallPlan {
+            dist_dir: d.clone(),
+            ..plan()
+        };
+        let m = MockRunner::new();
+        let err = Installer::new(&m, false, &p).verify_dist().unwrap_err();
+        assert!(err.to_string().contains("live medium"), "{err}");
+        // With a tarball and a matching manifest it verifies.
+        let tarball = dir.join(dom0::DIST_TARBALL);
+        std::fs::write(&tarball, b"dom0").unwrap();
+        let mut manifest = DistManifest::default();
+        manifest.add(
+            juanitos_core::release::sha256_bytes(b"dom0"),
+            4,
+            dom0::DIST_TARBALL.to_string(),
+        );
+        std::fs::write(dir.join(dom0::DIST_MANIFEST), manifest.render()).unwrap();
+        assert!(dist_available(&d));
+        Installer::new(&m, false, &p).verify_dist().unwrap();
+        // Tampered tarball: rejected.
+        std::fs::write(&tarball, b"evil").unwrap();
+        assert!(Installer::new(&m, false, &p).verify_dist().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn configure_writes_the_system_files() {
+        let dir = std::env::temp_dir().join(format!("jos-install-cfg-{}", std::process::id()));
+        let p = InstallPlan {
+            target: dir.to_string_lossy().into_owned(),
+            ..plan()
+        };
+        let m = MockRunner::new();
+        let inst = Installer::new(&m, false, &p);
+        inst.configure("doctor says ok").unwrap();
+        let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).unwrap();
+        assert!(read("etc/rc.conf").contains("hostname=\"box\""));
+        assert!(read("boot/loader.conf").contains("zfs_load=\"YES\""));
+        assert!(read("etc/fstab").contains("/boot/efi"));
+        assert!(read("usr/local/etc/juanitos/jos.toml").contains("zroot"));
+        assert_eq!(
+            read("usr/local/etc/juanitos/install-report.txt"),
+            "doctor says ok"
+        );
+        assert!(dir.join("usr/local/etc/juanitos/qubes").is_dir());
+        assert!(m
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("cp /tmp/zpool.cache")));
+
+        // Boot loader: the ESP gets loader.efi (no jos-boot.efi in this root).
+        std::fs::create_dir_all(dir.join("boot")).unwrap();
+        std::fs::write(dir.join("boot/loader.efi"), b"efi").unwrap();
+        inst.install_bootloader().unwrap();
+        let calls = m.calls();
+        assert!(calls.iter().any(|c| c.starts_with("mount -t msdosfs")));
+        assert!(calls.iter().any(|c| c.starts_with("umount")));
+        assert!(dir.join("boot/efi").join(dom0::ESP_DEFAULT).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

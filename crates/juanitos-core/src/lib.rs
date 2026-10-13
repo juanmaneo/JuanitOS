@@ -7,6 +7,7 @@
 
 pub mod bhyve;
 pub mod config;
+pub mod console;
 pub mod doctor;
 pub mod dom0;
 pub mod error;
@@ -17,6 +18,7 @@ pub mod pci;
 pub mod release;
 pub mod supervisor;
 pub mod sys;
+pub mod template;
 pub mod zfs;
 
 pub use bhyve::GuestExit;

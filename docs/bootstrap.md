@@ -67,6 +67,19 @@ verified) so the chain-load and `console=nullconsole` path are tested with
 the genuine loader. `work/` holds downloads and test output; unlike
 `target/`, it survives `cargo clean`.
 
+The script needs `qemu-system-x86_64`, the OVMF firmware (`ovmf` on
+Debian, `edk2-ovmf` on Arch/Manjaro and Fedora), `mtools` and `socat` or
+`nc`. The QEMU monitor is a loopback TCP port, so it also runs where Unix
+sockets are unavailable (sandboxes, WSL's DrvFs). Without `/dev/kvm` the
+runs fall back to TCG, which is fine for these small UEFI applications.
+
+```sh
+tools/uefi-test.sh boot          # card + error path (no loader on the image)
+tools/fetch-freebsd.sh loader    # base.txz → work/freebsd/boot/loader.efi
+tools/uefi-test.sh boot-loader   # chain-load: loader.efi runs, finds no kernel, returns
+tools/uefi-test.sh firewall      # DHCP, ARP, gateway ping, NAT via tools/fw-client.py
+```
+
 ## Stage 1 — build the ISO on FreeBSD
 
 This is LFS chapter 5 (temporary tools) and 6 (the system) in one, run as

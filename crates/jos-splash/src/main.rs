@@ -7,14 +7,11 @@
 //! the COSMIC greeter (keeping the picture) or back to the text console.
 //! See `docs/boot-splash.md`.
 
-mod fb;
 mod proto;
 // Only the `render` subcommand works without Unix sockets; the daemon
 // code still compiles (and its tests run) on Windows.
 #[cfg_attr(not(unix), allow(dead_code))]
 mod server;
-#[cfg(target_os = "freebsd")]
-mod vt;
 
 use std::path::PathBuf;
 
@@ -23,11 +20,11 @@ use clap::{Parser, Subcommand};
 use jos_gfx::scene::render_screen;
 use jos_gfx::{Scene, Stage};
 
-#[cfg(unix)]
-use crate::fb::NullDisplay;
 use crate::proto::{Finish, Message};
 #[cfg(unix)]
 use crate::server::Splash;
+#[cfg(unix)]
+use jos_fb::NullDisplay;
 
 #[derive(Parser, Debug)]
 #[command(name = "jos-splash", version, about = "JuanitOS boot splash")]
@@ -166,7 +163,7 @@ fn run_daemon(a: &RunArgs, socket: &std::path::Path) -> anyhow::Result<()> {
     if a.dry_run {
         return run_dry(reached, socket);
     }
-    let display = vt::VtDisplay::open(a.vt)?;
+    let display = jos_fb::vt::VtDisplay::open(a.vt)?;
     eprintln!("jos-splash: drawing on VT {}", a.vt);
     server::serve(Splash::new(display, reached), socket)?;
     Ok(())

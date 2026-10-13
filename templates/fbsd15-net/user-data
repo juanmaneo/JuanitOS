@@ -1,0 +1,104 @@
+#cloud-config
+# JuanitOS template "fbsd15-net": FreeBSD 15.1 as the network qube
+# (`sys-net`): DHCP client towards the world, DHCP server + DNS forwarder
+# (dnsmasq) + pf NAT towards its clients.
+#
+# Built like fbsd15-dev (see templates/fbsd15-dev/user-data for the
+# nuageinit details): FreeBSD's BASIC-CLOUDINIT image, one provisioning
+# boot, power off, @base.
+#
+# Which interface is which is decided at every boot by the `josnet` rc
+# script below, because it depends on how the qube was created:
+#
+# - `jos create sys-net --kind net --pci B/S/F`: the physical NIC comes
+#   through passthrough (em0, igb0, re0, iwlwifi...), the only vtnet is
+#   the downstream tap (slot 3);
+# - `jos create sys-net --kind net --uplink IFACE`: vtnet0 is the upstream
+#   tap bridged to the host NIC, vtnet1 the downstream tap (slot 4);
+# - a template maintenance boot has a single vtnet and no clients.
+#
+# Rule: with two or more interfaces the highest-numbered vtnet is the
+# downstream side and every other interface is an upstream running DHCP;
+# a lone interface is an upstream. The downstream network is
+# 10.138.0.0/24 with the qube at .1; the clients (sys-firewall's upstream
+# NIC, which in turn NATs 10.137.0.0/16) get leases from dnsmasq.
+
+hostname: fbsd15-net
+
+write_files:
+  - path: /usr/local/etc/rc.d/josnet
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # PROVIDE: josnet
+      # REQUIRE: FILESYSTEMS
+      # BEFORE: netif pf dnsmasq
+      #
+      # Decide which interface is upstream/downstream for this boot and
+      # write the network, pf and dnsmasq configuration accordingly.
+      . /etc/rc.subr
+      name=josnet
+      rcvar=josnet_enable
+      start_cmd=josnet_start
+      stop_cmd=:
+      josnet_start() {
+          all=$(ifconfig -l | tr ' ' '\n' | grep -v -e '^lo' -e '^pflog' -e '^pfsync')
+          down=$(echo "$all" | grep '^vtnet' | sort -t t -k 3 -n | tail -1)
+          ups=$(echo "$all" | grep -v "^${down}\$" | tr '\n' ' ')
+          if [ -z "$ups" ]; then
+              ups=$down
+              down=""
+          fi
+          : > /etc/rc.conf.d/network
+          for up in $ups; do
+              echo "ifconfig_${up}=\"DHCP\"" >> /etc/rc.conf.d/network
+          done
+          {
+              echo "set skip on lo"
+              for up in $ups; do
+                  echo "nat on $up inet from 10.138.0.0/24 to any -> ($up)"
+              done
+              echo "pass"
+          } > /etc/pf.conf
+          {
+              echo "no-resolv"
+              echo "server=9.9.9.9"
+              echo "server=1.1.1.1"
+          } > /usr/local/etc/dnsmasq.conf
+          if [ -n "$down" ]; then
+              echo "ifconfig_${down}=\"inet 10.138.0.1/24\"" >> /etc/rc.conf.d/network
+              {
+                  echo "interface=$down"
+                  echo "bind-interfaces"
+                  echo "dhcp-range=10.138.0.10,10.138.0.250,12h"
+                  echo "dhcp-option=option:router,10.138.0.1"
+                  echo "dhcp-option=option:dns-server,10.138.0.1"
+              } >> /usr/local/etc/dnsmasq.conf
+          fi
+          echo "josnet: upstream [$ups] downstream [$down]"
+      }
+      load_rc_config $name
+      run_rc_command "$1"
+
+runcmd:
+  - env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
+  - env ASSUME_ALWAYS_YES=yes pkg update
+  - env ASSUME_ALWAYS_YES=yes pkg upgrade
+  - env ASSUME_ALWAYS_YES=yes pkg install dnsmasq doas tmux vim
+  # Root via doas from the console user; the console is reachable from
+  # dom0 only.
+  - pw useradd user -m -c "JuanitOS user" -G wheel -s /bin/sh
+  - echo 'permit nopass :wheel' > /usr/local/etc/doas.conf
+  # Routing between the two sides, pf for NAT, dnsmasq for DHCP/DNS; the
+  # josnet script writes their interface-specific configuration at boot.
+  - sysrc gateway_enable=YES pf_enable=YES dnsmasq_enable=YES josnet_enable=YES
+  - mkdir -p /etc/rc.conf.d
+  # The qube's own resolver is dnsmasq; dhclient must not overwrite it.
+  - printf 'nameserver 127.0.0.1\n' > /etc/resolv.conf
+  - sysrc resolvconf_enable=NO
+  # Autologin on the serial console, as in fbsd15-dev.
+  - printf 'jos.autologin:\\\n\t:al=user:tc=3wire:\n' >> /etc/gettytab
+  - sed -i '' -e 's|^ttyu0.*|ttyu0 "/usr/libexec/getty jos.autologin" vt100 onifconsole secure|' /etc/ttys
+  - pkg clean -ay
+  - rm -f /firstboot /var/cache/nuageinit/runcmds
+  - shutdown -p now

@@ -30,6 +30,13 @@ pub fn bridge_name(netvm: &str) -> String {
     truncate_ifname("br-", netvm)
 }
 
+/// `bru-<iface>`: the bridge joining a host interface (`uplink`) to the
+/// upstream taps of the qubes using it. Per interface, not per qube: an
+/// interface can only be a member of one bridge.
+pub fn uplink_bridge_name(iface: &str) -> String {
+    truncate_ifname("bru-", iface)
+}
+
 pub struct Net<'a> {
     pub runner: &'a dyn Runner,
 }
@@ -54,21 +61,51 @@ impl<'a> Net<'a> {
         Ok(br)
     }
 
+    /// `addm` of a member already present fails ("File exists"): check
+    /// the bridge's member list first.
+    fn add_member(&self, bridge: &str, iface: &str) -> Result<()> {
+        let members = self.runner.run("ifconfig", &[bridge])?.stdout;
+        let present = members.lines().any(|l| {
+            let l = l.trim();
+            l.strip_prefix("member:")
+                .is_some_and(|rest| rest.split_whitespace().next() == Some(iface))
+        });
+        if !present {
+            self.runner
+                .run_checked("ifconfig", &[bridge, "addm", iface])?;
+        }
+        Ok(())
+    }
+
     fn attach_tap(&self, tap: &str, bridge: &str) -> Result<()> {
         if !self.iface_exists(tap)? {
             self.runner
                 .run_checked("ifconfig", &["tap", "create", "name", tap])?;
         }
         self.runner.run_checked("ifconfig", &[tap, "up"])?;
-        self.runner
-            .run_checked("ifconfig", &[bridge, "addm", tap])?;
-        Ok(())
+        self.add_member(bridge, tap)
     }
 
     /// Create the upstream tap for `qube`, attach it to `netvm`'s bridge and
     /// return the tap name.
     pub fn create_tap(&self, qube: &str, netvm: &str) -> Result<String> {
         let br = self.ensure_bridge(netvm)?;
+        let tap = tap_name(qube);
+        self.attach_tap(&tap, &br)?;
+        Ok(tap)
+    }
+
+    /// Create the upstream tap for `qube` on a bridge shared with the host
+    /// interface `iface` (no NetVM in between) and return the tap name.
+    pub fn create_uplink_tap(&self, qube: &str, iface: &str) -> Result<String> {
+        let br = uplink_bridge_name(iface);
+        if !self.iface_exists(&br)? {
+            self.runner
+                .run_checked("ifconfig", &["bridge", "create", "name", &br])?;
+        }
+        self.runner.run_checked("ifconfig", &[iface, "up"])?;
+        self.add_member(&br, iface)?;
+        self.runner.run_checked("ifconfig", &[&br, "up"])?;
         let tap = tap_name(qube);
         self.attach_tap(&tap, &br)?;
         Ok(tap)
@@ -121,6 +158,46 @@ mod tests {
     }
 
     #[test]
+    fn uplink_tap_bridges_the_host_interface_once() {
+        let m = MockRunner::new()
+            .respond("ifconfig", &["bru-em0"], CmdOutput::failed(1, ""))
+            .respond("ifconfig", &["bru-em0", "up"], CmdOutput::ok(""))
+            .respond("ifconfig", &["bru-em0", "addm"], CmdOutput::ok(""))
+            .respond("ifconfig", &["tap-sys-net"], CmdOutput::failed(1, ""))
+            .respond("ifconfig", &["tap-sys-net", "up"], CmdOutput::ok(""));
+        let net = Net::new(&m);
+        assert_eq!(
+            net.create_uplink_tap("sys-net", "em0").unwrap(),
+            "tap-sys-net"
+        );
+        let calls = m.calls();
+        assert!(calls.contains(&"ifconfig bridge create name bru-em0".to_string()));
+        assert!(calls.contains(&"ifconfig em0 up".to_string()));
+        assert!(calls.contains(&"ifconfig bru-em0 addm em0".to_string()));
+        assert!(calls.contains(&"ifconfig bru-em0 addm tap-sys-net".to_string()));
+
+        // A second qube on the same uplink: the bridge exists with em0 in
+        // it (not added again), only the new tap joins.
+        let m = MockRunner::new().respond(
+            "ifconfig",
+            &["bru-em0"],
+            CmdOutput::ok("bru-em0: flags=...\n\tmember: em0 flags=143<LEARNING>\n"),
+        );
+        assert_eq!(
+            Net::new(&m).create_uplink_tap("work", "em0").unwrap(),
+            "tap-work"
+        );
+        assert!(!m.calls().contains(&"ifconfig bru-em0 addm em0".to_string()));
+        assert!(m
+            .calls()
+            .contains(&"ifconfig bru-em0 addm tap-work".to_string()));
+        assert_eq!(
+            uplink_bridge_name("a-very-long-qube-name").len(),
+            IFNAME_MAX
+        );
+    }
+
+    #[test]
     fn downstream_tap_uses_own_bridge() {
         let m = MockRunner::new()
             .respond("ifconfig", &["br-sys-fw"], CmdOutput::failed(1, ""))
@@ -161,9 +238,40 @@ mod tests {
                 "ifconfig tap-work",
                 "ifconfig tap create name tap-work",
                 "ifconfig tap-work up",
+                "ifconfig br-sys-net",
                 "ifconfig br-sys-net addm tap-work",
             ]
         );
+    }
+
+    #[test]
+    fn tap_already_on_the_bridge_is_not_added_again() {
+        // A tap left behind by an interrupted run is still a member; a
+        // second `addm` would fail with "File exists". Names are matched
+        // whole: `tap-work` is not `tap-work2`.
+        let m = MockRunner::new().respond(
+            "ifconfig",
+            &["br-sys-net"],
+            CmdOutput::ok(
+                "br-sys-net: flags=...\n\tmember: tap-work2 flags=143<LEARNING>\n\
+                 \tmember: tap-work flags=143<LEARNING>\n",
+            ),
+        );
+        Net::new(&m).create_tap("work", "sys-net").unwrap();
+        assert!(
+            !m.calls().iter().any(|c| c.contains("addm")),
+            "{:?}",
+            m.calls()
+        );
+        let m = MockRunner::new().respond(
+            "ifconfig",
+            &["br-sys-net"],
+            CmdOutput::ok("br-sys-net: flags=...\n\tmember: tap-work2 flags=143<LEARNING>\n"),
+        );
+        Net::new(&m).create_tap("work", "sys-net").unwrap();
+        assert!(m
+            .calls()
+            .contains(&"ifconfig br-sys-net addm tap-work".to_string()));
     }
 
     #[test]

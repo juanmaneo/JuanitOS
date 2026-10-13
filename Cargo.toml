@@ -4,11 +4,13 @@ members = [
     "crates/jos-fwcfg",
     "crates/jos-fwnet",
     "crates/jos-gfx",
+    "crates/jos-fb",
     "crates/jos-splash",
     "crates/juanitos-core",
     "crates/jos",
     "crates/jos-install",
     "crates/jos-release",
+    "xtask",
 ]
 # UEFI applications are their own workspaces: they only build for
 # x86_64-unknown-uefi.

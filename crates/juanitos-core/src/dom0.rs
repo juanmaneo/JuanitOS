@@ -39,8 +39,11 @@ pub const GUI_PACKAGES: &[&str] = &[
 /// bootstrap, see `docs/bootstrap.md`).
 pub const SELFHOST_PACKAGES: &[&str] = &["rust", "git"];
 
-/// Kernel modules loaded at boot (also checked by `jos doctor`).
-pub const KERNEL_MODULES: &[&str] = &["vmm", "nmdm", "if_bridge", "if_tap"];
+/// Kernel modules loaded at boot. `if_tap` is needed too but is compiled
+/// into GENERIC (as part of `if_tuntap`) since FreeBSD 12, so listing it
+/// here only produces "Unable to load kernel module" warnings; `jos doctor`
+/// checks for it by module name instead.
+pub const KERNEL_MODULES: &[&str] = &["vmm", "nmdm", "if_bridge"];
 
 /// The `rc.d` script that autostarts qubes, installed as
 /// `/usr/local/etc/rc.d/jos`.
@@ -292,7 +295,7 @@ mod tests {
         assert!(s.contains("zfs_enable=\"YES\""));
         assert!(s.contains("jos_enable=\"YES\""));
         assert!(s.contains("cosmic_greeter_enable=\"YES\""));
-        assert!(s.contains("kld_list=\"vmm nmdm if_bridge if_tap\""));
+        assert!(s.contains("kld_list=\"vmm nmdm if_bridge\""));
 
         let no_gui = rc_conf(Flavor::Installed, &Dom0Options { gui: false, ..opts });
         assert!(!no_gui.contains("seatd_enable"));

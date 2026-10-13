@@ -27,9 +27,12 @@ filter whose rules come from the host.
 A unikernel qube is an ordinary bhyve guest, so no new hypervisor plumbing
 is needed:
 
-- Boots via the standard `edk2-bhyve` bootrom from a read-only FAT
-  image (`Qube::kernel`) that contains the unikernel as
-  `EFI/BOOT/BOOTX64.EFI` plus its config.
+- Boots via the standard `edk2-bhyve` bootrom from a FAT image
+  (`Qube::kernel`) that contains the unikernel as `EFI/BOOT/BOOTX64.EFI`.
+  The image is copied to `<run_dir>/<name>.boot.img` before every boot
+  and that copy is what the VM gets: the bhyve bootrom refuses to boot
+  from a `virtio-blk,...,ro` device ("UEFI Misc Device: Not Found"), so
+  the disk is writable and the shipped image stays pristine instead.
 - Two `virtio-net` devices: slot 3 upstream (`tap-<name>` on the NetVM's
   bridge), slot 4 downstream (`tapd-<name>` on `br-<name>`).
 - `com1` on the `nmdm` console for logs; `jos console sys-firewall` works
@@ -119,6 +122,14 @@ identifier in both directions, and the NAT keyed flows on the original
 one, so every reply was dropped as unsolicited (`out 20 in 0 unsolicited
 20`). Fixed in `jos-fwnet::nat` with an engine-level regression test.
 
+On bhyve itself (JuanitOS dom0 under nested KVM, `BHYVE_UEFI.fd`), the
+same image boots as `sys-firewall` behind a `sys-net` built from the
+`fbsd15-net` template: both bootrom `VirtioNetDxe` NICs come up, the
+config disk is read, and the upstream side takes its lease from
+sys-net's dnsmasq (`upstream bound: 10.138.0.35 via 10.138.0.1`). The
+bhyve test caught one difference from OVMF: the read-only flag on the
+boot image (see "Guest ABI").
+
 ### Configuration delivery
 
 Qubes uses QubesDB for this. JuanitOS has no inter-VM database yet, so the
@@ -145,7 +156,8 @@ configuration travels on a second, raw virtio-blk disk (implemented in
    ```
 
    The text is NUL-terminated, padded to a 512-byte multiple, written to
-   `<run_dir>/<name>.fwcfg` and attached read-only at guest PCI slot 30.
+   `<run_dir>/<name>.fwcfg` (regenerated before every boot) and attached
+   at guest PCI slot 30.
    The unikernel reads the first sectors of that disk with the virtio-blk
    driver it already has; no filesystem on either side.
 3. Changing rules for a running firewall means restarting it (sub-second
