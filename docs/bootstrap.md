@@ -215,6 +215,25 @@ What the first stage-2 run showed (JuanitOS 0.1.0 under QEMU, 2026-10):
   the installer runs in text mode there (`docs/boot-splash.md`), which is
   how the stage-2 VM was installed (`qemu -vga none`).
 
+Stage 2 was run again on 2026-10-14 on the nested dom0 that hosts the
+test qubes (`docs/gpu-passthrough.md`), with the sources of the events
+port and the request broker, while `sys-net`, `sys-firewall`, `work` and
+`web` kept running. The uplink bridge got a temporary address
+(`dhclient bru-vtnet0`: `vtnet0` is a bridge member there) that was
+removed afterwards. The first run exposed a bug in the source copy: that
+dom0's tree had `vendor` as a symbolic link and the UEFI crates' own
+`target/` directories, and `install_source` copied both, so the image
+shipped a 160 MB source tree whose `vendor` was a dangling link (cargo
+vendor had followed the link and refilled the old directory). The copy
+now leaves out everything `.gitignore` lists plus `vendor/` when it is
+about to be regenerated (`source_excludes`, with a test reproducing that
+tree). The second run: 4 min 49 s on 8 vCPUs, `built_on = "juanitos"`,
+`stage = 2`, a 3,700,162,560-byte ISO and a 533 MB dom0 tarball whose
+128,581 entries are the stage-1 list plus exactly the 13 source files
+added since (agent, events, requests, share, the template agent scripts
+and `docs/inter-qube.md`); `/usr/local/bin/jos` in it is byte-identical
+to the one the dom0 runs.
+
 ## Stage 3 — prove it
 
 Install the stage-2 ISO (QEMU is enough: `jos-release qemu`), build again,

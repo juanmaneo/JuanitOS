@@ -435,8 +435,9 @@ impl<'a> Builder<'a> {
         let dst = self.rootfs().join("usr/local/src/juanitos");
         self.step(&format!("Copying source tree to {}", dst.display()));
         self.fs.remove_tree(&dst)?;
-        self.fs
-            .copy_tree(&self.repo, &dst, &[".git", "target", "release/out"])?;
+        let excludes = source_excludes(self.profile.source.vendor);
+        let excludes: Vec<&str> = excludes.iter().map(String::as_str).collect();
+        self.fs.copy_tree(&self.repo, &dst, &excludes)?;
         if self.profile.source.vendor {
             let manifest = dst.join("Cargo.toml");
             let vendor = dst.join("vendor");
@@ -621,6 +622,25 @@ impl<'a> Builder<'a> {
         println!("\nDone: {}", iso.display());
         Ok(())
     }
+}
+
+/// What `install_source` leaves out of the copied repository: VCS data and
+/// everything `.gitignore` marks as build output or scratch, including the
+/// UEFI crates' own `target/` (they are separate workspaces). `vendor/` is
+/// skipped too when `cargo vendor` is about to regenerate it: a dom0
+/// rebuilding itself would otherwise copy its existing one first, and a
+/// symbolic link there would be followed by `cargo vendor` and shipped as
+/// a link.
+pub fn source_excludes(vendor: bool) -> Vec<String> {
+    let mut v: Vec<String> = [".git", "target", "release/out", "work"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    v.extend(UEFI_CRATES.iter().map(|c| format!("crates/{c}/target")));
+    if vendor {
+        v.push("vendor".into());
+    }
+    v
 }
 
 /// `.cargo/config.toml` of the installed source tree: the repository's
@@ -902,5 +922,97 @@ mod tests {
         b.boot_efi = Some(PathBuf::from("/flag/jos-boot.efi"));
         assert_eq!(b.boot_efi(), Some(PathBuf::from("/flag/jos-boot.efi")));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A scratch directory removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("jos-builder-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn put(&self, rel: &str, content: &[u8]) -> PathBuf {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+            p
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A builder working for real inside `dir` (repo, work, bins and the
+    /// installed root all underneath it), host commands mocked.
+    fn real_builder<'a>(runner: &'a dyn Runner, profile: &'a Profile, dir: &Path) -> Builder<'a> {
+        Builder {
+            runner,
+            fs: FsOps::new(false),
+            profile,
+            repo: dir.join("repo"),
+            work: dir.join("work"),
+            bins: dir.join("bins"),
+            firewall_image: None,
+            boot_efi: None,
+            installed_root: dir.join("root"),
+        }
+    }
+
+    /// Found by the stage-2 rebuild on the nested dom0: its source tree had
+    /// `vendor` as a symbolic link and the UEFI crates' build output, and
+    /// both ended up in the new root (the link followed by `cargo vendor`).
+    #[cfg(unix)]
+    #[test]
+    fn the_source_copy_leaves_build_output_and_old_vendoring_behind() {
+        let s = Scratch::new("source");
+        s.put("repo/Cargo.toml", b"[workspace]\n");
+        s.put("repo/.cargo/config.toml", b"[alias]\nxtask = \"run\"\n");
+        s.put("repo/crates/jos-boot/src/main.rs", b"fn main() {}\n");
+        s.put("repo/crates/jos-boot/target/big.efi", b"x");
+        s.put("repo/crates/jos-firewall/target/big.efi", b"x");
+        s.put("repo/target/release/jos", b"x");
+        s.put("repo/work/dom0.qcow2", b"x");
+        s.put("elsewhere/vendor/adler2/Cargo.toml", b"x");
+        std::os::unix::fs::symlink(s.0.join("elsewhere/vendor"), s.0.join("repo/vendor")).unwrap();
+
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        b.install_source().unwrap();
+        let dst = b.rootfs().join("usr/local/src/juanitos");
+        assert!(dst.join("crates/jos-boot/src/main.rs").is_file());
+        for gone in [
+            "crates/jos-boot/target",
+            "crates/jos-firewall/target",
+            "target",
+            "work",
+            "vendor",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(dst.join(gone)).is_err(),
+                "{gone} copied"
+            );
+        }
+        assert_eq!(
+            m.calls(),
+            vec![format!(
+                "cargo vendor --manifest-path {0}/Cargo.toml {0}/vendor",
+                unix(&dst)
+            )]
+        );
+        let config = std::fs::read_to_string(dst.join(".cargo/config.toml")).unwrap();
+        assert!(config.starts_with("[alias]") && config.contains("vendored-sources"));
+
+        // Without `cargo vendor` the existing vendor/ is all there is: keep it.
+        assert!(!source_excludes(true).iter().all(|e| e != "vendor"));
+        assert!(source_excludes(false).iter().all(|e| e != "vendor"));
     }
 }

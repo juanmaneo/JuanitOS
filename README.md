@@ -313,7 +313,10 @@ stamped `built_on = "juanitos"`, `stage = 2` that boots to the installer.
 The stage-1 and stage-2 dom0 tarballs have the same 128,568 entries and
 differ only in the JuanitOS binaries, `release.toml` and `pkg`'s
 bookkeeping (`docs/bootstrap.md` has the comparison and what it
-uncovered).
+uncovered). It was repeated on the nested dom0 with the events-port
+sources, qubes running alongside: 4 min 49 s, `stage = 2`, the stage-1
+file list plus the 13 new source files, after fixing a source copy that
+had shipped that dom0's UEFI build output and a dangling `vendor` link.
 
 Not yet done: passthrough on real hardware (the nested run above proves
 the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
