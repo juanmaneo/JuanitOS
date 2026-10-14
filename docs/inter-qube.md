@@ -248,6 +248,12 @@ others can be added with their own policy rules.
   `jos run` uses: `jos serve` can hold it for good without blocking
   `jos run`. Only `jos-copy` rings so far; any guest program may, the
   broker scans whatever the line says.
+- Soak on the nested dom0: 200 `jos-copy` rounds (100 from `work`, 100
+  from `web`) gave 206 doorbells and 206 deliveries, with `jos serve` at
+  3 threads, 8 descriptors and 5 MB RSS before and after; four `jos
+  stop`/`jos start` cycles of `web` dropped it to 2 threads while the
+  qube was down and back to 3 once the port was dialed again, and the
+  doorbell kept working after the churn.
 - The poll interval could be raised now that the doorbell exists; it
   stays at 2 s so that clones made before the port (and Redox qubes, which
   have no share either) keep their behaviour.
