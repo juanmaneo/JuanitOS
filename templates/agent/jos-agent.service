@@ -1,0 +1,13 @@
+[Unit]
+Description=JuanitOS guest agent (dom0 share and hostname)
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Before=network-pre.target sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/jos-agent
+
+[Install]
+WantedBy=sysinit.target

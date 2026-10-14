@@ -245,8 +245,76 @@ fn templates_pci_and_removal() {
 
     let out = e.ok(&["remove", "gpu"]);
     assert!(out.contains("removed gpu"));
+    assert!(out.contains("rm -rf /var/db/juanitos/share/gpu"), "{out}");
     assert!(!e.qube_file("gpu").exists());
     assert!(e.err(&["remove", "gpu"]).contains("gpu"));
+    // A unikernel has no share to remove.
+    let out = e.ok(&["remove", "sys-firewall"]);
+    assert!(!out.contains("share"), "{out}");
+}
+
+#[test]
+fn start_exports_the_share_and_copy_moves_files() {
+    let e = Env::new("copy");
+    e.quick_start();
+    // Booting prepares the share and attaches it on slot 28.
+    let start = e.ok(&["start", "work"]);
+    assert!(
+        start.contains("mkdir -p /var/db/juanitos/share/work/in /var/db/juanitos/share/work/out"),
+        "{start}"
+    );
+    assert!(
+        start.contains("tee /var/db/juanitos/share/work/name"),
+        "{start}"
+    );
+    assert!(
+        start.contains("28,virtio-9p,jos=/var/db/juanitos/share/work"),
+        "{start}"
+    );
+    // The unikernel firewall gets none of it.
+    let fw = e.ok(&["start", "sys-firewall"]);
+    assert!(!fw.contains("virtio-9p"), "{fw}");
+
+    // Qube to qube: the source exports over its console, dom0 moves.
+    let out = e.ok(&["copy", "work:/etc/motd", "gpu"]);
+    assert!(out.contains("type on /dev/nmdm-work.1B"), "{out}");
+    assert!(out.contains("cp -RL /etc/motd /mnt/jos/out/motd"), "{out}");
+    assert!(
+        out.contains(
+            "mv /var/db/juanitos/share/work/out/motd /var/db/juanitos/share/gpu/in/work/motd"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("copied work:/etc/motd to gpu:/mnt/jos/in/work/motd"),
+        "{out}"
+    );
+
+    // dom0 to qube, with and without the dom0: prefix.
+    let out = e.ok(&["copy", "dom0:/root/notes", "work"]);
+    assert!(
+        out.contains("cp -RL /root/notes /var/db/juanitos/share/work/in/dom0/notes"),
+        "{out}"
+    );
+    assert!(!out.contains("type on"), "{out}");
+    let out = e.ok(&["copy", "/root/notes", "work"]);
+    assert!(
+        out.contains("copied dom0:/root/notes to work:/mnt/jos/in/dom0/notes"),
+        "{out}"
+    );
+
+    // Refusals: unknown qubes, qubes without a share, same qube, bad paths.
+    assert!(e.err(&["copy", "ghost:/x", "work"]).contains("ghost"));
+    assert!(e.err(&["copy", "work:/x", "ghost"]).contains("ghost"));
+    assert!(e
+        .err(&["copy", "sys-firewall:/x", "work"])
+        .contains("no dom0 share"));
+    assert!(e
+        .err(&["copy", "work:/x", "sys-firewall"])
+        .contains("no dom0 share"));
+    assert!(e.err(&["copy", "work:/x", "work"]).contains("same qube"));
+    assert!(e.err(&["copy", "work:/", "gpu"]).contains("name a file"));
+    assert!(e.err(&["copy", "work:", "gpu"]).contains("missing path"));
 }
 
 #[test]
@@ -525,31 +593,16 @@ fn unknown_qubes_and_host_only_commands() {
     assert!(!out.status.success());
 }
 
-/// `jos run` for real, with a pseudo-terminal standing in for the nmdm
-/// console: the test plays the guest shell on the master side.
+/// A pseudo-terminal standing in for a qube's nmdm console: the master
+/// side is returned for the test to play the guest shell on, the slave is
+/// linked as `nmdm-<name>.1B` under `consoles/`. The second file keeps
+/// the slave open (on Linux a master without any slave open reads EIO).
 #[cfg(unix)]
-#[test]
-fn run_talks_to_the_console_device() {
-    use std::io::{Read, Write};
+fn fake_console(e: &Env, name: &str) -> (std::fs::File, std::fs::File) {
     use std::os::fd::FromRawFd;
-
-    let e = Env::new("pty");
-    e.ok(&["init"]);
-    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
-    e.ok(&[
-        "create",
-        "fw",
-        "--kind",
-        "firewall",
-        "--os",
-        "unikernel",
-        "--kernel",
-        "/k.img",
-    ]);
-
     // SAFETY: plain libc pty calls on fresh descriptors; the fds are owned
     // by the File created from them below.
-    let (master, _slave_keepalive, slave_path) = unsafe {
+    let (master, keepalive, slave_path) = unsafe {
         let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
         assert!(m >= 0, "posix_openpt");
         assert_eq!(libc::grantpt(m), 0);
@@ -564,8 +617,6 @@ fn run_talks_to_the_console_device() {
         // unless `jos run` switches it to raw mode itself.
         let s = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
         assert!(s >= 0);
-        // Keeping the slave open: on Linux a master without any slave
-        // open reads EIO.
         (
             std::fs::File::from_raw_fd(m),
             std::fs::File::from_raw_fd(s),
@@ -574,18 +625,23 @@ fn run_talks_to_the_console_device() {
     };
     let consoles = e.dir.join("consoles");
     std::fs::create_dir_all(&consoles).unwrap();
-    std::os::unix::fs::symlink(&slave_path, consoles.join("nmdm-work.1B")).unwrap();
-    let cfg = e.dir.join("jos.toml");
-    std::fs::write(
-        &cfg,
-        format!("console_dir = {:?}\n", consoles.to_string_lossy()),
-    )
-    .unwrap();
+    std::os::unix::fs::symlink(&slave_path, consoles.join(format!("nmdm-{name}.1B"))).unwrap();
+    (master, keepalive)
+}
 
-    // The "guest": wait for the typed script, answer with output and the
-    // end marker carrying exit status 3.
-    let mut guest = master.try_clone().unwrap();
-    let shell = std::thread::spawn(move || {
+/// Play a guest shell on `master`: wait for the script `jos run` types,
+/// hand the command line to `on_command` (which returns the exit status
+/// to report), echo it like a terminal, print `output`, then the end
+/// marker. Returns everything received, for the test to check that the
+/// host did not echo the guest's output back.
+#[cfg(unix)]
+fn fake_guest(
+    mut guest: std::fs::File,
+    output: &'static str,
+    on_command: impl FnOnce(&str) -> i32 + Send + 'static,
+) -> std::thread::JoinHandle<String> {
+    use std::io::{Read, Write};
+    std::thread::spawn(move || {
         let mut seen = String::new();
         let mut buf = [0u8; 256];
         loop {
@@ -595,14 +651,17 @@ fn run_talks_to_the_console_device() {
                 break;
             }
         }
-        // Echo the typed lines like a terminal, the command's output in
-        // between, then the marker.
         let (cmd_line, marker_line) = seen.trim_start_matches('\r').split_once('\r').unwrap();
         let (cmd_line, marker_line) = (cmd_line.to_string(), marker_line.to_string());
+        let status = on_command(&cmd_line);
         guest.write_all(cmd_line.as_bytes()).unwrap();
-        guest.write_all(b"\r\nhello from the guest\r\n$ ").unwrap();
+        guest
+            .write_all(format!("\r\n{output}$ ").as_bytes())
+            .unwrap();
         guest.write_all(marker_line.as_bytes()).unwrap();
-        guest.write_all(b"\nJOS_RUN_END 3\r\n").unwrap();
+        guest
+            .write_all(format!("\nJOS_RUN_END {status}\r\n").as_bytes())
+            .unwrap();
         // Keep listening briefly: anything arriving now would be the
         // host side echoing our output back at us.
         // SAFETY: fcntl on a descriptor this thread owns.
@@ -617,8 +676,50 @@ fn run_talks_to_the_console_device() {
                 _ => std::thread::sleep(std::time::Duration::from_millis(20)),
             }
         }
+        // Blocking again: the flag lives on the open file description,
+        // shared with the next guest's clone of the master.
+        // SAFETY: as above.
+        unsafe {
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&guest);
+            libc::fcntl(fd, libc::F_SETFL, 0);
+        }
         seen
-    });
+    })
+}
+
+/// `jos run` for real, with a pseudo-terminal standing in for the nmdm
+/// console: the test plays the guest shell on the master side.
+#[cfg(unix)]
+#[test]
+fn run_talks_to_the_console_device() {
+    let e = Env::new("pty");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&[
+        "create",
+        "fw",
+        "--kind",
+        "firewall",
+        "--os",
+        "unikernel",
+        "--kernel",
+        "/k.img",
+    ]);
+    let (master, _keepalive) = fake_console(&e, "work");
+    let consoles = e.dir.join("consoles");
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(
+        &cfg,
+        format!("console_dir = {:?}\n", consoles.to_string_lossy()),
+    )
+    .unwrap();
+
+    // The "guest" answers with output and exit status 3.
+    let shell = fake_guest(
+        master.try_clone().unwrap(),
+        "hello from the guest\r\n",
+        |_| 3,
+    );
 
     let out = Command::new(env!("CARGO_BIN_EXE_jos"))
         .arg("--config")
@@ -658,4 +759,84 @@ fn run_talks_to_the_console_device() {
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stderr).contains("no shell on its serial console"));
+}
+
+/// `jos copy` for real: a fake guest on the source console, a real
+/// `share_dir` on disk. The guest "writes" to its outbox by creating the
+/// file on the host side, as it would through 9p.
+#[cfg(unix)]
+#[test]
+fn copy_moves_files_through_the_share_for_real() {
+    let e = Env::new("copy-real");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&["create", "jail", "--kind", "app", "--os", "freebsd"]);
+    let (master, _keepalive) = fake_console(&e, "work");
+    let consoles = e.dir.join("consoles");
+    let share = e.dir.join("share");
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "console_dir = {:?}\nshare_dir = {:?}\n",
+            consoles.to_string_lossy(),
+            share.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let copy = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_jos"))
+            .arg("--config")
+            .arg(&cfg)
+            .args(["copy", "--timeout", "20"])
+            .args(args)
+            .env("JOS_CONFIG_DIR", &e.dir)
+            .output()
+            .unwrap()
+    };
+
+    // Qube to qube: the guest fills its outbox, dom0 moves the file.
+    let outbox = share.join("work").join("out");
+    let outbox_for_guest = outbox.clone();
+    let shell = fake_guest(master.try_clone().unwrap(), "", move |cmd| {
+        assert!(cmd.contains("cp -RL /etc/motd /mnt/jos/out/motd"), "{cmd}");
+        std::fs::create_dir_all(&outbox_for_guest).unwrap();
+        std::fs::write(outbox_for_guest.join("motd"), "Welcome\n").unwrap();
+        0
+    });
+    let out = copy(&["work:/etc/motd", "jail"]);
+    shell.join().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let landed = share.join("jail").join("in").join("work").join("motd");
+    assert_eq!(std::fs::read_to_string(&landed).unwrap(), "Welcome\n");
+    assert!(!outbox.join("motd").exists(), "outbox entry was moved");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("jail:/mnt/jos/in/work/motd"));
+
+    // The guest fails: nothing moves, its output is reported.
+    let shell = fake_guest(
+        master.try_clone().unwrap(),
+        "cp: /nope: No such file\r\n",
+        |_| 1,
+    );
+    let out = copy(&["work:/nope", "jail"]);
+    shell.join().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("exporting /nope failed (exit 1)"), "{err}");
+    assert!(err.contains("No such file"), "{err}");
+
+    // dom0 to qube: copied, made writable for the guest user.
+    let data = e.dir.join("data");
+    std::fs::create_dir_all(data.join("sub")).unwrap();
+    std::fs::write(data.join("sub").join("f"), "x").unwrap();
+    let out = copy(&[data.to_str().unwrap(), "jail"]);
+    assert!(out.status.success(), "{out:?}");
+    let landed = share.join("jail").join("in").join("dom0").join("data");
+    assert_eq!(
+        std::fs::read_to_string(landed.join("sub").join("f")).unwrap(),
+        "x"
+    );
+    let out = copy(&["/definitely/not/here", "jail"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no such file or directory on dom0"));
 }

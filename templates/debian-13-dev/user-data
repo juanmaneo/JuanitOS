@@ -61,14 +61,58 @@ write_files:
         "log-driver": "local",
         "log-opts": { "max-size": "10m" }
       }
+  # The guest agent: mounts the dom0 share and sets the hostname (see
+  # templates/agent/jos-agent, docs/inter-qube.md).
+  - path: /usr/local/sbin/jos-agent
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # JuanitOS guest agent for Linux qubes: mount the dom0 share (virtio-9p,
+      # tag "jos") on /mnt/jos and take the qube's name from it as the hostname,
+      # so every clone of a template boots under its own name. Without a share
+      # (the template booted elsewhere) nothing happens.
+      modprobe 9pnet_virtio 2>/dev/null
+      mkdir -p /mnt/jos
+      if ! mount -t 9p -o trans=virtio,version=9p2000.L jos /mnt/jos 2>/dev/null; then
+          echo "jos-agent: no dom0 share"
+          exit 0
+      fi
+      qube=$(head -n 1 /mnt/jos/name 2>/dev/null)
+      [ -n "$qube" ] || exit 0
+      hostname "$qube"
+      if [ "$(cat /etc/hostname 2>/dev/null)" != "$qube" ]; then
+          echo "$qube" > /etc/hostname
+          if grep -q '^127\.0\.1\.1' /etc/hosts; then
+              sed -i "s/^127\.0\.1\.1.*/127.0.1.1 $qube/" /etc/hosts
+          else
+              echo "127.0.1.1 $qube" >> /etc/hosts
+          fi
+      fi
+      echo "jos-agent: this is qube $qube"
+  - path: /etc/systemd/system/jos-agent.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=JuanitOS guest agent (dom0 share and hostname)
+      DefaultDependencies=no
+      After=local-fs.target systemd-modules-load.service
+      Before=network-pre.target sysinit.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/jos-agent
+
+      [Install]
+      WantedBy=sysinit.target
 
 runcmd:
   - [usermod, -aG, docker, user]
-  - [systemctl, enable, containerd.service, docker.service]
+  - [systemctl, enable, containerd.service, docker.service, jos-agent.service]
   - [systemctl, daemon-reload]
   - [apt-get, clean]
   # App qubes are clones of this template: cloud-init must not run again
-  # in them (no seed disk there, and they keep the template's identity).
+  # in them (no seed disk there; jos-agent gives each clone its name).
   - [touch, /etc/cloud/cloud-init.disabled]
 
 power_state:

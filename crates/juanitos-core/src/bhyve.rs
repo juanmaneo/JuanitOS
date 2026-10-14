@@ -10,6 +10,7 @@
 //! | 4    | virtio-net: downstream tap (own bridge), for net/firewall   |
 //! |      | (Redox qubes: `nvme` and `e1000` in the same slots)         |
 //! | 4+   | passthru devices, after the last network slot               |
+//! | 28   | virtio-9p: the qube's dom0 share (FreeBSD and Linux guests) |
 //! | 29   | ahci-cd: cloud-init seed while a template is provisioned    |
 //! | 30   | virtio-blk: raw config disk of a unikernel firewall         |
 //! | 31   | lpc (com1 console, bootrom)                                 |
@@ -54,6 +55,8 @@ pub const FIRST_NET_SLOT: u32 = 3;
 pub const MIN_PASSTHRU_SLOT: u32 = 4;
 /// Guest PCI slot of a unikernel firewall's raw config disk.
 pub const CONFIG_DISK_SLOT: u32 = crate::firewall::CONFIG_DISK_SLOT;
+/// Guest PCI slot of the virtio-9p share (see [`crate::share`]).
+pub const SHARE_SLOT: u32 = 28;
 /// Guest PCI slot of the cloud-init seed CD (NoCloud `cidata` ISO)
 /// attached while a template is provisioned.
 pub const SEED_SLOT: u32 = 29;
@@ -141,6 +144,9 @@ pub fn build_run_command(q: &Qube, cfg: &GlobalConfig, taps: &[&str]) -> Result<
                 ),
             ],
         );
+    }
+    if q.os.has_share() {
+        add(&mut args, &["-s", &crate::share::device_arg(cfg, q)]);
     }
     let first_passthru = MIN_PASSTHRU_SLOT.max(FIRST_NET_SLOT + taps.len() as u32);
     for (i, addr) in q.pci_passthrough.iter().enumerate() {
@@ -302,6 +308,7 @@ impl<'a> Vm<'a> {
         let taps = self.setup_taps(q)?;
         let tap_refs: Vec<&str> = taps.iter().map(String::as_str).collect();
         self.stage_kernel(q)?;
+        self.share().prepare(q)?;
         let cmd = build_run_command(q, self.cfg, &tap_refs)?;
         let out = cmd.run(self.runner)?;
         let _ = build_destroy_command(&q.name).run(self.runner);
@@ -315,6 +322,10 @@ impl<'a> Vm<'a> {
                 stderr: out.stderr,
             })
         }
+    }
+
+    fn share(&self) -> crate::share::Share<'a> {
+        crate::share::Share::new(self.runner, self.cfg)
     }
 
     /// A unikernel boots a fresh copy of its `kernel` image under the run
@@ -379,6 +390,7 @@ impl<'a> Vm<'a> {
     pub fn maintenance_command(&self, q: &Qube, seed: Option<&str>) -> Result<BhyveCommand> {
         let taps = self.setup_taps(q)?;
         let tap_refs: Vec<&str> = taps.iter().map(String::as_str).collect();
+        self.share().prepare(q)?;
         let cmd = build_run_command(q, self.cfg, &tap_refs)?;
         Ok(match seed {
             Some(iso) => with_cdrom(cmd, iso),
@@ -443,6 +455,8 @@ mod tests {
                 "2,virtio-blk,/dev/zvol/zroot/juanitos/qubes/work",
                 "-s",
                 "3,virtio-net,tap-work",
+                "-s",
+                "28,virtio-9p,jos=/var/db/juanitos/share/work",
                 "-l",
                 "com1,/dev/nmdm-work.1A",
                 "-l",

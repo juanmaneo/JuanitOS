@@ -106,6 +106,13 @@ impl OsType {
         !matches!(self, OsType::Unikernel)
     }
 
+    /// True when the guest can mount the dom0 share (a virtio-9p client:
+    /// FreeBSD's `virtio_p9fs`, Linux's `9pnet_virtio`); see
+    /// [`crate::share`].
+    pub fn has_share(&self) -> bool {
+        matches!(self, OsType::Freebsd | OsType::Linux)
+    }
+
     /// How `jos run` frames a command for the guest's shell.
     pub fn console_dialect(&self) -> crate::console::Dialect {
         match self {
@@ -346,6 +353,9 @@ fn default_netvm() -> Option<String> {
 fn default_console_dir() -> String {
     "/dev".into()
 }
+fn default_share_dir() -> String {
+    "/var/db/juanitos/share".into()
+}
 
 /// Host-wide settings, normally loaded from `/usr/local/etc/juanitos/jos.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +379,10 @@ pub struct GlobalConfig {
     /// a directory of pseudo-terminals).
     #[serde(default = "default_console_dir")]
     pub console_dir: String,
+    /// Per-qube directories exported to the guests over virtio-9p (see
+    /// [`crate::share`]).
+    #[serde(default = "default_share_dir")]
+    pub share_dir: String,
 }
 
 impl Default for GlobalConfig {
@@ -382,6 +396,7 @@ impl Default for GlobalConfig {
             uefi_firmware: default_uefi_firmware(),
             default_netvm: default_netvm(),
             console_dir: default_console_dir(),
+            share_dir: default_share_dir(),
         }
     }
 }
@@ -440,6 +455,11 @@ impl GlobalConfig {
     /// before every boot).
     pub fn unikernel_boot_image(&self, name: &str) -> String {
         format!("{}/{name}.boot.img", self.run_dir)
+    }
+
+    /// The directory exported to qube `name` (its share).
+    pub fn share_dir_for(&self, name: &str) -> String {
+        format!("{}/{name}", self.share_dir)
     }
 }
 

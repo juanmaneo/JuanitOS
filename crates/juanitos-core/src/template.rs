@@ -576,6 +576,61 @@ mod tests {
         }
     }
 
+    /// Every template whose OS can mount the dom0 share ships the guest
+    /// agent from `templates/agent/`, verbatim (indented as cloud-config
+    /// `write_files` content) and enabled.
+    #[test]
+    fn templates_embed_the_guest_agent() {
+        fn embedded(user_data: &str, script: &str) -> bool {
+            let block: String = script
+                .lines()
+                .map(|l| {
+                    if l.is_empty() {
+                        "\n".to_string()
+                    } else {
+                        format!("      {l}\n")
+                    }
+                })
+                .collect();
+            user_data.contains(&block)
+        }
+        let freebsd_agent = include_str!("../../../templates/agent/jos_agent");
+        let linux_agent = include_str!("../../../templates/agent/jos-agent");
+        let linux_unit = include_str!("../../../templates/agent/jos-agent.service");
+        assert!(freebsd_agent.contains("mount -t p9fs jos /mnt/jos"));
+        assert!(linux_agent.contains("mount -t 9p -o trans=virtio,version=9p2000.L jos /mnt/jos"));
+        for r in RECIPES {
+            let Some(ud) = r.user_data else {
+                assert!(!r.os.has_share(), "{}", r.name);
+                continue;
+            };
+            match r.os {
+                OsType::Freebsd => {
+                    assert!(
+                        ud.contains("path: /usr/local/etc/rc.d/jos_agent"),
+                        "{}",
+                        r.name
+                    );
+                    assert!(embedded(ud, freebsd_agent), "{}: stale jos_agent", r.name);
+                    assert!(ud.contains("jos_agent_enable=YES"), "{}", r.name);
+                }
+                OsType::Linux => {
+                    assert!(ud.contains("path: /usr/local/sbin/jos-agent"), "{}", r.name);
+                    assert!(embedded(ud, linux_agent), "{}: stale jos-agent", r.name);
+                    assert!(embedded(ud, linux_unit), "{}: stale unit", r.name);
+                    assert!(
+                        ud.contains(
+                            "enable, containerd.service, docker.service, jos-agent.service"
+                        ),
+                        "{}",
+                        r.name
+                    );
+                }
+                other => panic!("{}: unexpected os {other}", r.name),
+            }
+        }
+    }
+
     #[test]
     fn wildcard_image_names_resolve_through_the_checksum_list() {
         let redox = find("redox").unwrap();

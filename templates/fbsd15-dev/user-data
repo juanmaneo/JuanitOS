@@ -22,6 +22,43 @@
 
 hostname: fbsd15-dev
 
+write_files:
+  # The guest agent: mounts the dom0 share and sets the hostname (see
+  # templates/agent/jos_agent, docs/inter-qube.md).
+  - path: /usr/local/etc/rc.d/jos_agent
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # PROVIDE: jos_agent
+      # REQUIRE: FILESYSTEMS hostname
+      # BEFORE: netif
+      #
+      # JuanitOS guest agent for FreeBSD qubes: mount the dom0 share (virtio-9p,
+      # tag "jos") on /mnt/jos and take the qube's name from it as the hostname,
+      # so every clone of a template boots under its own name instead of the
+      # template's from rc.conf (which /etc/rc.d/hostname has just applied).
+      # Without a share (the template booted elsewhere) nothing happens.
+      . /etc/rc.subr
+      name=jos_agent
+      rcvar=jos_agent_enable
+      start_cmd=jos_agent_start
+      stop_cmd=:
+      jos_agent_start() {
+          kldload -n virtio_p9fs || return 0
+          mkdir -p /mnt/jos
+          if ! mount -t p9fs jos /mnt/jos 2>/dev/null; then
+              echo "jos_agent: no dom0 share"
+              return 0
+          fi
+          qube=$(head -n 1 /mnt/jos/name 2>/dev/null)
+          if [ -n "$qube" ]; then
+              hostname "$qube"
+              echo "jos_agent: this is qube $qube"
+          fi
+      }
+      load_rc_config $name
+      run_rc_command "$1"
+
 runcmd:
   # Packages: Podman with the ocijail runtime and buildah, plus tools.
   - env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
@@ -37,7 +74,7 @@ runcmd:
   - echo 'fdesc /dev/fd fdescfs rw 0 0' >> /etc/fstab
   - sed -e 's/^v4egress_if = .*/v4egress_if = "vtnet0"/' -e 's/^v6egress_if = .*/v6egress_if = "vtnet0"/' /usr/local/etc/containers/pf.conf.sample > /etc/pf.conf
   # linux_enable: Linux images run too (`podman run --os=linux ...`).
-  - sysrc pf_enable=YES podman_enable=YES linux_enable=YES
+  - sysrc pf_enable=YES podman_enable=YES linux_enable=YES jos_agent_enable=YES
   - echo 'net.pf.filter_local=1' >> /etc/sysctl.conf
   # Container storage on its own dataset (the zfs storage driver).
   - zfs create -o mountpoint=/var/db/containers zroot/containers

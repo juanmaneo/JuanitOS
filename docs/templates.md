@@ -34,10 +34,19 @@ jos template install fbsd15-dev            # ~8 min
 jos create web  --kind app --os linux   --template debian-13-dev
 jos create jail --kind app --os freebsd --template fbsd15-dev
 jos start web && jos console web
-user@debian-13-dev:~$ docker run --rm hello-world
+user@web:~$ docker run --rm hello-world
 
-user@fbsd15-dev:~ $ doas podman run --rm --os=linux docker.io/library/alpine cat /etc/alpine-release
+user@jail:~ $ doas podman run --rm --os=linux docker.io/library/alpine cat /etc/alpine-release
 ```
+
+Each clone boots under its own name: the templates ship the **guest
+agent** (`templates/agent/`, embedded in every `user-data` as
+`/usr/local/etc/rc.d/jos_agent` on FreeBSD and `jos-agent.service` on
+Debian), which mounts the qube's dom0 share on `/mnt/jos` early in the
+boot and sets the hostname from the name dom0 wrote there. That share is
+also where `jos copy` delivers files (`docs/inter-qube.md`). The Redox
+template has no agent (no 9p client), so Redox clones keep the
+template's hostname.
 
 `--name` installs a recipe under another name (several variants side by
 side), `--disk-gb` sizes the zvol (default 40 GiB, sparse; the guest
@@ -201,7 +210,15 @@ jos start jail && jos run jail podman version
 provisioned the FreeBSD template over the dom0's NIC (nuageinit, `pkg`,
 power-off, `@base`) and the clone boots to the autologin shell on
 `nmdm`; `jos run` types commands there and returns their exit status
-(`jos run jail "sh -c 'exit 7'"` exits 7). The Redox recipe was
+(`jos run jail "sh -c 'exit 7'"` exits 7). The guest agent was added to
+the same template afterwards with `jos template run fbsd15-dev` (the
+script delivered by `jos copy`, enabled, powered off, `jos template
+snapshot fbsd15-dev agent`): a fresh clone `test` came up as
+`test`, with `/mnt/jos` mounted, and `syslog` shows the agent's work
+(`virtio_p9fs0: Mount tag: jos`). One p9fs oddity: the mount does not
+appear in `mount` or `df` output on 15.1, although it is there.
+The Debian agent is written the same way (`9pnet_virtio`, `9p2000.L`)
+but has only been checked by the unit tests, not booted. The Redox recipe was
 installed the same way (`jos template install redox --image ...
 --checksums ...`, SHA-256 verified, no provisioning boot), `rx` cloned
 from it boots on bhyve, logs in, pings its gateway and answers `jos run`

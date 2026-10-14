@@ -41,11 +41,14 @@ JuanitOS is less the architecture than the engineering discipline:
    clippy rules that forbid `unwrap`/`panic` outside tests) and a Rust
    unikernel for the most exposed component, the firewall.
 4. **Multi-level flows.** CLIP OS enforces that data flows between its
-   security levels only through controlled channels. In JuanitOS the only
-   inter-qube channel today is the network through `sys-firewall`, whose
+   security levels only through controlled channels. In JuanitOS the
+   inter-qube channels are the network through `sys-firewall`, whose
    per-client rules (`jos firewall add work deny any any`) are the
-   equivalent of CLIP's flow policy. Inter-qube file transfer, when added,
-   must keep that property (explicit, dom0-mediated, logged).
+   equivalent of CLIP's flow policy, and `jos copy`, which is explicit
+   and dom0-mediated: each qube only ever sees its own share, and files
+   cross from one share to another only when dom0 moves them on the
+   administrator's request (`docs/inter-qube.md`). A policy layer with
+   user confirmation, as in qrexec, is still to come.
 
 ## Where JuanitOS deliberately differs
 

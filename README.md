@@ -31,6 +31,7 @@ See `docs/` for details:
 - `docs/bootstrap.md` — LFS-style stages: build on FreeBSD, then on JuanitOS
 - `docs/installer.md` — the live/install ISO and the graphical installer
 - `docs/templates.md` — guest templates: Debian 13 + Docker, FreeBSD 15 + Podman, Redox
+- `docs/inter-qube.md` — the per-qube share, the guest agent and `jos copy`
 - `docs/gpu-passthrough.md` — NVIDIA + CUDA inside a Linux qube
 - `docs/unikernel-firewall.md` — single-purpose Rust unikernel qubes
 - `docs/boot-splash.md` — the graphical boot: pre-loader, kernel splash, daemon
@@ -40,7 +41,7 @@ See `docs/` for details:
 ## Repository layout
 
 ```text
-crates/juanitos-core   library: config, bhyve, zfs, pci, net, doctor, dom0, release, firewall
+crates/juanitos-core   library: config, bhyve, zfs, pci, net, doctor, dom0, release, firewall, share
 crates/jos             management CLI
 crates/jos-install     installer on the live ISO: graphical wizard (Calamares/Anaconda-style) + text mode
 crates/jos-release     builds the binaries, the dom0 tarball and the ISO; QEMU harness
@@ -53,7 +54,7 @@ crates/jos-splash      boot splash daemon on the vt(4) framebuffer + rc.d client
 crates/jos-fb          vt(4) framebuffer display and keyboard decoder (splash, installer)
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
 coverage.toml          per-crate line-coverage floors (ratcheted, only go up)
-templates/             cloud-init user-data of the guest template recipes
+templates/             cloud-init user-data of the guest template recipes; agent/ the guest agent
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
 freebsd/               loader.conf / sysctl.conf samples and rc.d scripts
 docs/                  design notes (docs/images: rendered previews)
@@ -128,6 +129,8 @@ jos create vault       --kind app      --os freebsd --template fbsd15-dev --netv
 jos start work
 jos console work                         # serial console (nmdm), autologin shell
 jos run work docker ps                   # run a command there, get its exit status
+jos copy work:/home/user/report.pdf jail # qube to qube, lands in jail:/mnt/jos/in/work/
+jos copy /root/notes.txt work            # dom0 to qube, lands in work:/mnt/jos/in/dom0/
 jos ls
 ```
 
@@ -236,7 +239,8 @@ supervisor (restart on reboot, pidfiles and logs under
 `/var/run/juanitos`), host checks, release builder, the graphical
 installer, guest templates from the distributions' images (Debian 13 +
 Docker, FreeBSD 15 + Podman, Redox), `jos run` over the serial console,
-the `sys-firewall` unikernel, and the graphical boot chain
+the per-qube virtio-9p share with its guest agent (own hostname per
+clone) and `jos copy` on top of it, the `sys-firewall` unikernel, and the graphical boot chain
 (`jos-boot.efi`, kernel splash, `jos-splash`). Everything is verified
 with `--dry-run` and unit tests on the development host; on Linux,
 `tools/uefi-test.sh` boots the UEFI pieces under QEMU + OVMF:
@@ -257,9 +261,12 @@ which takes its lease from `sys-net` (clone of `fbsd15-net`, bridged to
 the dom0's NIC), and `fetch https://www.freebsd.org/` succeeds from
 `work` while `jos firewall` rules are enforced on the way. `jos run`
 answers from FreeBSD's `sh` and Redox's `ion` alike, with exit statuses.
-The `debian-13-dev` template was provisioned from the real cloud image
-under QEMU. The test suite reaches 93% line coverage, gated per crate in
-CI.
+On the same dom0, a clone created after the guest agent was added to
+`fbsd15-dev` boots as itself (`hostname` = `test`) with the dom0 share
+on `/mnt/jos`, and `jos copy` moved a file and a directory from `work`
+into `test`'s inbox and the agent script from dom0 into the qubes. The
+`debian-13-dev` template was provisioned from the real cloud image under
+QEMU. The test suite reaches 94% line coverage, gated per crate in CI.
 
 Stage 2 is done too: the stage-1 ISO was installed headless (`qemu -vga
 none`, text installer on the serial port) and the installed JuanitOS
@@ -273,5 +280,7 @@ uncovered).
 Not yet done: NIC passthrough on real hardware (the chain above used
 `--uplink`; `--pci` is implemented but only dry-run tested), a display
 for Redox qubes (bhyve's `fbuf` asserts when Redox programs it), COSMIC
-(no FreeBSD packages yet: the dom0 falls back to the console), inter-qube
-file transfer (`jos run` is the first step toward a qrexec-like agent).
+(no FreeBSD packages yet: the dom0 falls back to the console), a
+qrexec-like agent with policies (`jos copy` is dom0-initiated and goes
+through the serial console; `docs/inter-qube.md`), and the Debian guest
+agent booted for real (written and unit-tested, not yet run).

@@ -16,6 +16,7 @@ pub mod fsops;
 pub mod net;
 pub mod pci;
 pub mod release;
+pub mod share;
 pub mod supervisor;
 pub mod sys;
 pub mod template;

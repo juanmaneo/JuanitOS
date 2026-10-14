@@ -11,6 +11,7 @@ use juanitos_core::doctor::{self, Status};
 use juanitos_core::firewall::{self, Action, Rule};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::pci::{self, PciAddr};
+use juanitos_core::share::{self, Share};
 use juanitos_core::supervisor::{self, Supervisor};
 use juanitos_core::zfs::Storage;
 use juanitos_core::{
@@ -86,6 +87,17 @@ enum Cmd {
         login: Option<String>,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
+    },
+    /// Copy a file or directory into a qube's inbox (`/mnt/jos/in/<src>/`)
+    /// from another qube (`QUBE:PATH`) or from dom0 (`dom0:PATH` or PATH).
+    Copy {
+        #[arg(value_name = "[QUBE:]PATH")]
+        src: String,
+        /// Destination qube.
+        dst: String,
+        /// Seconds to wait for the source qube to fill its outbox.
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
     },
     /// PCI passthrough helpers.
     Pci {
@@ -300,6 +312,10 @@ impl App {
 
     fn supervisor(&self) -> Supervisor<'_> {
         Supervisor::new(self.runner.as_ref(), &self.cfg, self.dry_run)
+    }
+
+    fn share(&self) -> Share<'_> {
+        Share::new(self.runner.as_ref(), &self.cfg)
     }
 
     fn init(&self) -> Result<()> {
@@ -537,8 +553,64 @@ impl App {
             self.supervisor().kill(name)?;
         }
         self.storage().destroy(&q)?;
+        if q.os.has_share() {
+            self.share().destroy(name)?;
+        }
         self.store.remove(name)?;
         println!("removed {name}");
+        Ok(())
+    }
+
+    /// `jos copy`: have the source qube export the path to its outbox over
+    /// the console, then move it into the destination's inbox on dom0.
+    fn copy(&self, src: &str, dst: &str, timeout: u64) -> Result<()> {
+        let src = share::Source::parse(src)?;
+        let dst = self.store.get(dst)?;
+        let src_qube = match src.qube() {
+            Some(name) => Some(self.store.get(name)?),
+            None => None,
+        };
+        if let Some(q) = &src_qube {
+            if !q.os.has_share() {
+                bail!(
+                    "{} runs {} which has no dom0 share; cannot copy from it",
+                    q.name,
+                    q.os
+                );
+            }
+        } else if !self.dry_run && !share::dom0_path_exists(src.path()) {
+            bail!("{}: no such file or directory on dom0", src.path());
+        }
+        let timeout = std::time::Duration::from_secs(timeout);
+        let mut run_in_qube = |name: &str, command: &str| -> juanitos_core::Result<()> {
+            let dev = self.cfg.console_host_device(name);
+            let dialect = juanitos_core::console::Dialect::Posix;
+            if self.dry_run {
+                println!(
+                    "+ type on {dev}: {}",
+                    juanitos_core::console::script_for(dialect, command).trim_end()
+                );
+                return Ok(());
+            }
+            let outcome = console_run(&dev, command, timeout, None, dialect)
+                .map_err(|e| juanitos_core::Error::Other(format!("{e:#}")))?;
+            match outcome.status {
+                Some(0) => Ok(()),
+                Some(code) => Err(juanitos_core::Error::Other(format!(
+                    "{name}: exporting {} failed (exit {code}):\n{}",
+                    src.path(),
+                    outcome.output.trim_end()
+                ))),
+                None => Err(juanitos_core::Error::Other(format!(
+                    "{name}: could not read the exit status of the export"
+                ))),
+            }
+        };
+        let delivery = self.share().copy(&src, &dst, &mut run_in_qube)?;
+        println!(
+            "copied {src} to {}:{} ({})",
+            dst.name, delivery.guest_path, delivery.dom0_path
+        );
         Ok(())
     }
 
@@ -870,6 +942,7 @@ fn main() -> Result<()> {
                 None => bail!("{name}: could not read the exit status"),
             }
         }
+        Cmd::Copy { src, dst, timeout } => app.copy(&src, &dst, timeout),
         Cmd::Pci { cmd } => match cmd {
             PciCmd::List { gpus, ready } => app.pci_list(gpus, ready),
             PciCmd::Pptdevs { addrs } => {
