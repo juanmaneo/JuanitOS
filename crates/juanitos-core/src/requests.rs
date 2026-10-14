@@ -21,7 +21,8 @@
 //! ```
 //!
 //! `allow` moves the file into the destination's inbox and answers
-//! `ok /mnt/jos/in/<src>/<basename>`; `deny` answers `denied: policy`;
+//! `ok /mnt/jos/in/<src>/<basename>`; `deny` answers `denied: policy`
+//! (`denied: operator` when settled by `jos requests deny`);
 //! `ask` (the default) leaves the request pending for an operator to
 //! settle with `jos requests approve|deny`. The answer is the file
 //! `<id>.reply` next to the request. dom0 removes the request when it
@@ -390,12 +391,17 @@ impl<'a> Broker<'a> {
                 return Ok(Disposition::Failed(why.clone()));
             }
         };
+        let by = if verdict.is_some() {
+            "operator"
+        } else {
+            "policy"
+        };
         let verdict = verdict.unwrap_or_else(|| self.policy.decide(&request.src, &request.dst));
         match verdict {
             Verdict::Ask => Ok(Disposition::Pending),
             Verdict::Deny => {
                 self.share.discard_export(&request.src, &request.base)?;
-                self.answer(&request.src, &request.id, &Reply::Denied("policy".into()))?;
+                self.answer(&request.src, &request.id, &Reply::Denied(by.into()))?;
                 Ok(Disposition::Denied)
             }
             Verdict::Allow => {

@@ -208,6 +208,14 @@ jos requests approve work 1760450000-812
 jos requests deny work 1760450000-812
 ```
 
+An operator's `deny` answers `denied: operator`, so the user in the qube
+can tell a rule from a person. Verified on the nested dom0 with `work` →
+`jail` (no rule, so `ask`; `jail` stopped): `jos-copy` running in the
+background in `work` showed up in `jos requests` as `[ask]` within the
+scan; `approve` made it print `ok /mnt/jos/in/work/ask1.txt` and exit 0
+(the file waits in the stopped qube's inbox), `deny` made the next one
+print `denied: ...` and exit 77, its export removed from the outbox.
+
 Whatever the outcome, dom0 writes the reply and removes the request; a
 refused or failed export is removed from the outbox, and replies are
 swept a minute later. dom0 does all the removing because of one

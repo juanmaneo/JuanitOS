@@ -1007,7 +1007,7 @@ fn serve_answers_guest_requests_by_policy() {
     assert!(reply("web", "3").unwrap().starts_with("error: "));
     req("web", "4", "copy report work\n");
     assert!(ok(&["requests", "deny", "web", "4"]).contains("denied"));
-    assert_eq!(reply("web", "4").unwrap(), "denied: policy\n");
+    assert_eq!(reply("web", "4").unwrap(), "denied: operator\n");
 
     // Malformed requests are answered too, so the guest does not wait.
     req("web", "5", "exec rm -rf /\n");
