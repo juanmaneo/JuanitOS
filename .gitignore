@@ -2,6 +2,6 @@
 # (crates/jos-boot, crates/jos-firewall)
 target/
 /release/out
-# Downloads, QEMU test output and logs from tools/ (survive `cargo clean`)
+# Former scratch location; tools/ now use target/work (wiped by `cargo clean`)
 /work
 __pycache__/

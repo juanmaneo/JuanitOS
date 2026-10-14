@@ -61,11 +61,12 @@ no `/boot` contents.
 
 `tools/uefi-test.sh` boots `jos-boot.efi` and `jos-firewall.efi` under
 QEMU + OVMF on any Linux (WSL2 included; `/dev/kvm` makes it fast), with
-serial logs and screenshots in `work/uefi-test/`. `tools/fetch-freebsd.sh
+serial logs and screenshots in `target/work/uefi-test/`. `tools/fetch-freebsd.sh
 loader` gets the real `loader.efi` from the release `base.txz` (SHA-256
 verified) so the chain-load and `console=nullconsole` path are tested with
-the genuine loader. `work/` holds downloads and test output; unlike
-`target/`, it survives `cargo clean`.
+the genuine loader. `target/work/` (or `$JOS_WORK`) holds downloads, VM
+disks and test output, so `cargo clean` reclaims it with the build; set
+`JOS_WORK` elsewhere to keep large downloads across a clean.
 
 The script needs `qemu-system-x86_64`, the OVMF firmware (`ovmf` on
 Debian, `edk2-ovmf` on Arch/Manjaro and Fedora), `mtools` and `socat` or
@@ -75,7 +76,7 @@ runs fall back to TCG, which is fine for these small UEFI applications.
 
 ```sh
 tools/uefi-test.sh boot          # card + error path (no loader on the image)
-tools/fetch-freebsd.sh loader    # base.txz → work/freebsd/boot/loader.efi
+tools/fetch-freebsd.sh loader    # base.txz → target/work/freebsd/boot/loader.efi
 tools/uefi-test.sh boot-loader   # chain-load: loader.efi runs, finds no kernel, returns
 tools/uefi-test.sh firewall      # DHCP, ARP, gateway ping, NAT via tools/fw-client.py
 ```
@@ -88,7 +89,7 @@ root on a FreeBSD host of the same major version as `freebsd_version` in
 
 ```sh
 tools/fetch-freebsd.sh vm            # official qcow2 VM image, checksum verified
-jos-release builder --image work/freebsd/FreeBSD-15.1-RELEASE-amd64-zfs.qcow2 --auto
+jos-release builder --image target/work/freebsd/FreeBSD-15.1-RELEASE-amd64-zfs.qcow2 --auto
 ```
 
 `--auto` is the unattended path: `jos-release` converts the image to a

@@ -4,22 +4,22 @@
 #
 #   tools/uefi-test.sh boot            # jos-boot.efi: card, menu, chain-load error path
 #   tools/uefi-test.sh boot-loader [L] # same, with FreeBSD's loader.efi at EFI/FREEBSD
-#                                      # (default: work/freebsd/boot/loader.efi from
+#                                      # (default: target/work/freebsd/boot/loader.efi from
 #                                      #  tools/fetch-freebsd.sh loader)
 #   tools/uefi-test.sh loader-only [L] # control: FreeBSD's loader.efi alone (verbose text boot)
 #   tools/uefi-test.sh firewall        # jos-firewall.efi with two virtio-nets + config disk;
 #                                      # tools/fw-client.py plays the downstream qube
 #   tools/uefi-test.sh build           # just (re)build the .efi files and images
 #
-# Everything lands in $JOS_WORK/uefi-test/ (JOS_WORK defaults to ./work;
-# not target/, which `cargo clean` wipes). Screens are captured to
+# Everything lands in $JOS_WORK/uefi-test/ (JOS_WORK defaults to
+# ./target/work, so `cargo clean` wipes it). Screens are captured to
 # <name>-NN.ppm via the QEMU monitor; serial output goes to
 # <name>.serial.log. Set DISPLAY_QEMU=1 to get a window instead of headless.
 
 set -eu
 
 here=$(cd "$(dirname "$0")/.." && pwd)
-work=${JOS_WORK:-$here/work}
+work=${JOS_WORK:-$here/target/work}
 out="$work/uefi-test"
 uefi="$here/target/uefi/x86_64-unknown-uefi/release"
 mkdir -p "$out"

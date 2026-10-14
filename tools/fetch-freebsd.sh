@@ -4,7 +4,7 @@
 # `cargo clean`). Everything is verified against the release MANIFEST
 # (SHA-256).
 #
-#   tools/fetch-freebsd.sh loader        # base.txz -> work/freebsd/boot/loader.efi
+#   tools/fetch-freebsd.sh loader        # base.txz -> target/work/freebsd/boot/loader.efi
 #   tools/fetch-freebsd.sh vm            # qcow2 VM image for `jos-release builder`
 #
 # Version/arch default to the release profile (release/juanitos.toml).
@@ -12,7 +12,7 @@
 set -eu
 
 here=$(cd "$(dirname "$0")/.." && pwd)
-work="${JOS_WORK:-$here/work}/freebsd"
+work="${JOS_WORK:-$here/target/work}/freebsd"
 mkdir -p "$work"
 
 # (tr: the profile may have CRLF endings on a Windows checkout)
