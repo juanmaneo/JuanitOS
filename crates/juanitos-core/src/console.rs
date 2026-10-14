@@ -11,10 +11,13 @@
 //! The protocol — framing, prompt synchronisation, exit status — is pure
 //! and tested here; the host side is a few `read`/`write`s on the device.
 //!
-//! With a POSIX shell (`sh`, `bash`: the FreeBSD and Linux templates) two
-//! lines are typed: the command, tagged with a trailing comment so its
-//! echo is recognisable, then a `printf` of the marker with `$?`, which
-//! the shell reads once the command is done.
+//! With a POSIX shell (`sh`, `bash`: the FreeBSD and Linux templates) a
+//! single line is typed: a no-op tag so the echo is recognisable, the
+//! command, then a `printf` of the marker with `$?`. One line, because a
+//! command that reads the terminal (`sudo` with `use_pty`, `cat`, an
+//! editor) would otherwise swallow a second typed line, marker included,
+//! and `jos run` would wait for nothing. The price is that a command
+//! ending in a `#` comment hides the marker: not a use case.
 //!
 //! Redox's `ion` on a serial console has no job control: it cannot take
 //! the terminal for an external command, aborts the rest of the line and
@@ -106,15 +109,23 @@ fn drop_ion_prompt(output: &str, prompt: Option<&str>) -> String {
     }
 }
 
-/// Comment appended to the typed command, identifying its echo.
-pub const TAG: &str = "#JOS_RUN";
+/// Argument of the no-op `:` that opens the typed line, identifying its
+/// echo.
+pub const TAG: &str = "JOS_RUN";
 
-/// What is typed on the console: the tagged command, then the marker
-/// line with `$?`. The marker is split in the typed text so the echo of
-/// the typed line itself does not match it.
-pub fn script(command: &str) -> String {
+/// The marker as it appears in the typed text (split, so the echo of the
+/// line does not match the real one).
+fn typed_marker() -> String {
     let (a, b) = MARKER.split_at(4);
-    format!("{command} {TAG}\rprintf '\\n{a}''{b} %s\\n' $?\r")
+    format!("{a}''{b}")
+}
+
+/// What is typed on the console: `: TAG; command; printf marker $?`.
+pub fn script(command: &str) -> String {
+    format!(
+        ": {TAG}; {command}; printf '\\n{} %s\\n' $?\r",
+        typed_marker()
+    )
 }
 
 /// Result of a command run over the console.
@@ -133,28 +144,22 @@ pub fn parse(text: &str) -> Option<Outcome> {
     let after = text.get(at + MARKER.len() + 2..)?;
     let line_end = after.find('\n')?;
     let status = after.get(..line_end)?.trim().parse().ok();
-    let mut output = text.get(..at)?;
-    // Drop the echo of the typed command: everything up to the end of the
-    // line carrying the tag. A line editor may render the typed line more
-    // than once (redraws after a wrap), so every tagged line goes.
-    while let Some(i) = output.find(TAG) {
-        output = match output.get(i..).and_then(|rest| rest.find('\n')) {
-            Some(nl) => output.get(i + nl + 1..).unwrap_or(""),
-            None => "",
-        };
-    }
-    // Drop the echo of the marker line (and the prompt before it on the
-    // same line): from the start of the last line mentioning `printf '`.
-    let output = match output.rfind("printf '") {
-        Some(i) => {
-            let start = output
-                .get(..i)
-                .and_then(|head| head.rfind('\n'))
-                .map_or(0, |n| n + 1);
-            output.get(..start).unwrap_or("")
-        }
+    // Whatever precedes the echo of the typed line is stale (a prompt,
+    // the end of a banner); the echo itself goes too, and a line editor
+    // may render it more than once (redraws after a wrap, or the tail of
+    // the line alone: no tag, but the split marker), so every line
+    // showing either goes.
+    let tag = format!(": {TAG};");
+    let echo = typed_marker();
+    let output = text.get(..at)?;
+    let output = match output.find(&tag) {
+        Some(i) => output.get(i..).unwrap_or(""),
         None => output,
     };
+    let output: String = output
+        .split_inclusive('\n')
+        .filter(|line| !(line.contains(&tag) || line.contains(&echo)))
+        .collect();
     Some(Outcome {
         output: output.replace('\r', ""),
         status,
@@ -302,14 +307,17 @@ mod tests {
     #[test]
     fn script_splits_the_marker_and_parse_finds_it() {
         let s = script("uname -a");
-        assert_eq!(s, "uname -a #JOS_RUN\rprintf '\\nJOS_''RUN_END %s\\n' $?\r");
+        assert_eq!(
+            s,
+            ": JOS_RUN; uname -a; printf '\\nJOS_''RUN_END %s\\n' $?\r"
+        );
         assert!(
             !s.contains(MARKER),
             "typed text must not contain the marker"
         );
-        // A plain shell: the two typed lines are echoed around the output.
-        let text = "\r\nuser@jail:~ $ uname -a #JOS_RUN\r\nFreeBSD jail 15.1\r\n\
-                    user@jail:~ $ printf '\\nJOS_''RUN_END %s\\n' $?\r\n\nJOS_RUN_END 0\nuser@jail:~ $ ";
+        // A plain shell: the typed line is echoed, then the output.
+        let text = "\r\nuser@jail:~ $ : JOS_RUN; uname -a; printf '\\nJOS_''RUN_END %s\\n' $?\r\n\
+                    FreeBSD jail 15.1\r\n\nJOS_RUN_END 0\nuser@jail:~ $ ";
         let o = parse(text).unwrap();
         assert_eq!(o.output, "FreeBSD jail 15.1\n");
         assert_eq!(o.status, Some(0));
@@ -319,16 +327,20 @@ mod tests {
         assert_eq!(parse("\nJOS_RUN_END 0\n").unwrap().output, "");
         // Without an echo (a quiet console) the output is kept whole.
         assert_eq!(parse("out\n\nJOS_RUN_END 0\n").unwrap().output, "out\n");
-        // The typed line rendered twice (libedit redraw after a wrap).
-        let twice =
-            "$ long cmd #JOS_RUN\r\n$ long cmd #JOS_RUN\r\nout\r\n$ printf '\r\n\nJOS_RUN_END 0\n";
+        // The typed line rendered twice (libedit redraw after a wrap),
+        // then only its tail.
+        let twice = "$ : JOS_RUN; long cmd; printf '\r\n$ : JOS_RUN; long cmd; printf '\r\n\
+                     $ printf '\\nJOS_''RUN_END %s\\n' $?\r\nout\r\n\nJOS_RUN_END 0\n";
         assert_eq!(parse(twice).unwrap().output, "out\n");
+        // Output that itself mentions `printf '` is kept.
+        let quoted = "$ : JOS_RUN; cat s; printf '...\r\nprintf 'hi'\r\n\nJOS_RUN_END 0\n";
+        assert_eq!(parse(quoted).unwrap().output, "printf 'hi'\n");
         // ion's line editor redraws the typed line on every character
         // (with `\r`), and prints the prompt before the output.
-        let ion = "user:~$ i\ruser:~$ id\ruser:~$ id #JOS_RUN\r\n\
+        let ion =
+            "user:~$ i\ruser:~$ id\ruser:~$ : JOS_RUN; id; printf '\\nJOS_''RUN_END %s\\n' $?\r\n\
                    ion: pipeline execution error: could not grab the terminal\r\n\
-                   \u{23ce}          user:~$ uid=1000(user)\r\n\
-                   user:~$ p\ruser:~$ printf '\\nJOS_''RUN_END %s\\n' $?\r\n\nJOS_RUN_END 1\n";
+                   \u{23ce}          user:~$ uid=1000(user)\r\n\nJOS_RUN_END 1\n";
         let o = parse(ion).unwrap();
         assert_eq!(
             o.output,
@@ -387,7 +399,7 @@ mod tests {
         let mut dev = Fake {
             written: Vec::new(),
             reply: Cursor::new(
-                b"$ \r\nid #JOS_RUN\r\nuid=1001(user)\r\n$ printf '...\r\n\nJOS_RUN_END 3\n$ "
+                b"$ \r\n: JOS_RUN; id; printf '...\r\nuid=1001(user)\r\n\nJOS_RUN_END 3\n$ "
                     .to_vec(),
             ),
         };
@@ -404,7 +416,7 @@ mod tests {
         assert_eq!(o.status, Some(3));
         let typed = String::from_utf8(dev.written).unwrap();
         assert!(typed.starts_with('\r'));
-        assert!(typed.contains("id #JOS_RUN\rprintf"));
+        assert!(typed.contains(": JOS_RUN; id; printf"));
     }
 
     /// A console at a login prompt: replies are scripted per typed line.
@@ -433,9 +445,8 @@ mod tests {
                 self.logged_in = true;
                 self.pending.extend_from_slice(b"\r\nWelcome\r\nuser:~$ ");
             } else if self.logged_in {
-                self.pending.extend_from_slice(
-                    b"id #JOS_RUN\r\nuid=1000\r\n$ printf '\r\n\nJOS_RUN_END 0\n",
-                );
+                self.pending
+                    .extend_from_slice(b": JOS_RUN; id; printf '\r\nuid=1000\r\n\nJOS_RUN_END 0\n");
             }
             Ok(b.len())
         }
@@ -473,7 +484,7 @@ mod tests {
         assert_eq!(o.output, "uid=1000\n");
         let typed = String::from_utf8(dev.written).unwrap();
         assert!(
-            typed.starts_with("\ruser\n\nid #JOS_RUN\rprintf"),
+            typed.starts_with("\ruser\n\n: JOS_RUN; id; printf"),
             "{typed:?}"
         );
         // Without credentials the prompt is left alone (and times out).

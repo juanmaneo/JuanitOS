@@ -218,7 +218,7 @@ fn start_supervise_stop_kill_console_in_dry_run() {
     assert!(console.contains("+ cu"), "{console}");
     let run = e.ok(&["run", "work", "docker", "ps", "-a"]);
     assert!(run.contains("nmdm-work.1B"), "{run}");
-    assert!(run.contains("docker ps -a #JOS_RUN"), "{run}");
+    assert!(run.contains(": JOS_RUN; docker ps -a; printf"), "{run}");
     assert!(!run.contains("logging in"), "{run}");
     assert!(e.err(&["run", "ghost", "id"]).contains("ghost"));
     // autostart starts sys-net and sys-firewall.
@@ -328,7 +328,7 @@ fn dev_templates_from_cloud_images() {
     assert!(list.contains("fbsd15-dev") && list.contains("Podman"));
 
     let out = e.ok(&["template", "install", "debian-13-dev"]);
-    assert!(out.contains("debian-13-genericcloud-amd64.tar.xz"), "{out}");
+    assert!(out.contains("debian-13-generic-amd64.tar.xz"), "{out}");
     assert!(out.contains("makefs -t cd9660"));
     assert!(out.contains("29,ahci,cd:"));
     assert!(out.contains("templates/debian-13-dev@base"));
@@ -651,14 +651,11 @@ fn fake_guest(
                 break;
             }
         }
-        let (cmd_line, marker_line) = seen.trim_start_matches('\r').split_once('\r').unwrap();
-        let (cmd_line, marker_line) = (cmd_line.to_string(), marker_line.to_string());
-        let status = on_command(&cmd_line);
-        guest.write_all(cmd_line.as_bytes()).unwrap();
-        guest
-            .write_all(format!("\r\n{output}$ ").as_bytes())
-            .unwrap();
-        guest.write_all(marker_line.as_bytes()).unwrap();
+        let (line, _) = seen.trim_start_matches('\r').split_once('\r').unwrap();
+        let line = line.to_string();
+        let status = on_command(&line);
+        guest.write_all(line.as_bytes()).unwrap();
+        guest.write_all(format!("\r\n{output}").as_bytes()).unwrap();
         guest
             .write_all(format!("\nJOS_RUN_END {status}\r\n").as_bytes())
             .unwrap();
@@ -729,7 +726,7 @@ fn run_talks_to_the_console_device() {
         .output()
         .unwrap();
     let typed = shell.join().unwrap();
-    assert!(typed.contains("echo hello #JOS_RUN\rprintf"), "{typed}");
+    assert!(typed.contains(": JOS_RUN; echo hello; printf"), "{typed}");
     assert!(
         !typed.contains("hello from the guest"),
         "guest output was echoed back as input:\n{typed}"
@@ -759,6 +756,125 @@ fn run_talks_to_the_console_device() {
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stderr).contains("no shell on its serial console"));
+}
+
+/// `jos policy`, `jos requests` and `jos serve --once` for real against a
+/// `share_dir` on disk: requests are files a guest dropped through 9p,
+/// here written on the host side.
+#[test]
+fn serve_answers_guest_requests_by_policy() {
+    let e = Env::new("serve");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&["create", "web", "--kind", "app", "--os", "linux"]);
+    e.ok(&["create", "vault", "--kind", "app", "--os", "freebsd"]);
+    let share = e.dir.join("share");
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(&cfg, format!("share_dir = {:?}\n", share.to_string_lossy())).unwrap();
+    let jos = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_jos"))
+            .arg("--config")
+            .arg(&cfg)
+            .args(args)
+            .env("JOS_CONFIG_DIR", &e.dir)
+            .output()
+            .unwrap()
+    };
+    let ok = |args: &[&str]| {
+        let out = jos(args);
+        assert!(out.status.success(), "jos {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // Policy: empty, then two rules; bad rules are refused.
+    assert!(ok(&["policy", "show"]).contains("no rules"));
+    assert!(ok(&["policy", "add", "work", "*", "allow"]).contains("+ copy work * allow"));
+    ok(&["policy", "add", "*", "vault", "deny"]);
+    assert!(!jos(&["policy", "add", "work", "web", "maybe"])
+        .status
+        .success());
+    assert!(!jos(&["policy", "add", "Work", "web", "allow"])
+        .status
+        .success());
+    let shown = ok(&["policy", "show"]);
+    assert!(shown.contains("1  copy work * allow"), "{shown}");
+    assert!(shown.contains("2  copy * vault deny"), "{shown}");
+    assert!(e.dir.join("policy").is_file());
+
+    // Three requests: allowed, denied, and one nobody has a rule for.
+    let req = |qube: &str, id: &str, body: &str| {
+        let dir = share.join(qube).join("req");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(id), body).unwrap();
+    };
+    std::fs::create_dir_all(share.join("work").join("out")).unwrap();
+    std::fs::write(share.join("work").join("out").join("notes"), "n\n").unwrap();
+    req("work", "1", "copy notes web\n");
+    req("web", "2", "copy secret vault\n");
+    req("web", "3", "copy report work\n");
+    let listed = ok(&["requests"]);
+    assert!(listed.contains("copy notes -> web [allow]"), "{listed}");
+    assert!(listed.contains("copy secret -> vault [deny]"), "{listed}");
+    assert!(listed.contains("copy report -> work [ask]"), "{listed}");
+
+    let served = ok(&["serve", "--once"]);
+    assert!(
+        served.contains("work 1: copy notes -> web: delivered to /mnt/jos/in/work/notes"),
+        "{served}"
+    );
+    assert!(
+        served.contains("web 2: copy secret -> vault: denied"),
+        "{served}"
+    );
+    assert!(
+        served.contains("web 3: copy report -> work: pending"),
+        "{served}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(share.join("web").join("in").join("work").join("notes")).unwrap(),
+        "n\n"
+    );
+    let reply = |qube: &str, id: &str| {
+        std::fs::read_to_string(share.join(qube).join("req").join(format!("{id}.reply")))
+    };
+    assert_eq!(reply("work", "1").unwrap(), "ok /mnt/jos/in/work/notes\n");
+    assert!(!share.join("work").join("req").join("1").exists());
+    assert_eq!(reply("web", "2").unwrap(), "denied: policy\n");
+    assert!(reply("web", "3").is_err(), "pending requests get no reply");
+
+    // The operator settles the pending one; the outbox entry is missing,
+    // so the guest hears about it.
+    let listed = ok(&["requests", "ls"]);
+    assert!(
+        listed.contains("web") && !listed.contains("notes"),
+        "{listed}"
+    );
+    let out = jos(&["requests", "approve", "web", "9"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no pending request 9"));
+    let approved = ok(&["requests", "approve", "web", "3"]);
+    assert!(approved.contains("failed"), "{approved}");
+    assert!(reply("web", "3").unwrap().starts_with("error: "));
+    req("web", "4", "copy report work\n");
+    assert!(ok(&["requests", "deny", "web", "4"]).contains("denied"));
+    assert_eq!(reply("web", "4").unwrap(), "denied: policy\n");
+
+    // Malformed requests are answered too, so the guest does not wait.
+    req("web", "5", "exec rm -rf /\n");
+    let served = ok(&["serve", "--once"]);
+    assert!(served.contains("web 5: failed"), "{served}");
+    assert!(reply("web", "5").unwrap().starts_with("error: "));
+    assert!(ok(&["requests"]).contains("no pending requests"));
+    assert!(ok(&["serve", "--once"]).is_empty());
+
+    // A dry run shows the plan instead.
+    req("work", "6", "copy notes web\n");
+    let dry = ok(&["--dry-run", "serve", "--once"]);
+    assert!(dry.contains("+ mv") && dry.contains("+ tee"), "{dry}");
+    assert!(share.join("work").join("req").join("6").exists());
+    ok(&["policy", "clear"]);
+    assert!(ok(&["policy", "show"]).contains("no rules"));
+    assert!(ok(&["requests"]).contains("[ask]"));
 }
 
 /// `jos copy` for real: a fake guest on the source console, a real

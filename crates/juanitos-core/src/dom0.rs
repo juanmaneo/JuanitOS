@@ -370,6 +370,9 @@ mod tests {
             .unwrap();
         assert!(rc.2);
         assert!(rc.1.starts_with("#!/bin/sh"));
+        // The request broker runs with the qubes.
+        assert!(rc.1.contains("daemon -f -p \"${serve_pidfile}\""));
+        assert!(rc.1.contains("serve\n"));
         assert_eq!(
             live_fstab("JUANITOS"),
             "/dev/iso9660/JUANITOS / cd9660 ro 0 0\n"

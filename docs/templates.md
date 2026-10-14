@@ -15,7 +15,7 @@ Redox's official artifacts, checked against their published checksums.
 
 | recipe          | base                                         | containers                                  | user                             |
 |-----------------|----------------------------------------------|---------------------------------------------|----------------------------------|
-| `debian-13-dev` | Debian 13 "trixie" `genericcloud` image      | Docker Engine 26, Compose v2, Buildx (Debian's packages) | `user`, sudo without password, in group `docker` |
+| `debian-13-dev` | Debian 13 "trixie" `generic` image           | Docker Engine 26, Compose v2, Buildx (Debian's packages) | `user`, sudo without password, in group `docker` |
 | `fbsd15-dev`    | FreeBSD 15.1 `BASIC-CLOUDINIT` ZFS image     | Podman 5 + Buildah (`podman-suite`, `ocijail` runtime, ZFS storage, pf NAT, Linux emulation) | `user` in `wheel`, `doas` without password |
 | `fbsd15-net`    | FreeBSD 15.1 `BASIC-CLOUDINIT` ZFS image     | none: this is `sys-net` (DHCP client upstream, dnsmasq DHCP/DNS + pf NAT downstream), see [below](#the-network-template) | `user` in `wheel`, `doas` without password |
 | `redox`         | Redox OS `server` nightly (Relibc userland)  | none; experimental, see [below](#the-redox-template) | Redox's `user` / `root:password` |
@@ -83,6 +83,13 @@ flowchart TD
   the network; they are never started otherwise.
 - App qubes never re-run provisioning: Debian's template disables
   cloud-init at the end, and FreeBSD's nuageinit only runs on `firstboot`.
+  Debian's clones still need a network: cloud-init's own netplan file
+  matches the NIC by the MAC address of the provisioning boot, so the
+  recipe replaces it with `10-jos.yaml` (DHCP on `en*`), and writes the
+  hostname to `/etc/hosts` (`manage_etc_hosts: localhost`), without
+  which every `sudo` waits on a DNS lookup of the qube's name.
+- Debian's `generic` image, not `genericcloud`: the cloud kernel has no
+  9p support, and the share would be unreachable.
 - A recipe without `user-data` (Redox has no cloud-init) skips the seed
   and the boot: the verified image *is* the template. A recipe whose
   file name changes with every build (Redox nightlies carry a date)
@@ -217,8 +224,13 @@ snapshot fbsd15-dev agent`): a fresh clone `test` came up as
 `test`, with `/mnt/jos` mounted, and `syslog` shows the agent's work
 (`virtio_p9fs0: Mount tag: jos`). One p9fs oddity: the mount does not
 appear in `mount` or `df` output on 15.1, although it is there.
-The Debian agent is written the same way (`9pnet_virtio`, `9p2000.L`)
-but has only been checked by the unit tests, not booted. The Redox recipe was
+The Debian template was installed on the same dom0 from the `generic`
+image (the first attempt with `genericcloud` booted fine but had no 9p
+in its kernel, hence the switch) and a clone `web` booted as `web`
+with the share mounted by `jos-agent.service`, an address from
+`sys-firewall` over netplan, HTTPS reaching `deb.debian.org`, Docker
+pulling `hello-world`, and `jos-copy` exchanging files with the FreeBSD
+qubes under the policy (`docs/inter-qube.md`). The Redox recipe was
 installed the same way (`jos template install redox --image ...
 --checksums ...`, SHA-256 verified, no provisioning boot), `rx` cloned
 from it boots on bhyve, logs in, pings its gateway and answers `jos run`

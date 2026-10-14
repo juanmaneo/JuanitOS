@@ -11,6 +11,7 @@ use juanitos_core::doctor::{self, Status};
 use juanitos_core::firewall::{self, Action, Rule};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::pci::{self, PciAddr};
+use juanitos_core::requests::{self, Broker, Disposition, Found, Policy, Verdict};
 use juanitos_core::share::{self, Share};
 use juanitos_core::supervisor::{self, Supervisor};
 use juanitos_core::zfs::Storage;
@@ -114,8 +115,58 @@ enum Cmd {
         #[command(subcommand)]
         cmd: FirewallCmd,
     },
+    /// The policy for requests qubes make to dom0 (`jos-copy` in a qube).
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCmd,
+    },
+    /// Pending requests from qubes, and the operator's answers.
+    Requests {
+        #[command(subcommand)]
+        cmd: Option<RequestsCmd>,
+    },
+    /// Answer qube requests according to the policy, forever (the daemon)
+    /// or once.
+    Serve {
+        /// One pass over the pending requests, then exit.
+        #[arg(long)]
+        once: bool,
+        /// Seconds between two passes.
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+    },
     /// Start every qube marked `autostart` (used by the rc script).
     Autostart,
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Print the policy.
+    Show,
+    /// Append a rule: `jos policy add work personal allow` (`*` matches
+    /// any qube; first matching rule wins; no match means `ask`).
+    Add {
+        src: String,
+        dst: String,
+        #[arg(value_parser = parse_verdict)]
+        verdict: Verdict,
+    },
+    /// Remove every rule.
+    Clear,
+}
+
+#[derive(Subcommand)]
+enum RequestsCmd {
+    /// List the pending requests (the default).
+    Ls,
+    /// Grant a pending request.
+    Approve { qube: String, id: String },
+    /// Refuse a pending request.
+    Deny { qube: String, id: String },
+}
+
+fn parse_verdict(s: &str) -> std::result::Result<Verdict, String> {
+    s.parse().map_err(|e: juanitos_core::Error| e.to_string())
 }
 
 #[derive(Args)]
@@ -316,6 +367,112 @@ impl App {
 
     fn share(&self) -> Share<'_> {
         Share::new(self.runner.as_ref(), &self.cfg)
+    }
+
+    /// The policy file lives next to the qube definitions.
+    fn policy_path(&self) -> PathBuf {
+        let config_dir = self
+            .store
+            .dir
+            .parent()
+            .map_or_else(|| PathBuf::from(&self.cfg.config_dir), PathBuf::from);
+        requests::policy_path(&config_dir)
+    }
+
+    fn broker(&self) -> Result<Broker<'_>> {
+        let policy = Policy::load(&self.policy_path())
+            .with_context(|| format!("reading {}", self.policy_path().display()))?;
+        Ok(Broker::new(
+            self.runner.as_ref(),
+            &self.cfg,
+            &self.store,
+            policy,
+        ))
+    }
+
+    fn policy(&self, cmd: PolicyCmd) -> Result<()> {
+        let path = self.policy_path();
+        let mut policy = Policy::load(&path)?;
+        match cmd {
+            PolicyCmd::Show => {
+                if policy.rules.is_empty() {
+                    println!("(no rules: every request waits for `jos requests approve`)");
+                }
+                for (i, r) in policy.rules.iter().enumerate() {
+                    println!("{:>3}  {r}", i + 1);
+                }
+                Ok(())
+            }
+            PolicyCmd::Add { src, dst, verdict } => {
+                let rule = requests::Rule::new(&src, &dst, verdict)?;
+                println!("+ {rule}");
+                policy.rules.push(rule);
+                policy.save(&path)?;
+                Ok(())
+            }
+            PolicyCmd::Clear => {
+                policy.rules.clear();
+                policy.save(&path)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn requests(&self, cmd: Option<RequestsCmd>) -> Result<()> {
+        let broker = self.broker()?;
+        match cmd.unwrap_or(RequestsCmd::Ls) {
+            RequestsCmd::Ls => {
+                let found = broker.scan()?;
+                if found.is_empty() {
+                    println!("no pending requests");
+                }
+                for f in &found {
+                    match &f.request {
+                        Ok(r) => println!(
+                            "{:<16} {:<20} copy {} -> {} [{}]",
+                            r.src,
+                            r.id,
+                            r.base,
+                            r.dst,
+                            broker.policy.decide(&r.src, &r.dst)
+                        ),
+                        Err(e) => println!("{:<16} {:<20} invalid: {e}", f.src, f.id),
+                    }
+                }
+                Ok(())
+            }
+            RequestsCmd::Approve { qube, id } => {
+                let found = broker.find(&qube, &id)?;
+                report(&found, &broker.settle(&found, Some(Verdict::Allow))?)
+            }
+            RequestsCmd::Deny { qube, id } => {
+                let found = broker.find(&qube, &id)?;
+                report(&found, &broker.settle(&found, Some(Verdict::Deny))?)
+            }
+        }
+    }
+
+    fn serve(&self, once: bool, interval: u64) -> Result<()> {
+        let broker = self.broker()?;
+        if !once {
+            println!(
+                "serving qube requests from {} with policy {} ({} rules)",
+                self.cfg.share_dir,
+                self.policy_path().display(),
+                broker.policy.rules.len()
+            );
+        }
+        loop {
+            for (found, disposition) in broker.serve_once()? {
+                if disposition != Disposition::Pending || once {
+                    report(&found, &disposition)?;
+                }
+            }
+            if once {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+        }
     }
 
     fn init(&self) -> Result<()> {
@@ -779,6 +936,21 @@ impl App {
 
 /// `jos run` on the host: the nmdm device, read without blocking.
 /// `USER[:PASSWORD]` of `jos run --login`.
+/// One line per settled request, for `jos serve` and `jos requests`.
+fn report(found: &Found, disposition: &Disposition) -> Result<()> {
+    let what = match &found.request {
+        Ok(r) => r.to_string(),
+        Err(_) => format!("{} {}", found.src, found.id),
+    };
+    match disposition {
+        Disposition::Delivered(d) => println!("{what}: delivered to {}", d.guest_path),
+        Disposition::Denied => println!("{what}: denied"),
+        Disposition::Pending => println!("{what}: pending (policy says ask)"),
+        Disposition::Failed(why) => println!("{what}: failed: {why}"),
+    }
+    Ok(())
+}
+
 fn parse_login(s: &str) -> juanitos_core::console::Login {
     let (user, password) = s.split_once(':').unwrap_or((s, ""));
     juanitos_core::console::Login {
@@ -978,6 +1150,9 @@ fn main() -> Result<()> {
             TemplateCmd::Snapshot { name, snap } => app.template_snapshot(&name, snap),
         },
         Cmd::Firewall { cmd } => app.firewall(cmd),
+        Cmd::Policy { cmd } => app.policy(cmd),
+        Cmd::Requests { cmd } => app.requests(cmd),
+        Cmd::Serve { once, interval } => app.serve(once, interval),
         Cmd::Autostart => app.autostart(),
     }
 }

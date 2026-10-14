@@ -3,13 +3,18 @@
 # with Docker Engine, Compose and Buildx from Debian's own (signed)
 # archive.
 #
-# `jos template install debian-13-dev` writes Debian's official
-# genericcloud image to the template's zvol and boots it once with this
-# file on a NoCloud seed disk ("cidata"); cloud-init provisions the system
-# and powers it off, then jos snapshots the template as @base. App qubes are
-# ZFS clones of that snapshot.
+# `jos template install debian-13-dev` writes Debian's official `generic`
+# image (the full kernel: the `genericcloud` one lacks 9p, which the dom0
+# share needs) to the template's zvol and boots it once with this file on a
+# NoCloud seed disk ("cidata"); cloud-init provisions the system and powers
+# it off, then jos snapshots the template as @base. App qubes are ZFS
+# clones of that snapshot.
 
 hostname: debian-13-dev
+# 127.0.1.1 for the name: sudo resolves the hostname, and a lookup that
+# has to go out to the network stalls every `sudo` on a qube that is
+# still getting its lease.
+manage_etc_hosts: localhost
 
 users:
   - default
@@ -46,6 +51,21 @@ packages:
   - python3-venv
 
 write_files:
+  # Networking for every clone: cloud-init's own netplan pins the NIC by
+  # the MAC address of the template's provisioning boot, and each qube
+  # gets its own MAC (runcmd removes that file). DHCP over the first
+  # virtio NIC, from sys-firewall; IPv4 only, as the firewall is.
+  - path: /etc/netplan/10-jos.yaml
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          uplink:
+            match:
+              name: "en*"
+            dhcp4: true
+            dhcp6: false
   # `jos console <qube>` lands in a shell: autologin on the serial console.
   - path: /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
     permissions: "0644"
@@ -106,6 +126,60 @@ write_files:
       [Install]
       WantedBy=sysinit.target
 
+  # jos-copy PATH QUBE: ask dom0 to copy a file to another qube (see
+  # templates/agent/jos-copy, docs/inter-qube.md).
+  - path: /usr/local/bin/jos-copy
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # jos-copy PATH QUBE: ask dom0 to copy PATH from this qube into QUBE's
+      # inbox (/mnt/jos/in/<this qube>/ there). The file goes to the outbox of
+      # the dom0 share, a request goes to /mnt/jos/req/, and dom0 (`jos serve`)
+      # answers according to its policy: delivered, denied, or held for the
+      # operator (`jos requests`). See docs/inter-qube.md.
+      set -u
+      usage() { echo "usage: jos-copy PATH QUBE" >&2; exit 64; }
+      [ $# -eq 2 ] || usage
+      path=$1
+      dst=$2
+      share=/mnt/jos
+      timeout=${JOS_COPY_TIMEOUT:-600}
+      [ -d "$share/req" ] || { echo "jos-copy: dom0 share not mounted at $share" >&2; exit 2; }
+      [ -e "$path" ] || { echo "jos-copy: $path: no such file or directory" >&2; exit 1; }
+      base=$(basename "$path")
+      case $base in ''|.|..|*/*) echo "jos-copy: $path: cannot copy that" >&2; exit 1;; esac
+      # A previous export of the same name still in the outbox is one dom0 has
+      # not consumed yet: a guest user cannot remove it (dom0 does, once it has
+      # answered), so wait for that rather than copy into it.
+      if [ -e "$share/out/$base" ]; then
+          echo "jos-copy: $base is still being handled by dom0; try again shortly" >&2
+          exit 75
+      fi
+      # Follow symbolic links: the share cannot hold them.
+      cp -RL "$path" "$share/out/$base" || exit 1
+      id="$(date +%s)-$$"
+      req="$share/req/$id"
+      # The request appears atomically, complete.
+      printf 'copy %s %s\n' "$base" "$dst" > "$req.tmp" && mv "$req.tmp" "$req" || exit 1
+      echo "jos-copy: asked dom0 to copy $base to $dst (request $id)"
+      waited=0
+      while [ ! -e "$req.reply" ]; do
+          if [ "$waited" -ge "$timeout" ]; then
+              echo "jos-copy: no answer from dom0 after ${timeout}s; still pending as $id" >&2
+              exit 75
+          fi
+          sleep 1
+          waited=$((waited + 1))
+      done
+      reply=$(cat "$req.reply")
+      # dom0 sweeps replies a minute later (a guest user cannot unlink them).
+      echo "jos-copy: $reply"
+      case $reply in
+          ok\ *) exit 0;;
+          denied*) exit 77;;
+          *) exit 1;;
+      esac
+
 runcmd:
   - [usermod, -aG, docker, user]
   - [systemctl, enable, containerd.service, docker.service, jos-agent.service]
@@ -114,6 +188,7 @@ runcmd:
   # App qubes are clones of this template: cloud-init must not run again
   # in them (no seed disk there; jos-agent gives each clone its name).
   - [touch, /etc/cloud/cloud-init.disabled]
+  - [rm, -f, /etc/netplan/50-cloud-init.yaml]
 
 power_state:
   mode: poweroff

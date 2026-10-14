@@ -79,7 +79,9 @@ pub const RECIPES: &[Recipe] = &[
         name: "debian-13-dev",
         summary: "Debian 13 (trixie) for development, with Docker, Compose and Buildx",
         os: OsType::Linux,
-        image_url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.tar.xz",
+        // `generic`, not `genericcloud`: the cloud kernel has no 9p, so the
+        // dom0 share would be unreachable (see templates/agent/jos-agent).
+        image_url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.tar.xz",
         checksums_url: "https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS",
         digest: Digest::Sha512,
         packing: Packing::TarXz { member: "disk.raw" },
@@ -543,7 +545,7 @@ mod tests {
         let ud = debian.user_data.unwrap();
         assert!(ud.starts_with("#cloud-config"));
         assert!(ud.contains("docker.io"));
-        assert_eq!(debian.image_file(), "debian-13-genericcloud-amd64.tar.xz");
+        assert_eq!(debian.image_file(), "debian-13-generic-amd64.tar.xz");
         let fbsd = find("fbsd15-dev").unwrap();
         assert_eq!(fbsd.os, OsType::Freebsd);
         assert!(fbsd.user_data.unwrap().contains("podman-suite"));
@@ -597,13 +599,17 @@ mod tests {
         let freebsd_agent = include_str!("../../../templates/agent/jos_agent");
         let linux_agent = include_str!("../../../templates/agent/jos-agent");
         let linux_unit = include_str!("../../../templates/agent/jos-agent.service");
+        let jos_copy = include_str!("../../../templates/agent/jos-copy");
         assert!(freebsd_agent.contains("mount -t p9fs jos /mnt/jos"));
         assert!(linux_agent.contains("mount -t 9p -o trans=virtio,version=9p2000.L jos /mnt/jos"));
+        assert!(jos_copy.contains("printf 'copy %s %s\\n' \"$base\" \"$dst\""));
         for r in RECIPES {
             let Some(ud) = r.user_data else {
                 assert!(!r.os.has_share(), "{}", r.name);
                 continue;
             };
+            assert!(ud.contains("path: /usr/local/bin/jos-copy"), "{}", r.name);
+            assert!(embedded(ud, jos_copy), "{}: stale jos-copy", r.name);
             match r.os {
                 OsType::Freebsd => {
                     assert!(
@@ -671,9 +677,9 @@ mod tests {
 
     #[test]
     fn checksum_lists_both_styles() {
-        let gnu = "abc123  other.tar.xz\nDEADBEEF  debian-13-genericcloud-amd64.tar.xz\n";
+        let gnu = "abc123  other.tar.xz\nDEADBEEF  debian-13-generic-amd64.tar.xz\n";
         assert_eq!(
-            find_checksum(gnu, "debian-13-genericcloud-amd64.tar.xz").as_deref(),
+            find_checksum(gnu, "debian-13-generic-amd64.tar.xz").as_deref(),
             Some("deadbeef")
         );
         let bsd = "SHA256 (a.raw.xz) = 11\nSHA256 (FreeBSD-x.raw.xz) = AB12\n";

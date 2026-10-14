@@ -59,8 +59,9 @@ Besides its zvol, every FreeBSD or Linux qube has a *share*: a dom0
 directory `/var/db/juanitos/share/<name>` (`share_dir` in `jos.toml`)
 exported into the guest over virtio-9p (guest slot 28, mount tag `jos`).
 It carries the qube's name, which the guest agent in the templates turns
-into the hostname, and the inbox/outbox of `jos copy`. See
-`docs/inter-qube.md`.
+into the hostname, the inbox/outbox of `jos copy`, and the request
+directory `jos-copy` uses to ask dom0 for a transfer, answered by
+`jos serve` under `jos policy`. See `docs/inter-qube.md`.
 
 ## Networking
 
@@ -129,7 +130,8 @@ it; guests should be shut down from inside or via a future agent).
   own IOMMU group and bound to `ppt(4)` at boot (`pptdevs`).
 - Guest ↔ guest: only via the NetVM/FirewallVM chain. Shares are strictly
   per qube; files move between qubes only when dom0 moves them (`jos
-  copy`, `docs/inter-qube.md`), never through a filesystem two qubes see.
+  copy`, or a `jos-copy` request the policy allows; `docs/inter-qube.md`),
+  never through a filesystem two qubes see.
 - Host hardening: see `freebsd/sysctl.conf.sample` for HardenedBSD-style
   knobs. Running the host on HardenedBSD itself is supported but untested.
 - The reasoning behind all of this, and what is borrowed from QubesOS,

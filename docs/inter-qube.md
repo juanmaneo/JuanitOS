@@ -1,12 +1,14 @@
-# Inter-qube: the share, the guest agent and `jos copy`
+# Inter-qube: the share, the guest agent, `jos copy` and the policy
 
 QubesOS has *qrexec*: a dom0-mediated RPC channel between qubes, with
-`qvm-copy-to-vm` on top of it. JuanitOS does not have an RPC daemon yet,
-but it has the two pieces that make the common case work: a dom0
-directory exported into every FreeBSD or Linux qube over **virtio-9p**,
-and `jos run`, which types commands on a qube's serial console. Together
-they give every clone its own hostname and move files between qubes
-without the qubes ever seeing each other's storage.
+`qvm-copy-to-vm` on top of it and a policy deciding which qube may ask
+what of whom. JuanitOS does the same with files rather than a socket
+protocol: a dom0 directory exported into every FreeBSD or Linux qube over
+**virtio-9p** carries requests one way and answers the other, `jos serve`
+on dom0 is the broker applying `jos policy`, and `jos run` (commands
+typed on a qube's serial console) lets dom0 drive a qube when it has to.
+Together they give every clone its own hostname and move files between
+qubes without the qubes ever seeing each other's storage.
 
 ## The share
 
@@ -21,7 +23,8 @@ Before a qube boots, dom0 creates `/var/db/juanitos/share/<qube>/`
 ├── in/                            inbox (1777): in/<source>/<item>
 │   ├── dom0/                      files from `jos copy /path <qube>`
 │   └── <other-qube>/              files from `jos copy <other-qube>:/path <qube>`
-└── out/                           outbox (1777): what `jos copy` asks the guest to export
+├── out/                           outbox (1777): what the guest exports (jos copy, jos-copy)
+└── req/                           requests (777): <id> from the guest, <id>.reply from dom0
 ```
 
 The share is strictly per qube: a qube only ever sees its own directory,
@@ -73,25 +76,97 @@ What happens for `work:/tmp/proj` → `gpu`:
 
 For a dom0 source step 2 is a `cp -RL` on dom0, and the copy is made
 world-writable (`chmod -R a+rwX`) so the guest's unprivileged user can
-delete what root put there; copies between qubes keep their owner, which
+edit what root put there; copies between qubes keep their owner, which
 is the same `user` uid in every template. Every dom0 step goes through
-the `Runner`, so `jos copy --dry-run` prints the plan, and the
-destination's inbox directories are mode 777 so the guest user can tidy
-them.
+the `Runner`, so `jos copy --dry-run` prints the plan. dom0 clears the
+outbox spot before the guest exports and replaces an inbox item of the
+same name, as the guest user cannot remove files on the share (see
+below); an inbox is tidied by copying over it, by `rm` as root in the
+guest, or on dom0.
 
-Only dom0 initiates a transfer, as with `qvm-copy-to-vm` run from dom0.
-A qube cannot push to another qube by itself, and the policy layer of
-QubesOS (`qrexec` policies asking the user to confirm) is future work:
-today the administrator typing `jos copy` *is* the policy.
+`jos copy` is dom0 initiating a transfer, as with `qvm-copy-to-vm` run
+from dom0: the administrator typing it *is* the policy. A qube asking
+for one is the next section.
+
+## Requests from a qube: `jos-copy` and the policy
+
+Inside a qube (`templates/agent/jos-copy`, installed as
+`/usr/local/bin/jos-copy` by every template):
+
+```sh
+user@work:~ $ jos-copy ~/report.pdf personal
+jos-copy: asked dom0 to copy report.pdf to personal (request 1760450000-812)
+jos-copy: ok /mnt/jos/in/work/report.pdf
+```
+
+The script copies the file to `/mnt/jos/out/report.pdf`, writes
+`copy report.pdf personal` to `/mnt/jos/req/<id>` (atomically: a
+temporary file renamed into place) and waits for `/mnt/jos/req/<id>.reply`
+(up to `JOS_COPY_TIMEOUT`, 600 s). The exit status says what dom0
+answered: 0 delivered, 77 denied, 75 still pending, 1 error.
+
+On dom0, `jos serve` (started by `rc.d/jos` as a `daemon(8)`, pidfile
+and log under `/var/run/juanitos/serve.*`; `jos serve --once` for a
+single pass) polls every `req/` directory and decides with the
+**policy** in `/usr/local/etc/juanitos/policy`
+(`crates/juanitos-core/src/requests.rs`):
+
+```sh
+jos policy add work personal allow    # copy SRC DST allow|deny|ask
+jos policy add '*' vault deny
+jos policy show
+```
+
+One rule per line, `*` matches any qube, the first matching rule wins and
+no match means `ask`. The verdicts:
+
+| verdict | dom0 does                                                     | reply                          |
+|---------|---------------------------------------------------------------|--------------------------------|
+| `allow` | `mv share/work/out/<item> share/personal/in/work/<item>`      | `ok /mnt/jos/in/work/<item>`   |
+| `deny`  | nothing                                                       | `denied: policy`               |
+| `ask`   | leaves the request for the operator                           | none until settled             |
+
+Pending requests are listed and settled by hand:
+
+```sh
+jos requests                                  # QUBE ID copy ITEM -> DST [verdict]
+jos requests approve work 1760450000-812
+jos requests deny work 1760450000-812
+```
+
+Whatever the outcome, dom0 writes the reply and removes the request; a
+refused or failed export is removed from the outbox, and replies are
+swept a minute later. dom0 does all the removing because of one
+property of bhyve's 9p server found on the way: an unprivileged guest
+user can create, write and rename files on the share but **cannot
+unlink** them, whatever the directory and file modes say (root in the
+guest can; FreeBSD and Debian guests behave the same). `jos-copy`
+therefore never deletes, and refuses to export a name still sitting in
+the outbox (dom0 has not consumed it yet). A malformed request (bad
+name, unknown service, a path instead of a file name) is answered
+`error: ...` right away so the guest does not wait; a request whose
+destination does not exist or has no share fails the same way when it is
+granted. Requests and replies are plain files: `ls
+/var/db/juanitos/share/*/req` is the queue, and nothing is lost if the
+daemon is restarted.
+
+What a qube cannot do, by construction: name a path outside its own
+outbox (the request carries a file name, not a path; dom0 validates it
+as a single component), reach another qube's share, or learn anything
+about other qubes beyond the reply to its own request. Only `copy` exists
+as a service so far; the request line starts with the service name so
+others can be added with their own policy rules.
 
 ## Limits and next steps
 
 - `jos copy` reads the source over the serial console, so it needs the
   source qube to be running with its autologin shell free; a long `cp`
-  is bounded by `--timeout` (default 600 s).
+  is bounded by `--timeout` (default 600 s). `jos-copy` needs no console
+  at all.
 - The destination need not be running: files wait in its inbox on dom0.
 - Large transfers are a `cp` through 9p; fine for sources and documents,
   not meant for disk images.
-- A proper qrexec-like agent (a guest daemon on a virtio-console or
-  vsock, dom0 policies, `jos run` without the serial console) is the
-  natural next step and would reuse the same share layout.
+- `jos serve` polls (every 2 s by default); a guest daemon on a
+  virtio-console or vsock would make it event-driven and could replace
+  the serial console under `jos run`, keeping the same share layout,
+  request format and policy.

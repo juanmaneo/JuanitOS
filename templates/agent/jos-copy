@@ -1,0 +1,48 @@
+#!/bin/sh
+# jos-copy PATH QUBE: ask dom0 to copy PATH from this qube into QUBE's
+# inbox (/mnt/jos/in/<this qube>/ there). The file goes to the outbox of
+# the dom0 share, a request goes to /mnt/jos/req/, and dom0 (`jos serve`)
+# answers according to its policy: delivered, denied, or held for the
+# operator (`jos requests`). See docs/inter-qube.md.
+set -u
+usage() { echo "usage: jos-copy PATH QUBE" >&2; exit 64; }
+[ $# -eq 2 ] || usage
+path=$1
+dst=$2
+share=/mnt/jos
+timeout=${JOS_COPY_TIMEOUT:-600}
+[ -d "$share/req" ] || { echo "jos-copy: dom0 share not mounted at $share" >&2; exit 2; }
+[ -e "$path" ] || { echo "jos-copy: $path: no such file or directory" >&2; exit 1; }
+base=$(basename "$path")
+case $base in ''|.|..|*/*) echo "jos-copy: $path: cannot copy that" >&2; exit 1;; esac
+# A previous export of the same name still in the outbox is one dom0 has
+# not consumed yet: a guest user cannot remove it (dom0 does, once it has
+# answered), so wait for that rather than copy into it.
+if [ -e "$share/out/$base" ]; then
+    echo "jos-copy: $base is still being handled by dom0; try again shortly" >&2
+    exit 75
+fi
+# Follow symbolic links: the share cannot hold them.
+cp -RL "$path" "$share/out/$base" || exit 1
+id="$(date +%s)-$$"
+req="$share/req/$id"
+# The request appears atomically, complete.
+printf 'copy %s %s\n' "$base" "$dst" > "$req.tmp" && mv "$req.tmp" "$req" || exit 1
+echo "jos-copy: asked dom0 to copy $base to $dst (request $id)"
+waited=0
+while [ ! -e "$req.reply" ]; do
+    if [ "$waited" -ge "$timeout" ]; then
+        echo "jos-copy: no answer from dom0 after ${timeout}s; still pending as $id" >&2
+        exit 75
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+reply=$(cat "$req.reply")
+# dom0 sweeps replies a minute later (a guest user cannot unlink them).
+echo "jos-copy: $reply"
+case $reply in
+    ok\ *) exit 0;;
+    denied*) exit 77;;
+    *) exit 1;;
+esac

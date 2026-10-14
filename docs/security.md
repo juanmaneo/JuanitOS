@@ -44,11 +44,16 @@ JuanitOS is less the architecture than the engineering discipline:
    security levels only through controlled channels. In JuanitOS the
    inter-qube channels are the network through `sys-firewall`, whose
    per-client rules (`jos firewall add work deny any any`) are the
-   equivalent of CLIP's flow policy, and `jos copy`, which is explicit
+   equivalent of CLIP's flow policy, and the share, which is explicit
    and dom0-mediated: each qube only ever sees its own share, and files
-   cross from one share to another only when dom0 moves them on the
-   administrator's request (`docs/inter-qube.md`). A policy layer with
-   user confirmation, as in qrexec, is still to come.
+   cross from one share to another only when dom0 moves them, either on
+   the administrator's request (`jos copy`) or on a qube's request
+   (`jos-copy`) that the policy allows (`jos policy`: `copy SRC DST
+   allow|deny|ask`, first match wins, `ask` by default, settled by the
+   operator with `jos requests`). That is qrexec's policy model, with
+   files in place of a socket protocol; see `docs/inter-qube.md`. A
+   qube names a file in its own outbox and a destination, nothing more:
+   it cannot address another qube's share or any path on dom0.
 
 ## Where JuanitOS deliberately differs
 

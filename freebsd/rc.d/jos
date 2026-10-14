@@ -8,6 +8,7 @@
 #
 # jos_enable="YES"
 # jos_config="/usr/local/etc/juanitos/jos.toml"   (optional)
+# jos_serve_enable="YES"   answer qube requests (`jos serve`) per the policy
 
 . /etc/rc.subr
 
@@ -19,18 +20,26 @@ load_rc_config $name
 : ${jos_enable:="NO"}
 : ${jos_config:="/usr/local/etc/juanitos/jos.toml"}
 : ${jos_bin:="/usr/local/bin/jos"}
+: ${jos_serve_enable:="YES"}
 
 start_cmd="jos_start"
 stop_cmd="jos_stop"
 status_cmd="jos_status"
 
 : ${jos_splash_bin:="/usr/local/bin/jos-splash"}
+serve_pidfile="/var/run/juanitos/serve.pid"
 
 jos_start()
 {
 	echo "Starting JuanitOS qubes."
 	if [ -x "${jos_splash_bin}" ]; then
 		"${jos_splash_bin}" status "Starting qubes"
+	fi
+	# The request broker (jos-copy in the qubes, docs/inter-qube.md).
+	if checkyesno jos_serve_enable; then
+		mkdir -p /var/run/juanitos
+		/usr/sbin/daemon -f -p "${serve_pidfile}" -o /var/run/juanitos/serve.log \
+			"${jos_bin}" --config "${jos_config}" serve
 	fi
 	# Each qube gets its own detached `jos supervise` process, logging to
 	# /var/run/juanitos/<name>.log.
@@ -44,6 +53,10 @@ jos_start()
 jos_stop()
 {
 	echo "Stopping JuanitOS qubes."
+	if [ -e "${serve_pidfile}" ]; then
+		kill "$(cat "${serve_pidfile}")" 2>/dev/null
+		rm -f "${serve_pidfile}"
+	fi
 	# Supervised qubes are known by their pidfiles; anything else left in
 	# /dev/vmm (e.g. started by hand) is destroyed too.
 	for pid in /var/run/juanitos/*.pid; do

@@ -21,6 +21,13 @@
 //!
 //! Redox and unikernel qubes have no share (no 9p client); templates do,
 //! so a maintenance boot exercises the guest agent.
+//!
+//! One property of bhyve's 9p server shapes the protocols built on the
+//! share: an unprivileged guest user can create, write and rename files
+//! there but **cannot unlink them** (root in the guest can; observed from
+//! FreeBSD 15.1 and Debian 13 guests alike). So dom0 does every removal:
+//! it consumes outbox entries, sweeps old replies, and replaces inbox
+//! items of the same name.
 
 use std::path::Path;
 
@@ -40,6 +47,9 @@ pub const INBOX: &str = "in";
 pub const OUTBOX: &str = "out";
 /// Inbox subdirectory for files coming from dom0 itself.
 pub const DOM0: &str = "dom0";
+/// Request directory: the guest asks dom0 for things here (see
+/// [`crate::requests`]).
+pub const REQUESTS: &str = "req";
 
 /// Where a `jos copy` takes its files from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,12 +118,12 @@ impl Source {
     pub fn basename(&self) -> Result<String> {
         let trimmed = self.path().trim_end_matches('/');
         let base = trimmed.rsplit('/').next().unwrap_or("");
-        if base.is_empty() || base == "." || base == ".." {
-            return Err(Error::Other(format!(
+        validate_basename(base).map_err(|_| {
+            Error::Other(format!(
                 "{}: cannot copy that path itself; name a file or directory",
                 self.path()
-            )));
-        }
+            ))
+        })?;
         Ok(base.to_string())
     }
 }
@@ -124,17 +134,18 @@ impl std::fmt::Display for Source {
     }
 }
 
-/// Shell command `jos copy` runs inside the source qube: refresh the
-/// outbox copy of `path` under its basename, failing clearly when the
-/// share is not mounted (the guest agent is missing from the template).
-/// Symbolic links are followed: the share cannot hold them (bhyve's 9p
-/// server refuses to create them), and `/etc/motd` is one on FreeBSD.
+/// Shell command `jos copy` runs inside the source qube: copy `path` to
+/// the outbox under its basename (dom0 cleared that spot first: the
+/// guest could not), failing clearly when the share is not mounted (the
+/// guest agent is missing from the template). Symbolic links are
+/// followed: the share cannot hold them (bhyve's 9p server refuses to
+/// create them), and `/etc/motd` is one on FreeBSD.
 pub fn guest_export_command(path: &str, basename: &str) -> String {
     let out = format!("{GUEST_MOUNT}/{OUTBOX}");
     let target = shell_quote(&format!("{out}/{basename}"));
     format!(
         "[ -d {out} ] || {{ echo 'jos share not mounted at {GUEST_MOUNT}' >&2; exit 2; }}; \
-         rm -rf {target} && cp -RL {} {target}",
+         cp -RL {} {target}",
         shell_quote(path)
     )
 }
@@ -183,9 +194,17 @@ impl<'a> Share<'a> {
         format!("{}/{OUTBOX}", self.dir(name))
     }
 
+    /// `<share_dir>/<qube>/req`.
+    pub fn requests(&self, name: &str) -> String {
+        format!("{}/{REQUESTS}", self.dir(name))
+    }
+
     /// Create the share before a boot and refresh the `name` file. The
     /// inbox and outbox are world-writable with the sticky bit so the
-    /// guest's unprivileged user can use them.
+    /// guest's unprivileged user can use them; the request directory is
+    /// world-writable without it, as the guest has to remove the replies
+    /// dom0 (root) writes there (which are made world-writable too: see
+    /// [`crate::requests`]).
     pub fn prepare(&self, q: &Qube) -> Result<()> {
         if !q.os.has_share() {
             return Ok(());
@@ -193,9 +212,12 @@ impl<'a> Share<'a> {
         let dir = self.dir(&q.name);
         let inbox = format!("{dir}/{INBOX}");
         let outbox = format!("{dir}/{OUTBOX}");
-        self.runner.run_checked("mkdir", &["-p", &inbox, &outbox])?;
+        let requests = format!("{dir}/{REQUESTS}");
+        self.runner
+            .run_checked("mkdir", &["-p", &inbox, &outbox, &requests])?;
         self.runner
             .run_checked("chmod", &["1777", &inbox, &outbox])?;
+        self.runner.run_checked("chmod", &["777", &requests])?;
         let name_file = format!("{dir}/{NAME_FILE}");
         self.runner
             .run_with_input_checked("tee", &[&name_file], &format!("{}\n", q.name))?;
@@ -238,15 +260,12 @@ impl<'a> Share<'a> {
             )));
         }
         let base = src.basename()?;
-        let inbox = self.inbox(&dst.name, src.label());
-        let target = format!("{inbox}/{base}");
-        self.runner.run_checked("mkdir", &["-p", &inbox])?;
-        self.runner.run_checked("chmod", &["777", &inbox])?;
-        self.runner.run_checked("rm", &["-rf", &target])?;
+        let target = self.open_inbox(&dst.name, src.label(), &base)?;
         match src {
             Source::Qube { name, path } => {
-                run_in_qube(name, &guest_export_command(path, &base))?;
                 let staged = format!("{}/{base}", self.outbox(name));
+                self.runner.run_checked("rm", &["-rf", &staged])?;
+                run_in_qube(name, &guest_export_command(path, &base))?;
                 self.runner.run_checked("mv", &[&staged, &target])?;
             }
             Source::Dom0 { path } => {
@@ -257,9 +276,70 @@ impl<'a> Share<'a> {
         }
         Ok(Delivery {
             dom0_path: target,
-            guest_path: format!("{GUEST_MOUNT}/{INBOX}/{}/{base}", src.label()),
+            guest_path: guest_inbox_path(src.label(), &base),
         })
     }
+
+    /// Move `<base>`, already exported by qube `src` to its outbox, into
+    /// `dst`'s inbox: the dom0 half of a qube-to-qube copy, also what a
+    /// granted guest request ([`crate::requests`]) comes down to.
+    pub fn deliver(&self, src: &str, base: &str, dst: &Qube) -> Result<Delivery> {
+        crate::config::validate_name(src)?;
+        validate_basename(base)?;
+        if !dst.os.has_share() {
+            return Err(Error::Other(format!(
+                "{} runs {} which has no dom0 share; cannot copy into it",
+                dst.name, dst.os
+            )));
+        }
+        if src == dst.name {
+            return Err(Error::Other(format!(
+                "{src}: source and destination are the same qube"
+            )));
+        }
+        let target = self.open_inbox(&dst.name, src, base)?;
+        let staged = format!("{}/{base}", self.outbox(src));
+        self.runner.run_checked("mv", &[&staged, &target])?;
+        Ok(Delivery {
+            dom0_path: target,
+            guest_path: guest_inbox_path(src, base),
+        })
+    }
+
+    /// Remove `<base>` from `src`'s outbox: an export nobody will take
+    /// (request denied or failed). The guest cannot do it itself (see the
+    /// module docs on deletion through 9p).
+    pub fn discard_export(&self, src: &str, base: &str) -> Result<()> {
+        crate::config::validate_name(src)?;
+        validate_basename(base)?;
+        let staged = format!("{}/{base}", self.outbox(src));
+        self.runner.run_checked("rm", &["-rf", &staged])?;
+        Ok(())
+    }
+
+    /// Create `<dst>/in/<label>` (writable by the guest user) and clear a
+    /// previous `<base>` in it; returns the path the copy goes to.
+    fn open_inbox(&self, dst: &str, label: &str, base: &str) -> Result<String> {
+        let inbox = self.inbox(dst, label);
+        let target = format!("{inbox}/{base}");
+        self.runner.run_checked("mkdir", &["-p", &inbox])?;
+        self.runner.run_checked("chmod", &["777", &inbox])?;
+        self.runner.run_checked("rm", &["-rf", &target])?;
+        Ok(target)
+    }
+}
+
+/// Where the destination guest sees a delivered item.
+pub fn guest_inbox_path(label: &str, base: &str) -> String {
+    format!("{GUEST_MOUNT}/{INBOX}/{label}/{base}")
+}
+
+/// An inbox entry name must be a single path component.
+pub fn validate_basename(base: &str) -> Result<()> {
+    if base.is_empty() || base == "." || base == ".." || base.contains('/') || base.contains('\0') {
+        return Err(Error::Other(format!("{base:?}: not a valid file name")));
+    }
+    Ok(())
 }
 
 /// True when `path` looks like something `jos copy` can read on dom0 (a
@@ -333,11 +413,9 @@ mod tests {
     fn guest_command_quotes_and_checks_the_mount() {
         let c = guest_export_command("/home/user/my file", "my file");
         assert!(c.starts_with("[ -d /mnt/jos/out ] ||"));
-        assert!(c.contains(
-            "rm -rf '/mnt/jos/out/my file' && cp -RL '/home/user/my file' '/mnt/jos/out/my file'"
-        ));
+        assert!(c.contains("cp -RL '/home/user/my file' '/mnt/jos/out/my file'"));
         let c = guest_export_command("/etc/motd", "motd");
-        assert!(c.ends_with("rm -rf /mnt/jos/out/motd && cp -RL /etc/motd /mnt/jos/out/motd"));
+        assert!(c.ends_with("cp -RL /etc/motd /mnt/jos/out/motd"));
     }
 
     #[test]
@@ -349,8 +427,9 @@ mod tests {
         assert_eq!(
             runner.calls(),
             vec![
-                "mkdir -p /var/db/juanitos/share/work/in /var/db/juanitos/share/work/out",
+                "mkdir -p /var/db/juanitos/share/work/in /var/db/juanitos/share/work/out /var/db/juanitos/share/work/req",
                 "chmod 1777 /var/db/juanitos/share/work/in /var/db/juanitos/share/work/out",
+                "chmod 777 /var/db/juanitos/share/work/req",
                 "tee /var/db/juanitos/share/work/name",
             ]
         );
@@ -413,6 +492,7 @@ mod tests {
                 "mkdir -p /var/db/juanitos/share/jail/in/work",
                 "chmod 777 /var/db/juanitos/share/jail/in/work",
                 "rm -rf /var/db/juanitos/share/jail/in/work/motd",
+                "rm -rf /var/db/juanitos/share/work/out/motd",
                 "mv /var/db/juanitos/share/work/out/motd /var/db/juanitos/share/jail/in/work/motd",
             ]
         );
@@ -489,6 +569,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no such file"), "{err}");
+    }
+
+    #[test]
+    fn deliver_moves_an_exported_item() {
+        let runner = MockRunner::new();
+        let cfg = GlobalConfig::default();
+        let share = Share::new(&runner, &cfg);
+        let dst = Qube::new("jail", QubeKind::App, OsType::Freebsd);
+        let d = share.deliver("work", "report.pdf", &dst).unwrap();
+        assert_eq!(d.guest_path, "/mnt/jos/in/work/report.pdf");
+        assert_eq!(
+            runner.calls().last().unwrap(),
+            "mv /var/db/juanitos/share/work/out/report.pdf /var/db/juanitos/share/jail/in/work/report.pdf"
+        );
+        assert!(share.deliver("work", "../x", &dst).is_err());
+        assert!(share.deliver("work", "", &dst).is_err());
+        assert!(share.deliver("bad name", "x", &dst).is_err());
+        assert!(share.deliver("jail", "x", &dst).is_err());
+        let rx = Qube::new("rx", QubeKind::App, OsType::Redox);
+        assert!(share.deliver("work", "x", &rx).is_err());
+        assert_eq!(share.requests("work"), "/var/db/juanitos/share/work/req");
     }
 
     #[test]
