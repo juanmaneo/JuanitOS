@@ -177,6 +177,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             .unwrap_or_else(|| repo.join("target/release")),
         firewall_image: args.firewall_image.clone(),
         boot_efi: args.boot_efi.clone(),
+        installed_root: PathBuf::from("/"),
     };
     let plain = BuildArgs {
         bins: None,

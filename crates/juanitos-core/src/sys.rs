@@ -55,6 +55,13 @@ pub trait Runner: Send + Sync {
     /// secrets such as passwords, which must not appear in argv).
     fn run_with_input(&self, program: &str, args: &[&str], input: &str) -> Result<CmdOutput>;
 
+    /// Run `program` with the caller's standard input inherited instead of
+    /// `/dev/null`, for tools that act on the terminal itself (`stty`).
+    /// Mocks record it like a plain [`Runner::run`].
+    fn run_inheriting_stdin(&self, program: &str, args: &[&str]) -> Result<CmdOutput> {
+        self.run(program, args)
+    }
+
     fn run_with_input_checked(
         &self,
         program: &str,
@@ -93,6 +100,18 @@ impl Runner for RealRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput> {
         Ok(convert(
             std::process::Command::new(program).args(args).output()?,
+        ))
+    }
+
+    fn run_inheriting_stdin(&self, program: &str, args: &[&str]) -> Result<CmdOutput> {
+        use std::process::Stdio;
+        Ok(convert(
+            std::process::Command::new(program)
+                .args(args)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()?,
         ))
     }
 
@@ -290,6 +309,22 @@ mod tests {
             }
             other => panic!("unexpected error {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_runner_inherits_stdin_and_reports_status() {
+        // `sh` is everywhere on unix; the point is that stdin is not
+        // /dev/null, which `[ -t 0 ]` cannot tell under cargo test, so
+        // check the plumbing (status, captured output) instead.
+        let out = RealRunner
+            .run_inheriting_stdin("sh", &["-c", "echo via-tty; exit 3"])
+            .unwrap();
+        assert_eq!(out.status, Some(3));
+        assert_eq!(out.stdout.trim(), "via-tty");
+        assert!(MockRunner::new()
+            .run_inheriting_stdin("stty", &["-echo"])
+            .is_ok());
     }
 
     #[test]

@@ -52,6 +52,13 @@ x86_64-unknown-linux-gnu` from the crate directory). On any error the
 program prints the reason on the firmware text console and resets after
 8 s; an ESP with only `loader.efi` boots as plain FreeBSD.
 
+Without a Graphics Output Protocol at all (a serial-only server, `qemu
+-vga none`) there is nothing to draw on, so the card and the menu are
+skipped: `loader.efi` is chain-loaded immediately with `autoboot_delay=-1
+beastie_disable=YES` and *without* `-m`/`console=nullconsole`, so the
+loader and the kernel talk on the firmware's text console, i.e. the
+serial port. The live installer then runs in its text mode there.
+
 ### `crates/jos-splash` — the daemon
 
 `rc.d/jos-splash` starts it right after `FILESYSTEMS`. It opens

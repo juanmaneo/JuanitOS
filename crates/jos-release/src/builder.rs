@@ -34,6 +34,10 @@ pub struct Builder<'a> {
     /// `jos-boot.efi` graphical pre-loader to ship; taken from the UEFI
     /// build output when not given.
     pub boot_efi: Option<PathBuf>,
+    /// Root of the running system, where a dom0 rebuilding itself finds
+    /// the UEFI artifacts it was installed with (`/`; tests use a scratch
+    /// directory).
+    pub installed_root: PathBuf,
 }
 
 /// Rust target of the UEFI applications.
@@ -57,17 +61,39 @@ impl<'a> Builder<'a> {
     pub fn firewall_image_path(&self) -> PathBuf {
         self.work.join("jos-firewall.img")
     }
-    fn boot_efi(&self) -> Option<PathBuf> {
-        self.boot_efi.clone().or_else(|| {
-            let p = self.uefi_release_dir().join("jos-boot.efi");
-            p.is_file().then_some(p)
+    /// A UEFI artifact to ship: the explicit flag, else the one this build
+    /// produced, else the one the running system was installed with. The
+    /// last case is stage 2: FreeBSD's `rust` has no `x86_64-unknown-uefi`
+    /// target, so a dom0 rebuilding itself inherits the pre-loader and the
+    /// firewall it boots with rather than dropping them.
+    fn uefi_artifact(
+        &self,
+        explicit: &Option<PathBuf>,
+        built: PathBuf,
+        installed: &str,
+    ) -> Option<PathBuf> {
+        explicit.clone().or_else(|| {
+            [
+                built,
+                self.installed_root.join(installed.trim_start_matches('/')),
+            ]
+            .into_iter()
+            .find(|p| p.is_file())
         })
     }
+    fn boot_efi(&self) -> Option<PathBuf> {
+        self.uefi_artifact(
+            &self.boot_efi,
+            self.uefi_release_dir().join("jos-boot.efi"),
+            dom0::JOS_BOOT_EFI,
+        )
+    }
     fn firewall_image(&self) -> Option<PathBuf> {
-        self.firewall_image.clone().or_else(|| {
-            let p = self.firewall_image_path();
-            p.is_file().then_some(p)
-        })
+        self.uefi_artifact(
+            &self.firewall_image,
+            self.firewall_image_path(),
+            dom0::FIREWALL_IMAGE,
+        )
     }
     pub fn rootfs(&self) -> PathBuf {
         self.work.join("rootfs")
@@ -602,6 +628,12 @@ impl<'a> Builder<'a> {
 /// the source for crates.io, so stage 2 builds offline.
 pub fn vendored_cargo_config(repo_config: &str) -> String {
     let mut out = repo_config.trim_end().to_string();
+    if out.contains("[source.vendored-sources]") {
+        // Already a vendored copy (stage 2 building stage 3): adding the
+        // tables again would make cargo reject the file as a duplicate.
+        out.push('\n');
+        return out;
+    }
     if !out.is_empty() {
         out.push_str("\n\n");
     }
@@ -701,6 +733,12 @@ mod tests {
         assert!(c.contains("\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n"));
         assert!(c.ends_with("directory = \"vendor\"\n"));
         assert!(vendored_cargo_config("").starts_with("[source.crates-io]"));
+        // Idempotent: a dom0 rebuilding itself starts from the vendored copy
+        // (found by comparing stage-1 and stage-2 tarballs: the only
+        // unintended difference was a second pair of [source] tables).
+        let again = vendored_cargo_config(&c);
+        assert_eq!(again, c);
+        assert_eq!(again.matches("[source.crates-io]").count(), 1);
     }
 
     #[test]
@@ -753,6 +791,7 @@ mod tests {
             bins: PathBuf::from("/repo/target/release"),
             firewall_image: None,
             boot_efi: Some(PathBuf::from("/repo/target/uefi/jos-boot.efi")),
+            installed_root: PathBuf::from("/nonexistent"),
         };
         b.bins().unwrap();
         b.rootfs_build().unwrap();
@@ -812,11 +851,56 @@ mod tests {
             bins: PathBuf::from("/bins"),
             firewall_image: None,
             boot_efi: None,
+            installed_root: PathBuf::from("/nonexistent"),
         };
         let info = b.release_info().unwrap();
         // The test host is not a JuanitOS dom0.
         assert_eq!(info.built_on, "freebsd");
         assert_eq!(info.stage, 1);
         assert!(info.packages.contains(&"seatd".to_string()));
+    }
+
+    #[test]
+    fn stage_two_inherits_installed_uefi_artifacts() {
+        let tmp = std::env::temp_dir().join(format!("jos-stage2-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let mut b = Builder {
+            runner: &m,
+            fs: FsOps::new(true),
+            profile: &profile,
+            repo: tmp.join("repo"),
+            work: tmp.join("work"),
+            bins: tmp.join("bins"),
+            firewall_image: None,
+            boot_efi: None,
+            installed_root: root.clone(),
+        };
+        // Nothing built, nothing installed: ship without them.
+        assert_eq!(b.boot_efi(), None);
+        assert_eq!(b.firewall_image(), None);
+
+        // The running dom0's copies are the fallback ...
+        let efi = root.join(dom0::JOS_BOOT_EFI.trim_start_matches('/'));
+        let img = root.join(dom0::FIREWALL_IMAGE.trim_start_matches('/'));
+        for p in [&efi, &img] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert_eq!(b.boot_efi(), Some(efi));
+        assert_eq!(b.firewall_image(), Some(img));
+
+        // ... behind what this build produced ...
+        let built = b.uefi_release_dir().join("jos-boot.efi");
+        std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+        std::fs::write(&built, b"y").unwrap();
+        assert_eq!(b.boot_efi(), Some(built));
+
+        // ... and an explicit flag wins over both.
+        b.boot_efi = Some(PathBuf::from("/flag/jos-boot.efi"));
+        assert_eq!(b.boot_efi(), Some(PathBuf::from("/flag/jos-boot.efi")));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

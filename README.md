@@ -261,6 +261,15 @@ The `debian-13-dev` template was provisioned from the real cloud image
 under QEMU. The test suite reaches 93% line coverage, gated per crate in
 CI.
 
+Stage 2 is done too: the stage-1 ISO was installed headless (`qemu -vga
+none`, text installer on the serial port) and the installed JuanitOS
+rebuilt itself with `jos-release all` in 5.5 minutes, producing an ISO
+stamped `built_on = "juanitos"`, `stage = 2` that boots to the installer.
+The stage-1 and stage-2 dom0 tarballs have the same 128,568 entries and
+differ only in the JuanitOS binaries, `release.toml` and `pkg`'s
+bookkeeping (`docs/bootstrap.md` has the comparison and what it
+uncovered).
+
 Not yet done: NIC passthrough on real hardware (the chain above used
 `--uplink`; `--pci` is implemented but only dry-run tested), a display
 for Redox qubes (bhyve's `fbuf` asserts when Redox programs it), COSMIC

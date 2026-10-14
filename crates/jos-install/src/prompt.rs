@@ -94,15 +94,17 @@ impl<'a, R: BufRead, W: Write> Prompter<'a, R, W> {
     }
 
     /// Read a password twice with echo off (via `stty`, so no libc
-    /// dependency).
+    /// dependency). `stty` must see the installer's own standard input:
+    /// with the usual captured run its stdin is `/dev/null` and the
+    /// password shows up in clear on the console.
     pub fn password(&mut self, label: &str) -> anyhow::Result<String> {
         loop {
             self.say(&format!("{label}: "))?;
-            let _ = self.runner.run("stty", &["-echo"]);
+            let _ = self.runner.run_inheriting_stdin("stty", &["-echo"]);
             let first = self.read_line();
             self.say("\nRepeat: ")?;
             let second = self.read_line();
-            let _ = self.runner.run("stty", &["echo"]);
+            let _ = self.runner.run_inheriting_stdin("stty", &["echo"]);
             self.say("\n")?;
             let (a, b) = (first?, second?);
             if a.is_empty() {

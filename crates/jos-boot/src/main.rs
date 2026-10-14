@@ -25,7 +25,7 @@ use core::time::Duration;
 
 use jos_boot::{
     countdown_scene, load_options, on_countdown_key, Action, Countdown, Key, MenuOutcome,
-    MenuState, COUNTDOWN_MS, DEFAULT_ENTRY, ENTRIES, LOADER_PATH,
+    MenuState, COUNTDOWN_MS, DEFAULT_ENTRY, ENTRIES, HEADLESS_ARGS, LOADER_PATH,
 };
 use jos_gfx::scene::{card_origin, Scene, CARD_HEIGHT, CARD_WIDTH};
 use jos_gfx::Image;
@@ -85,6 +85,14 @@ fn error_lines(msg: &str) -> Vec<String> {
 }
 
 fn run() -> Result<(), String> {
+    if boot::get_handle_for_protocol::<GraphicsOutput>().is_err() {
+        // Headless machine: nothing to draw on, so do not loop on a
+        // "no graphics output" reset; boot the loader on the text console.
+        uefi::system::with_stdout(|out| {
+            let _ = writeln!(out, "jos-boot: no graphics output, booting {LOADER_PATH}");
+        });
+        return chain_load(HEADLESS_ARGS);
+    }
     let choice = {
         let mut screen = Screen::open()?;
         choose(&mut screen)

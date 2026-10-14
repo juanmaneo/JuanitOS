@@ -87,6 +87,12 @@ pub const ENTRIES: [Entry; 5] = [
 
 pub const DEFAULT_ENTRY: usize = 0;
 
+/// Arguments for a machine without a graphics output (serial-only servers,
+/// `qemu -vga none`): there is nothing to draw the card on and no splash
+/// to show, so `loader.efi` is chain-loaded straight away and keeps its
+/// console — the firmware's text console, which is the serial port there.
+pub const HEADLESS_ARGS: &str = "autoboot_delay=-1 beastie_disable=YES";
+
 /// Keys the pre-loader reacts to, already decoded from UEFI input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -230,6 +236,19 @@ mod tests {
         }
         // The loader splits on spaces and does not understand quotes.
         assert!(!e.args.contains('"'));
+    }
+
+    #[test]
+    fn headless_boot_is_immediate_and_not_muted() {
+        for needle in ["autoboot_delay=-1", "beastie_disable=YES"] {
+            assert!(
+                HEADLESS_ARGS.split(' ').any(|w| w == needle),
+                "missing {needle}"
+            );
+        }
+        // Output must reach the serial console: no RB_MUTE, no nullconsole.
+        assert!(!HEADLESS_ARGS.split(' ').any(|w| w == "-m"));
+        assert!(!HEADLESS_ARGS.contains("nullconsole"));
     }
 
     #[test]

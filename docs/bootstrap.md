@@ -185,6 +185,7 @@ See `docs/installer.md`.
 On the installed system:
 
 ```sh
+dhclient vtnet0                 # see below
 cd /usr/local/src/juanitos      # or a fresh git clone
 jos-release all
 ```
@@ -193,14 +194,51 @@ jos-release all
 the new image `built_on = "juanitos"`, `stage = 2`. The resulting ISO is a
 stage-2 image: a JuanitOS built by JuanitOS.
 
+What the first stage-2 run showed (JuanitOS 0.1.0 under QEMU, 2026-10):
+
+- The Rust side is offline — `/usr/local/src/juanitos/vendor` and
+  `.cargo/config.toml` make `cargo` use the vendored crates — but `fetch`
+  still downloads `base.txz`/`kernel.txz` and `rootfs` runs `pkg` against
+  the FreeBSD repository. A dom0 has no network of its own by design
+  (`docs/security.md`), so for the rebuild either give it one temporarily
+  (`dhclient vtnet0`, as above) or populate `release/out/dist` and a local
+  `pkg` repository beforehand. Everything else ran unchanged: 5.5 minutes
+  on 8 vCPUs, the same package set, `stage = 2` in `release.toml`.
+- FreeBSD's `rust` cannot build the two UEFI applications, so a dom0
+  rebuilding itself ships the `jos-boot.efi` and `jos-firewall.img` it was
+  installed with (`/boot/jos-boot.efi`, `/usr/local/share/juanitos/
+  jos-firewall.img`) when it has no newer ones; `--boot-efi` and
+  `--firewall-image` still override. Before this fallback a stage-2 image
+  silently lost the graphical boot and the unikernel.
+- The live medium works headless: without a Graphics Output Protocol
+  `jos-boot` chain-loads the loader straight onto the serial console and
+  the installer runs in text mode there (`docs/boot-splash.md`), which is
+  how the stage-2 VM was installed (`qemu -vga none`).
+
 ## Stage 3 — prove it
 
 Install the stage-2 ISO (QEMU is enough: `jos-release qemu`), build again,
 and compare the two dom0 tarballs. They are built from the same FreeBSD
 sets and the same package repository, so apart from timestamps and
 `release.toml` they should match; when they do, the system is self-hosting
-and the bootstrap is finished. Making the comparison exact (reproducible
-tar ordering and mtimes) is the follow-up task tracked for this stage.
+and the bootstrap is finished.
+
+Comparing the stage-1 and stage-2 tarballs of 2026-10-14 (same file list,
+128,568 entries; per-file SHA-256 streamed with `tar --to-command`, which
+also makes hard-link order irrelevant) left exactly these differences:
+
+- the four JuanitOS binaries (built from a different path, and in that run
+  from a patched source tree) and the patched sources themselves;
+- `release.toml` (`stage`, `built_at`), `/var/db/pkg/local.sqlite`,
+  `/var/log/userlog`, `/usr/local/share/info/dir` — `pkg` bookkeeping;
+- `/usr/local/src/juanitos/.cargo/config.toml`: stage 2 had appended a
+  second pair of `[source]` tables to the already vendored copy, which
+  cargo would have rejected on stage 3. `vendored_cargo_config` is now
+  idempotent, so this one disappears.
+
+So the system is self-hosting in substance. Making the comparison exact
+(build-path-independent binaries, reproducible tar ordering and mtimes)
+is the follow-up task tracked for this stage.
 
 ## Why not build FreeBSD from source?
 
