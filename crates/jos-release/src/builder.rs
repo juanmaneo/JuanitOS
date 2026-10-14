@@ -35,8 +35,8 @@ pub struct Builder<'a> {
     /// build output when not given.
     pub boot_efi: Option<PathBuf>,
     /// Root of the running system, where a dom0 rebuilding itself finds
-    /// the UEFI artifacts it was installed with (`/`; tests use a scratch
-    /// directory).
+    /// the UEFI artifacts it was installed with and its own `release.toml`
+    /// (`/`; tests use a scratch directory).
     pub installed_root: PathBuf,
 }
 
@@ -465,7 +465,10 @@ impl<'a> Builder<'a> {
     /// Stamp: what was built, where, and which bootstrap stage this is.
     pub fn release_info(&self) -> anyhow::Result<ReleaseInfo> {
         let p = self.profile;
-        let (built_on, stage) = match std::fs::read_to_string(dom0::RELEASE_INFO_PATH)
+        let previous = self
+            .installed_root
+            .join(dom0::RELEASE_INFO_PATH.trim_start_matches('/'));
+        let (built_on, stage) = match std::fs::read_to_string(previous)
             .ok()
             .and_then(|t| ReleaseInfo::from_toml(&t).ok())
         {
@@ -924,6 +927,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    use crate::profile::Source;
+    use juanitos_core::sys::CmdOutput;
+
     /// A scratch directory removed on drop.
     struct Scratch(PathBuf);
 
@@ -964,6 +970,212 @@ mod tests {
             boot_efi: None,
             installed_root: dir.join("root"),
         }
+    }
+
+    /// `fetch(1)` is missing on Linux: the runner reports the program as
+    /// not found, or a shell says 127.
+    struct NoFetch {
+        inner: MockRunner,
+        kind: std::io::ErrorKind,
+    }
+
+    impl Runner for NoFetch {
+        fn run(&self, program: &str, args: &[&str]) -> juanitos_core::Result<CmdOutput> {
+            if program == "fetch" {
+                return Err(Error::Io(std::io::Error::new(self.kind, "fetch")));
+            }
+            self.inner.run(program, args)
+        }
+        fn run_with_input(
+            &self,
+            program: &str,
+            args: &[&str],
+            _input: &str,
+        ) -> juanitos_core::Result<CmdOutput> {
+            self.run(program, args)
+        }
+    }
+
+    #[test]
+    fn downloads_fall_back_from_fetch_to_curl() {
+        let profile = Profile::default();
+        let dst = Path::new("/w/MANIFEST");
+        let curl = "curl -fL -o /w/MANIFEST https://m/MANIFEST";
+
+        let m = MockRunner::new().respond("fetch", &[], CmdOutput::failed(127, "not found"));
+        let b = real_builder(&m, &profile, Path::new("/nonexistent"));
+        b.download("https://m/MANIFEST", dst).unwrap();
+        assert_eq!(
+            m.calls(),
+            vec![
+                "fetch -o /w/MANIFEST https://m/MANIFEST".to_string(),
+                curl.into()
+            ]
+        );
+
+        let missing = NoFetch {
+            inner: MockRunner::new(),
+            kind: std::io::ErrorKind::NotFound,
+        };
+        let b = real_builder(&missing, &profile, Path::new("/nonexistent"));
+        b.download("https://m/MANIFEST", dst).unwrap();
+        assert_eq!(missing.inner.calls(), vec![curl.to_string()]);
+
+        // fetch exists but the download failed: no second try with curl.
+        let m = MockRunner::new().respond("fetch", &[], CmdOutput::failed(1, "404 Not Found"));
+        let b = real_builder(&m, &profile, Path::new("/nonexistent"));
+        let err = b.download("https://m/MANIFEST", dst).unwrap_err();
+        assert!(err.to_string().contains("404 Not Found"), "{err}");
+        assert_eq!(m.calls().len(), 1);
+
+        let denied = NoFetch {
+            inner: MockRunner::new(),
+            kind: std::io::ErrorKind::PermissionDenied,
+        };
+        let b = real_builder(&denied, &profile, Path::new("/nonexistent"));
+        assert!(b.download("https://m/MANIFEST", dst).is_err());
+        assert!(denied.inner.calls().is_empty());
+
+        let m = MockRunner::new()
+            .respond("fetch", &[], CmdOutput::failed(127, ""))
+            .respond("curl", &[], CmdOutput::failed(22, "HTTP 500"));
+        let b = real_builder(&m, &profile, Path::new("/nonexistent"));
+        let err = b.download("https://m/MANIFEST", dst).unwrap_err();
+        assert!(format!("{err:#}").contains("downloading https://m/MANIFEST"));
+    }
+
+    #[test]
+    fn fetch_checks_the_sets_against_the_manifest() {
+        let s = Scratch::new("fetch");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let base = s.put("work/dist/base.txz", b"base");
+        let kernel = s.put("work/dist/kernel.txz", b"kernel");
+        let line = |p: &Path| {
+            format!(
+                "{}\t{}\t1\tset\t\"Set\"\ton\n",
+                p.file_name().unwrap().to_string_lossy(),
+                sha256_file(p).unwrap()
+            )
+        };
+        let manifest = format!("{}{}", line(&base), line(&kernel));
+        s.put("work/dist/MANIFEST", manifest.as_bytes());
+
+        // Sets already there are not downloaded again; only the MANIFEST is.
+        b.fetch().unwrap();
+        assert_eq!(m.calls().len(), 1);
+        assert!(m.calls()[0].ends_with("/amd64/15.1-RELEASE/MANIFEST"));
+
+        std::fs::write(&kernel, b"tampered").unwrap();
+        assert!(b.fetch().is_err(), "a modified set is refused");
+
+        s.put("work/dist/MANIFEST", line(&base).as_bytes());
+        let err = b.fetch().unwrap_err();
+        assert!(err.to_string().contains("kernel.txz not listed"), "{err}");
+    }
+
+    #[test]
+    fn uefi_builds_are_best_effort() {
+        let s = Scratch::new("bins");
+        let profile = Profile::default();
+        let m = MockRunner::new().respond(
+            "cargo",
+            &["build", "--release", "--manifest-path"],
+            CmdOutput::failed(101, "error[E0463]: can't find crate for `core`"),
+        );
+        let b = real_builder(&m, &profile, &s.0);
+        b.bins().unwrap();
+        let calls = m.calls();
+        assert_eq!(calls.iter().filter(|c| c.contains(UEFI_TARGET)).count(), 2);
+        // No jos-firewall.efi was produced, so no firewall image either.
+        assert!(!calls.iter().any(|c| c.starts_with("makefs")), "{calls:?}");
+
+        // The host workspace itself is not optional.
+        let m = MockRunner::new().respond(
+            "cargo",
+            &["build", "--release", "--workspace"],
+            CmdOutput::failed(101, "error"),
+        );
+        let b = real_builder(&m, &profile, &s.0);
+        assert!(b.bins().is_err());
+        assert_eq!(m.calls().len(), 1);
+    }
+
+    #[test]
+    fn optional_packages_may_fail_required_ones_may_not() {
+        let profile = Profile::default();
+        let (required, optional) = profile.package_sets();
+        let failing = |name: &str| {
+            MockRunner::new().respond(
+                "env",
+                &[
+                    "ASSUME_ALWAYS_YES=yes",
+                    "pkg",
+                    "-c",
+                    "/work/rootfs",
+                    "install",
+                    "-y",
+                    name,
+                ],
+                CmdOutput::failed(1, "no such package"),
+            )
+        };
+        let dry = |m: &MockRunner| {
+            Builder {
+                fs: FsOps::new(true),
+                work: PathBuf::from("/work"),
+                ..real_builder(m, &profile, Path::new("/x"))
+            }
+            .install_packages()
+        };
+
+        let m = failing(optional.first().unwrap());
+        dry(&m).unwrap();
+        assert!(m.calls().iter().any(|c| c.contains("clean -ay")));
+
+        let m = failing(required.first().unwrap());
+        assert!(dry(&m).is_err());
+        let calls = m.calls();
+        assert!(!calls.iter().any(|c| c.contains("clean -ay")));
+        // devfs is unmounted whatever happened inside the chroot.
+        assert_eq!(calls.last().unwrap(), "umount /work/rootfs/dev");
+    }
+
+    #[test]
+    fn install_needs_the_release_binaries() {
+        let s = Scratch::new("nobins");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let err = real_builder(&m, &profile, &s.0)
+            .install_juanitos()
+            .unwrap_err();
+        assert!(err.to_string().contains("run `jos-release bins`"), "{err}");
+        assert!(!s.0.join("work/rootfs").exists(), "nothing written");
+    }
+
+    #[test]
+    fn source_tree_and_vendoring_follow_the_profile() {
+        let run = |include: bool, vendor: bool| {
+            let profile = Profile {
+                source: Source { include, vendor },
+                ..Profile::default()
+            };
+            let m = MockRunner::new();
+            let b = Builder {
+                fs: FsOps::new(true),
+                firewall_image: Some(PathBuf::from("/fw.img")),
+                ..real_builder(&m, &profile, Path::new("/x"))
+            };
+            b.install_juanitos().unwrap();
+            m.calls()
+                .iter()
+                .filter(|c| c.starts_with("cargo vendor"))
+                .count()
+        };
+        assert_eq!(run(true, true), 1);
+        assert_eq!(run(true, false), 0);
+        assert_eq!(run(false, true), 0);
     }
 
     /// Found by the stage-2 rebuild on the nested dom0: its source tree had
@@ -1014,5 +1226,86 @@ mod tests {
         // Without `cargo vendor` the existing vendor/ is all there is: keep it.
         assert!(!source_excludes(true).iter().all(|e| e != "vendor"));
         assert!(source_excludes(false).iter().all(|e| e != "vendor"));
+    }
+
+    #[test]
+    fn pack_writes_the_tarball_manifest() {
+        let s = Scratch::new("pack");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let tarball = s.put("work/juanitos-dom0.txz", b"not really xz");
+        b.pack().unwrap();
+        let manifest = std::fs::read_to_string(b.manifest()).unwrap();
+        assert!(
+            manifest.contains(&sha256_file(&tarball).unwrap()),
+            "{manifest}"
+        );
+        assert!(manifest.contains(dom0::DIST_TARBALL));
+        assert!(m.calls()[0].starts_with("tar -C "));
+    }
+
+    #[test]
+    fn iso_build_records_the_checksum() {
+        let s = Scratch::new("iso");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        s.put("work/juanitos-dom0.txz", b"tarball");
+        s.put("work/MANIFEST", b"manifest");
+        s.put(
+            &format!("work/rootfs/{}", dom0::LOADER_EFI.trim_start_matches('/')),
+            b"loader",
+        );
+        // makefs is mocked: stand in for the image it would write.
+        let iso = s.put(&format!("work/{}", profile.iso_name()), b"iso9660");
+        b.iso_build().unwrap();
+
+        let sum = std::fs::read_to_string(iso.with_extension("iso.sha256")).unwrap();
+        assert_eq!(
+            sum,
+            format!("{}  {}\n", sha256_file(&iso).unwrap(), profile.iso_name())
+        );
+        let root = s.0.join("work/rootfs");
+        let dist = root.join(dom0::DIST_DIR.trim_start_matches('/'));
+        assert!(dist.join(dom0::DIST_TARBALL).is_file());
+        assert!(root.join("etc/rc.local").is_file());
+        // No jos-boot.efi anywhere: the ESP boots FreeBSD's loader.
+        let esp = s.0.join("work/efiboot");
+        assert_eq!(
+            std::fs::read(esp.join(dom0::ESP_DEFAULT)).unwrap(),
+            b"loader"
+        );
+        // No boot/cdboot in the root: UEFI only.
+        let cd = m
+            .calls()
+            .into_iter()
+            .find(|c| c.contains("cd9660"))
+            .unwrap();
+        assert!(!cd.contains("cdboot"), "{cd}");
+    }
+
+    #[test]
+    fn a_dom0_rebuilding_itself_is_the_next_stage() {
+        let s = Scratch::new("stage");
+        let profile = Profile::default();
+        let m = MockRunner::new().respond("git", &[], CmdOutput::ok("f826e4e\n"));
+        let b = real_builder(&m, &profile, &s.0);
+        let first = b.release_info().unwrap();
+        assert_eq!((first.built_on.as_str(), first.stage), ("freebsd", 1));
+        assert_eq!(first.git_rev.as_deref(), Some("f826e4e"));
+
+        s.put(
+            &format!("root/{}", dom0::RELEASE_INFO_PATH.trim_start_matches('/')),
+            first.to_toml().unwrap().as_bytes(),
+        );
+        let second = b.release_info().unwrap();
+        assert_eq!((second.built_on.as_str(), second.stage), ("juanitos", 2));
+
+        // Not a git checkout (a release tarball): no revision recorded.
+        let m =
+            MockRunner::new().respond("git", &[], CmdOutput::failed(128, "not a git repository"));
+        let b = real_builder(&m, &profile, &s.0);
+        assert_eq!(b.release_info().unwrap().git_rev, None);
     }
 }

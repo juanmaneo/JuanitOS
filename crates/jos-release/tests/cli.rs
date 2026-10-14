@@ -135,6 +135,88 @@ fn builder_vm_commands() {
     assert!(out.contains("-smp 2 -m 2048"));
 }
 
+/// `jos-release` without `--dry-run`, from `cwd`. Only for paths that stop
+/// before running anything on the host.
+fn real(cwd: &std::path::Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_jos-release"))
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+#[test]
+fn qemu_with_a_viommu_explains_the_passthrough_setup() {
+    let w = Work::new("viommu");
+    let repo = repo_root();
+    let out = w.ok(&[
+        "--repo",
+        &repo.to_string_lossy(),
+        "qemu",
+        "--iommu",
+        "--headless",
+        "--firmware",
+        "/f/OVMF_CODE.fd",
+    ]);
+    assert!(
+        out.contains("vIOMMU; inside the dom0: pptdevs=\"0/9/0\""),
+        "{out}"
+    );
+    assert!(out.contains("--pci 0/9/0"));
+    assert!(out.contains("kernel-irqchip=split"));
+    assert!(out.contains("-display none"));
+    // Nothing exists yet: the disk and the variable store would be created.
+    assert!(out.contains("+ qemu-img create -f qcow2"));
+    assert!(out.contains("+ cp (empty)"));
+}
+
+#[test]
+fn the_repository_is_found_or_must_be_given() {
+    let w = Work::new("norepo");
+    let (ok, out) = real(&w.0, &["--dry-run", "fetch"]);
+    assert!(!ok);
+    assert!(out.contains("not inside the JuanitOS repository"), "{out}");
+}
+
+#[test]
+fn qemu_refuses_an_iso_that_was_not_built() {
+    let w = Work::new("noiso");
+    let work = w.0.to_string_lossy().into_owned();
+    let (ok, out) = real(
+        &repo_root(),
+        &["--work", &work, "qemu", "--firmware", "/f/OVMF_CODE.fd"],
+    );
+    assert!(!ok);
+    assert!(out.contains("does not exist; build it first"), "{out}");
+    assert!(!out.contains("qemu-system"), "nothing was started: {out}");
+}
+
+#[test]
+fn release_steps_need_root() {
+    let id = Command::new("id").arg("-u").output();
+    if id.map(|o| o.stdout.starts_with(b"0\n")).unwrap_or(true) {
+        eprintln!("skipped: running as root (or no id), the step would run for real");
+        return;
+    }
+    let w = Work::new("root");
+    let work = w.0.to_string_lossy().into_owned();
+    for step in ["rootfs", "pack", "iso", "all"] {
+        let (ok, out) = real(&repo_root(), &["--work", &work, step]);
+        assert!(!ok, "{step}");
+        assert!(out.contains("must run as root"), "{step}: {out}");
+    }
+}
+
 #[test]
 fn bad_arguments_are_rejected() {
     let w = Work::new("bad");

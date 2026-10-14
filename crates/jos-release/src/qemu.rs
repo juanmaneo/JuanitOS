@@ -198,18 +198,7 @@ pub fn run_qemu(o: &QemuOptions, dry_run: bool) -> anyhow::Result<()> {
             o.vars.display()
         );
         if !dry_run {
-            if let Some(parent) = o.vars.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            match vars_src {
-                Some(src) => {
-                    std::fs::copy(src, &o.vars)?;
-                }
-                None => {
-                    let len = std::fs::metadata(&o.firmware)?.len();
-                    std::fs::write(&o.vars, vec![0u8; len as usize])?;
-                }
-            }
+            create_vars(&o.firmware, &o.vars)?;
         }
     }
     let args = qemu_args(o);
@@ -223,6 +212,26 @@ pub fn run_qemu(o: &QemuOptions, dry_run: bool) -> anyhow::Result<()> {
         .context("running qemu-system-x86_64 (is QEMU installed?)")?;
     if !st.success() {
         bail!("qemu exited with {st}");
+    }
+    Ok(())
+}
+
+/// A fresh UEFI variable store at `vars`: a copy of the `*_VARS.fd` next
+/// to `firmware`, or zeros sized like the code image (which OVMF accepts).
+pub fn create_vars(firmware: &Path, vars: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = vars.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match sibling_vars(firmware) {
+        Some(src) => {
+            std::fs::copy(src, vars)?;
+        }
+        None => {
+            let len = std::fs::metadata(firmware)
+                .with_context(|| format!("reading {}", firmware.display()))?
+                .len();
+            std::fs::write(vars, vec![0u8; len as usize])?;
+        }
     }
     Ok(())
 }
@@ -476,15 +485,7 @@ pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
     let firmware = find_ovmf().context("OVMF firmware not found; install the ovmf/edk2 package")?;
     let vars = b.out.join("OVMF_VARS.fd");
     if !vars.is_file() && !dry_run {
-        match sibling_vars(&firmware) {
-            Some(src) => {
-                std::fs::copy(src, &vars)?;
-            }
-            None => {
-                let len = std::fs::metadata(&firmware)?.len();
-                std::fs::write(&vars, vec![0u8; len as usize])?;
-            }
-        }
+        create_vars(&firmware, &vars)?;
     }
     let args = auto_builder_args(b, &disk, &firmware, &vars);
     println!("+ qemu-system-x86_64 {}", args.join(" "));
@@ -656,5 +657,37 @@ mod tests {
     fn vars_name_derivation() {
         assert!(sibling_vars(Path::new("/nonexistent/OVMF_CODE.fd")).is_none());
         assert!(sibling_vars(Path::new("/nonexistent/edk2-x86_64-code.fd")).is_none());
+        assert!(
+            sibling_vars(Path::new("/f/OVMF.fd")).is_none(),
+            "no CODE in the name"
+        );
+        assert!(sibling_vars(Path::new("/")).is_none());
+    }
+
+    #[test]
+    fn vars_store_from_the_sibling_or_zeros() {
+        let dir = std::env::temp_dir().join(format!("jos-vars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Fedora/Debian layout: the matching VARS file is copied.
+        let code = dir.join("OVMF_CODE.fd");
+        std::fs::write(&code, [1u8; 64]).unwrap();
+        std::fs::write(dir.join("OVMF_VARS.fd"), b"template").unwrap();
+        assert_eq!(sibling_vars(&code), Some(dir.join("OVMF_VARS.fd")));
+        let vars = dir.join("a/b/vars.fd");
+        create_vars(&code, &vars).unwrap();
+        assert_eq!(std::fs::read(&vars).unwrap(), b"template");
+
+        // A lone combined image: an empty store of the same size.
+        let lone = dir.join("edk2-x86_64-code.fd");
+        std::fs::write(&lone, [1u8; 32]).unwrap();
+        let vars = dir.join("lone-vars.fd");
+        create_vars(&lone, &vars).unwrap();
+        assert_eq!(std::fs::read(&vars).unwrap(), vec![0u8; 32]);
+
+        let err = create_vars(&dir.join("missing-code.fd"), &dir.join("v.fd")).unwrap_err();
+        assert!(format!("{err:#}").contains("missing-code.fd"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

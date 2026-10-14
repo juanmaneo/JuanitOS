@@ -185,4 +185,54 @@ mod tests {
         c.send_line("exit 0").unwrap();
         c.wait_exit(Duration::from_secs(5)).unwrap();
     }
+
+    #[cfg(unix)]
+    fn shell(log: Option<std::fs::File>) -> Console {
+        use std::process::{Command, Stdio};
+        let child = Command::new("sh")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Console::attach(child, log).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeouts_failures_and_logging() {
+        let path = std::env::temp_dir().join(format!("jos-console-{}.log", std::process::id()));
+        let mut c = shell(Some(std::fs::File::create(&path).unwrap()));
+        let err = c
+            .expect("never printed", Duration::from_millis(300))
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        let err = c.run(
+            "exit_with() { return 3; }; exit_with",
+            Duration::from_secs(5),
+        );
+        assert!(err.unwrap_err().to_string().contains("status 3"));
+        // Everything the guest printed went to the log as well.
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("JOS_DONE_"));
+        let _ = std::fs::remove_file(&path);
+
+        // A guest that exits on its own with an error status.
+        c.send_line("exit 4").unwrap();
+        let err = c.wait_exit(Duration::from_secs(5)).unwrap_err();
+        assert!(err.to_string().contains("qemu exited with"), "{err}");
+        let err = c.expect("x", Duration::from_secs(5)).unwrap_err();
+        assert!(err.to_string().contains("console closed"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_guest_that_does_not_power_off_is_killed() {
+        let mut c = shell(None);
+        let err = c.wait_exit(Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("killed"), "{err}");
+        // And one still running when the console is dropped.
+        drop(shell(None));
+    }
 }
