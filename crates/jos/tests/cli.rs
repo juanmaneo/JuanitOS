@@ -606,6 +606,24 @@ fn unknown_qubes_and_host_only_commands() {
     assert!(!out.status.success());
 }
 
+/// Stop a `jos serve` daemon the way `rc.d/jos` does (SIGTERM, which the
+/// daemon turns into a clean exit within half a second) and return its
+/// log; SIGKILL only if it does not oblige.
+fn terminate(mut daemon: std::process::Child) -> String {
+    let _ = Command::new("kill")
+        .args(["-TERM", &daemon.id().to_string()])
+        .status();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while daemon.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if daemon.try_wait().unwrap().is_none() {
+        daemon.kill().unwrap();
+    }
+    let out = daemon.wait_with_output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 /// A pseudo-terminal standing in for a qube's nmdm console: the master
 /// side is returned for the test to play the guest shell on, the slave is
 /// linked as `nmdm-<name>.1B` under `consoles/`. The second file keeps
@@ -1011,7 +1029,7 @@ fn serve_answers_guest_requests_by_policy() {
     // The daemon: request 6 waits (no rules); a rule added while it runs
     // is picked up on the next pass and the request delivered.
     std::fs::write(share.join("work").join("out").join("notes"), "n\n").unwrap();
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_jos"))
+    let daemon = Command::new(env!("CARGO_BIN_EXE_jos"))
         .arg("--config")
         .arg(&cfg)
         .args(["serve", "--interval", "1"])
@@ -1027,14 +1045,99 @@ fn serve_answers_guest_requests_by_policy() {
     while reply("work", "6").is_err() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    daemon.kill().unwrap();
-    let out = daemon.wait_with_output().unwrap();
-    let log = String::from_utf8_lossy(&out.stdout);
+    let log = terminate(daemon);
     assert_eq!(reply("work", "6").unwrap(), "ok /mnt/jos/in/work/notes\n");
     assert!(log.contains("policy reloaded (1 rules)"), "{log}");
     assert!(
         log.contains("work 6: copy notes -> web: delivered"),
         "{log}"
+    );
+    assert!(log.ends_with("stopping (signal)\n"), "{log}");
+}
+
+/// The doorbell: a line on a qube's events port (a UNIX socket bhyve
+/// would listen on; here a listener in the test) wakes `jos serve` long
+/// before its next poll.
+#[cfg(unix)]
+#[test]
+fn serve_wakes_up_on_a_qube_event() {
+    use std::io::Write;
+    let e = Env::new("serve-events");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&["create", "web", "--kind", "app", "--os", "linux"]);
+    e.ok(&["create", "rx", "--kind", "app", "--os", "redox"]);
+    let share = e.dir.join("share");
+    let run_dir = e.dir.join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "share_dir = {:?}\nrun_dir = {:?}\n",
+            share.to_string_lossy(),
+            run_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let jos = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_jos"))
+            .arg("--config")
+            .arg(&cfg)
+            .args(args)
+            .env("JOS_CONFIG_DIR", &e.dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "jos {args:?}: {out:?}");
+    };
+    jos(&["policy", "add", "work", "web", "allow"]);
+    // Only `work` is "running" with its events port; `web` has none.
+    let listener = std::os::unix::net::UnixListener::bind(run_dir.join("work.events")).unwrap();
+    let daemon = Command::new(env!("CARGO_BIN_EXE_jos"))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["serve", "--interval", "30"])
+        .env("JOS_CONFIG_DIR", &e.dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let (mut guest, _) = listener.accept().unwrap();
+    // The guest exports a file, drops the request and rings.
+    std::fs::create_dir_all(share.join("work").join("out")).unwrap();
+    std::fs::create_dir_all(share.join("work").join("req")).unwrap();
+    std::fs::write(share.join("work").join("out").join("notes"), "n\n").unwrap();
+    std::fs::write(share.join("work").join("req").join("7"), "copy notes web\n").unwrap();
+    guest.write_all(b"REQUEST 7\r\n").unwrap();
+    let reply = share.join("work").join("req").join("7.reply");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !reply.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let woke = reply.exists();
+    let stopped = std::time::Instant::now();
+    let log = terminate(daemon);
+    assert!(
+        woke,
+        "not answered within 10 s of the event (poll is 30 s): {log}"
+    );
+    // Stopped on the signal, not at the end of the 30 s interval.
+    assert!(stopped.elapsed() < std::time::Duration::from_secs(5));
+    assert!(log.ends_with("stopping (signal)\n"), "{log}");
+    assert!(
+        woke,
+        "not answered within 10 s of the event (poll is 30 s): {log}"
+    );
+    assert!(log.contains("listening to work's events port"), "{log}");
+    assert!(!log.contains("web's events port"), "{log}");
+    assert!(log.contains("event from work: \"REQUEST 7\""), "{log}");
+    assert!(
+        log.contains("work 7: copy notes -> web: delivered"),
+        "{log}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&reply).unwrap(),
+        "ok /mnt/jos/in/work/notes\n"
     );
 }
 

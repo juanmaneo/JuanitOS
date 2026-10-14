@@ -57,7 +57,12 @@ JuanitOS is less the architecture than the engineering discipline:
    agent channel (`jos run`) only goes the other way: dom0 sends
    commands, the qube answers; a qube cannot reach dom0 or another qube
    through it, and its daemon takes orders from the channel alone, which
-   only bhyve on dom0 holds the other end of.
+   only bhyve on dom0 holds the other end of. The one thing a qube may
+   initiate is a wake-up: a line on its `events` port makes `jos serve`
+   look at the request directories sooner. The line is never parsed,
+   only logged (cut to printable ASCII), and wake-ups are rate-limited,
+   so the port carries no authority and little denial-of-service
+   potential (`docs/inter-qube.md`).
 
 ## Where JuanitOS deliberately differs
 

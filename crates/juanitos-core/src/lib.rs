@@ -12,6 +12,7 @@ pub mod console;
 pub mod doctor;
 pub mod dom0;
 pub mod error;
+pub mod events;
 pub mod firewall;
 pub mod fsops;
 pub mod net;

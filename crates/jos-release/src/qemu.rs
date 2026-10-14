@@ -101,10 +101,14 @@ impl IommuVendor {
     /// The `-device` spec. Both need `kernel-irqchip=split` and interrupt
     /// remapping; `dma-remap=on` makes QEMU's AMD-Vi actually translate
     /// (its default is identity mapping, which the `-S`-wired bhyve guest
-    /// would not survive). Caching mode is what VT-d needs for the same.
+    /// would not survive). QEMU's VT-d translates by default; its
+    /// `caching-mode` (needed only for vfio/vhost devices) must stay off:
+    /// FreeBSD's vmm panics on a DRHD with the CM bit set
+    /// (`vtd_init: invalid caching mode`). The Intel variant follows the
+    /// vmm source; it has not been booted (no Intel host at hand).
     pub fn device(self) -> &'static str {
         match self {
-            IommuVendor::Intel => "intel-iommu,intremap=on,caching-mode=on",
+            IommuVendor::Intel => "intel-iommu,intremap=on",
             IommuVendor::Amd => "amd-iommu,intremap=on,dma-remap=on",
         }
     }
@@ -589,7 +593,9 @@ mod tests {
             ..o
         };
         let a = qemu_args(&intel).join(" ");
-        assert!(a.contains("-device intel-iommu,intremap=on,caching-mode=on"));
+        assert!(a.contains("-device intel-iommu,intremap=on "));
+        // vmm's vtd_init panics on caching mode.
+        assert!(!a.contains("caching-mode"));
     }
 
     #[test]

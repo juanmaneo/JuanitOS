@@ -107,8 +107,10 @@ and loops:
    port served by `jos-agentd` in FreeBSD and Linux guests
    (`crates/juanitos-core/src/agent.rs`), or typed into the serial
    console when there is no agent (`console.rs`: Redox, or `--console`).
-   The qube's share is created (or refreshed) and the stale agent socket
-   removed just before `bhyve` starts.
+   The same device carries the qube's `events` port, the one direction a
+   guest may initiate: a line on it wakes `jos serve` (`events.rs`).
+   The qube's share is created (or refreshed) and the stale agent
+   sockets removed just before `bhyve` starts.
 4. On exit, `bhyvectl --destroy` releases the VM slot. bhyve's exit code
    says why the guest left: `0` reset → boot again, `1` poweroff / `2` halt
    → finish, `3` triple fault → finish (reported), anything else → error.

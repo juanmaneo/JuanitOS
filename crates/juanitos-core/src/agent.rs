@@ -5,12 +5,15 @@
 //! fight with `jos console`, and a command can read its stdin
 //! (`/dev/null`) without eating the end marker.
 //!
-//! bhyve side: `-s 30,virtio-console,jos=<run_dir>/<qube>.agent` makes
-//! bhyve listen on that UNIX socket; dom0 connects to talk to the guest,
-//! one client at a time. bhyve does not remove a stale socket before it
-//! binds, so [`Agent::prepare`] does, before every boot. The guest sees
-//! the port as `/dev/ttyV0.0` (FreeBSD) or `/dev/virtio-ports/jos`
-//! (Linux, from the port name).
+//! bhyve side: `-s 30,virtio-console,jos=<run_dir>/<qube>.agent,events=
+//! <run_dir>/<qube>.events` makes bhyve listen on those UNIX sockets; dom0
+//! connects to talk to the guest, one client per port at a time. bhyve
+//! does not remove a stale socket before it binds, so [`Agent::prepare`]
+//! does, before every boot. The guest sees the ports as `/dev/ttyV0.0`
+//! and `.1` (FreeBSD, with `/dev/vtcon/<name>` aliases) or
+//! `/dev/virtio-ports/<name>` (Linux). `jos` is dom0-initiated (this
+//! module); `events` is the guest-initiated direction, held by `jos
+//! serve` ([`crate::events`]), so that neither blocks the other.
 //!
 //! Protocol (lines of text, one request at a time, see the daemon):
 //!
@@ -39,6 +42,8 @@ use crate::Result;
 pub const SLOT: u32 = 30;
 /// Name of the port, which Linux turns into `/dev/virtio-ports/<name>`.
 pub const PORT_NAME: &str = "jos";
+/// Name of the events port, the second one on the same device.
+pub const EVENTS_PORT_NAME: &str = "events";
 /// User a command runs as unless `jos run --user` says otherwise: the
 /// unprivileged user of the templates (with `doas`/`sudo` to root).
 pub const DEFAULT_USER: &str = "user";
@@ -46,11 +51,13 @@ pub const DEFAULT_USER: &str = "user";
 /// there is no daemon (a Linux daemon may sleep a second between polls).
 pub const PING_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// bhyve `-s` argument for the qube's agent channel.
+/// bhyve `-s` argument for the qube's agent channel (both ports; their
+/// order fixes the guest's port numbers).
 pub fn device_arg(cfg: &GlobalConfig, q: &Qube) -> String {
     format!(
-        "{SLOT},virtio-console,{PORT_NAME}={}",
-        cfg.agent_socket(&q.name)
+        "{SLOT},virtio-console,{PORT_NAME}={},{EVENTS_PORT_NAME}={}",
+        cfg.agent_socket(&q.name),
+        cfg.events_socket(&q.name)
     )
 }
 
@@ -196,7 +203,7 @@ impl<'a> Agent<'a> {
         Agent { runner, cfg }
     }
 
-    /// Remove the socket a previous boot left behind: bhyve's `bindat`
+    /// Remove the sockets a previous boot left behind: bhyve's `bindat`
     /// fails on an existing path.
     pub fn prepare(&self, q: &Qube) -> Result<()> {
         if !q.os.has_agent() {
@@ -204,8 +211,14 @@ impl<'a> Agent<'a> {
         }
         self.runner
             .run_checked("mkdir", &["-p", &self.cfg.run_dir])?;
-        self.runner
-            .run_checked("rm", &["-f", &self.cfg.agent_socket(&q.name)])?;
+        self.runner.run_checked(
+            "rm",
+            &[
+                "-f",
+                &self.cfg.agent_socket(&q.name),
+                &self.cfg.events_socket(&q.name),
+            ],
+        )?;
         Ok(())
     }
 
@@ -228,7 +241,7 @@ mod tests {
         let q = Qube::new("work", QubeKind::App, OsType::Freebsd);
         assert_eq!(
             device_arg(&cfg, &q),
-            "30,virtio-console,jos=/var/run/juanitos/work.agent"
+            "30,virtio-console,jos=/var/run/juanitos/work.agent,events=/var/run/juanitos/work.events"
         );
     }
 
@@ -374,7 +387,7 @@ mod tests {
         assert!(m
             .calls()
             .iter()
-            .any(|c| c == "rm -f /var/run/juanitos/work.agent"));
+            .any(|c| c == "rm -f /var/run/juanitos/work.agent /var/run/juanitos/work.events"));
         assert!(!a.available(&q));
 
         let m = MockRunner::new();

@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use juanitos_core::bhyve::{self, Vm};
 use juanitos_core::config::load_global_config;
 use juanitos_core::doctor::{self, Status};
+use juanitos_core::events::Events;
 use juanitos_core::firewall::{self, Action, Rule};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::pci::{self, PciAddr};
@@ -469,7 +470,23 @@ impl App {
                 broker.policy.rules.len()
             );
         }
+        // The doorbells: the events port of every running qube wakes the
+        // broker before its next poll (juanitos_core::events).
+        let mut events = Events::new(&self.cfg);
+        if !once {
+            trap_termination();
+        }
         loop {
+            if !once {
+                let qubes = self.store.list()?;
+                let names = qubes
+                    .iter()
+                    .filter(|q| q.os.has_agent())
+                    .map(|q| q.name.as_str());
+                for name in events.connect(names) {
+                    println!("listening to {name}'s events port");
+                }
+            }
             for (found, disposition) in broker.serve_once()? {
                 if disposition != Disposition::Pending || once {
                     report(&found, &disposition)?;
@@ -478,7 +495,24 @@ impl App {
             if once {
                 return Ok(());
             }
-            std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+            // Wait for a doorbell or the interval, in slices so that a
+            // termination signal is seen within half a second.
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(interval.max(1));
+            loop {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                let batch = events.wait(left.min(std::time::Duration::from_millis(500)));
+                for event in &batch {
+                    println!("event from {}: {:?}", event.qube, event.line);
+                }
+                if STOP.load(std::sync::atomic::Ordering::SeqCst) {
+                    println!("stopping (signal)");
+                    return Ok(());
+                }
+                if !batch.is_empty() || left <= std::time::Duration::from_millis(500) {
+                    break;
+                }
+            }
             // `jos policy add` must reach the running daemon: re-read the
             // file every pass (a few lines), keeping the last good policy
             // while an edit is half-written or wrong.
@@ -1133,6 +1167,28 @@ fn console_run(
         &mut file, command, timeout, login, dialect, poll,
     )?)
 }
+
+/// Set by SIGTERM or SIGINT: `jos serve` finishes its wait and returns
+/// (so that `rc.d/jos` stops it cleanly, and a profiled run writes its
+/// coverage).
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+fn trap_termination() {
+    extern "C" fn stop(_signal: libc::c_int) {
+        STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    // SAFETY: the handler only stores to an atomic, which is
+    // async-signal-safe; `signal` is given a valid function pointer.
+    let handler = stop as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t;
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+}
+
+#[cfg(not(unix))]
+fn trap_termination() {}
 
 /// The host side of an nmdm pair is a tty: without raw mode its line
 /// discipline would echo the guest's output straight back to the guest

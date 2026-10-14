@@ -474,6 +474,12 @@ impl GlobalConfig {
     pub fn agent_socket(&self, name: &str) -> String {
         format!("{}/{name}.agent", self.run_dir)
     }
+
+    /// UNIX socket bhyve listens on for qube `name`'s events port, the
+    /// guest-to-dom0 half of the channel (see [`crate::events`]).
+    pub fn events_socket(&self, name: &str) -> String {
+        format!("{}/{name}.events", self.run_dir)
+    }
 }
 
 /// Load the global config, falling back to defaults when the file is absent.

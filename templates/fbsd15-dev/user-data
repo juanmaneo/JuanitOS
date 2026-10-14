@@ -94,14 +94,24 @@ write_files:
       req="$share/req/$id"
       # The request appears atomically, complete.
       printf 'copy %s %s\n' "$base" "$dst" > "$req.tmp" && mv "$req.tmp" "$req" || exit 1
+      # Ring dom0's doorbell: one line on the qube's events port (the second
+      # virtio-console port, made writable by the template) wakes `jos serve`
+      # before its next poll. Best effort: without it the poll finds the request.
+      for bell in /dev/vtcon/events /dev/virtio-ports/events; do
+          if [ -w "$bell" ]; then
+              printf 'REQUEST %s\n' "$id" > "$bell" 2>/dev/null && break
+          fi
+      done
       echo "jos-copy: asked dom0 to copy $base to $dst (request $id)"
+      # dom0 answers within milliseconds when the doorbell works: look often
+      # (quarter seconds; FreeBSD's and GNU sleep take fractions).
       waited=0
       while [ ! -e "$req.reply" ]; do
-          if [ "$waited" -ge "$timeout" ]; then
+          if [ "$waited" -ge "$((timeout * 4))" ]; then
               echo "jos-copy: no answer from dom0 after ${timeout}s; still pending as $id" >&2
               exit 75
           fi
-          sleep 1
+          sleep 0.25
           waited=$((waited + 1))
       done
       reply=$(cat "$req.reply")
@@ -233,6 +243,9 @@ runcmd:
   - sed -e 's/^v4egress_if = .*/v4egress_if = "vtnet0"/' -e 's/^v6egress_if = .*/v6egress_if = "vtnet0"/' /usr/local/etc/containers/pf.conf.sample > /etc/pf.conf
   # linux_enable: Linux images run too (`podman run --os=linux ...`).
   - sysrc pf_enable=YES podman_enable=YES linux_enable=YES jos_agent_enable=YES jos_agentd_enable=YES
+  # The events port (/dev/vtcon/events, the agent channel's second port):
+  # writable by the qube's users, so jos-copy can wake dom0's broker.
+  - echo 'perm vtcon/events 0622' >> /etc/devfs.conf
   - echo 'net.pf.filter_local=1' >> /etc/sysctl.conf
   # Container storage on its own dataset (the zfs storage driver).
   - zfs create -o mountpoint=/var/db/containers zroot/containers

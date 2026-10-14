@@ -300,8 +300,11 @@ the Internet through `sys-firewall` → `sys-net` → that NIC
 The agent channel was brought up there as well: `work` and `web` answer
 `jos run` through `jos-agentd` a second after they boot, in a tenth of a
 second per command, 2 MB of output included, and `jos copy` and
-`jos-copy` ride on it. The test suite reaches 94% line coverage, gated
-per crate in CI.
+`jos-copy` ride on it. The channel's second port is the qube's doorbell:
+`jos-copy` rings it and `jos serve` answers at once instead of on its
+next poll (0.4 s end to end with the poll set to 60 s; both templates
+updated). The test suite reaches 94% line coverage, gated per crate in
+CI.
 
 Stage 2 is done too: the stage-1 ISO was installed headless (`qemu -vga
 none`, text installer on the serial port) and the installed JuanitOS
@@ -313,9 +316,8 @@ bookkeeping (`docs/bootstrap.md` has the comparison and what it
 uncovered).
 
 Not yet done: passthrough on real hardware (the nested run above proves
-the plumbing, not IOMMU groups, device resets or GPU option ROMs), a
-display for Redox qubes (bhyve's `fbuf` asserts when Redox programs it),
-COSMIC (no FreeBSD packages yet: the dom0 falls back to the console), and
-qube-initiated events (`jos serve` still polls the shares every two
-seconds; the agent channel is dom0-initiated only, one client per qube;
-`docs/inter-qube.md`).
+the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
+Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
+but has not been booted), a display for Redox qubes (bhyve's `fbuf`
+asserts when Redox programs it), and COSMIC (no FreeBSD packages yet:
+the dom0 falls back to the console).

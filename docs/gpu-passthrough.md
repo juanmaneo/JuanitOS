@@ -101,7 +101,10 @@ change. Two things to know: QEMU's AMD-Vi makes FreeBSD's `ivhd0` log
 here), and without `dma-remap=on` the NIC transmits but never receives,
 because the device then DMAs with untranslated guest addresses. A real
 IOMMU has neither problem, but a nest is not real hardware: IOMMU groups,
-resets and option ROMs are only checked for real on a real machine.
+resets and option ROMs are only checked for real on a real machine. The
+Intel variant has not been booted yet; what is known from the vmm source
+is that QEMU's `caching-mode` must stay off (`vtd_init` panics on a DRHD
+with the CM bit set), so the recipe does not enable it.
 
 ## Roadmap
 

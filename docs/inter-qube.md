@@ -66,10 +66,12 @@ jos run work --console -- id          # the serial console on purpose
 ```
 
 Every FreeBSD or Linux qube gets a second device from dom0:
-`-s 30,virtio-console,jos=/var/run/juanitos/<qube>.agent`
-(`crates/juanitos-core/src/agent.rs`). bhyve listens on that UNIX
-socket; the guest sees the port as `/dev/ttyV0.0` (FreeBSD) or
-`/dev/virtio-ports/jos` (Linux, from the port name). Inside,
+`-s 30,virtio-console,jos=/var/run/juanitos/<qube>.agent,events=/var/run/juanitos/<qube>.events`
+(`crates/juanitos-core/src/agent.rs`): two ports, `jos` for dom0 to
+talk to the guest and `events` for the guest to call dom0 (next
+section). bhyve listens on those UNIX sockets; the guest sees the ports
+as `/dev/ttyV0.0` and `.1` with `/dev/vtcon/<name>` aliases (FreeBSD) or
+`/dev/virtio-ports/<name>` (Linux). Inside,
 `/usr/local/sbin/jos-agentd` (`templates/agent/jos-agentd`, a POSIX
 `sh` script shared by both; started by `rc.d/jos_agentd` or
 `jos-agentd.service`, early, before the network) reads the port line by
@@ -160,14 +162,27 @@ The script copies the file to `/mnt/jos/out/report.pdf`, writes
 `copy report.pdf personal` to `/mnt/jos/req/<id>` (atomically: a
 `<id>.tmp` renamed into place; the broker ignores `.tmp` files, having
 once failed and removed one while the guest was still writing it) and
-waits for `/mnt/jos/req/<id>.reply`
-(up to `JOS_COPY_TIMEOUT`, 600 s). The exit status says what dom0
-answered: 0 delivered, 77 denied, 75 still pending, 1 error.
+rings dom0's doorbell (one line, `REQUEST <id>`, on the qube's events
+port: `/dev/vtcon/events` or `/dev/virtio-ports/events`, which the
+templates make writable by the qube's users — `perm vtcon/events 0622`
+in `devfs.conf`, a udev rule on Debian) and waits for
+`/mnt/jos/req/<id>.reply` (up to `JOS_COPY_TIMEOUT`, 600 s). The exit
+status says what dom0 answered: 0 delivered, 77 denied, 75 still
+pending, 1 error.
 
 On dom0, `jos serve` (started by `rc.d/jos` as a `daemon(8)`, pidfile
 and log under `/var/run/juanitos/serve.*`; `jos serve --once` for a
-single pass) polls every `req/` directory and decides with the
-**policy** in `/usr/local/etc/juanitos/policy`
+single pass) holds the events port of every running qube open
+(`crates/juanitos-core/src/events.rs`: one reader thread per port, dialed
+again after the qube restarts) and scans every `req/` directory when a
+line arrives on any of them, or every `--interval` seconds (2 by default)
+when none does: the poll covers a qube without the port (Redox, a clone
+made before it existed) and anything a lost line would leave behind. The
+share is the queue, the port only the doorbell: nothing a guest writes
+there is interpreted, a line is logged cut to printable ASCII, batches
+are bounded and wake-ups at least 200 ms apart, so a hostile qube can at
+most make the broker scan a few times a second. Each request is decided
+with the **policy** in `/usr/local/etc/juanitos/policy`
 (`crates/juanitos-core/src/requests.rs`):
 
 ```sh
@@ -225,9 +240,14 @@ others can be added with their own policy rules.
 - The destination need not be running: files wait in its inbox on dom0.
 - Large transfers are a `cp` through 9p; fine for sources and documents,
   not meant for disk images.
-- `jos serve` polls (every 2 s by default). The daemon could announce a
-  request on the agent channel to wake it, but bhyve accepts one client
-  per socket, so that would mean a dom0 service multiplexing `jos run`
-  and the notifications; the poll is cheap and the latency acceptable,
-  so it stays for now. The share layout, request format and policy
-  would not change.
+- A request is answered in well under half a second from the guest's
+  point of view (`jos-copy` on `work` and `web` with the poll set to 60 s:
+  0.40 s and 0.37 s, most of it `jos-copy`'s own quarter-second wait for
+  the reply). bhyve accepts one client per socket, which is why the
+  doorbell is a port of its own rather than a line on the `jos` port
+  `jos run` uses: `jos serve` can hold it for good without blocking
+  `jos run`. Only `jos-copy` rings so far; any guest program may, the
+  broker scans whatever the line says.
+- The poll interval could be raised now that the doorbell exists; it
+  stays at 2 s so that clones made before the port (and Redox qubes, which
+  have no share either) keep their behaviour.

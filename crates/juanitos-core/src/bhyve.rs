@@ -11,7 +11,7 @@
 //! |      | (Redox qubes: `nvme` and `e1000` in the same slots)         |
 //! | 4+   | passthru devices, after the last network slot               |
 //! | 28   | virtio-9p: the qube's dom0 share (FreeBSD and Linux guests) |
-//! | 30   | virtio-console: the agent channel (FreeBSD and Linux guests)|
+//! | 30   | virtio-console: agent and events ports (FreeBSD and Linux)  |
 //! | 29   | ahci-cd: cloud-init seed while a template is provisioned    |
 //! | 30   | virtio-blk: raw config disk of a unikernel firewall         |
 //! | 31   | lpc (com1 console, bootrom)                                 |
@@ -468,7 +468,7 @@ mod tests {
                 "-s",
                 "28,virtio-9p,jos=/var/db/juanitos/share/work",
                 "-s",
-                "30,virtio-console,jos=/var/run/juanitos/work.agent",
+                "30,virtio-console,jos=/var/run/juanitos/work.agent,events=/var/run/juanitos/work.events",
                 "-l",
                 "com1,/dev/nmdm-work.1A",
                 "-l",

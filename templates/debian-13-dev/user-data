@@ -81,6 +81,12 @@ write_files:
         "log-driver": "local",
         "log-opts": { "max-size": "10m" }
       }
+  # The events port (/dev/virtio-ports/events, the agent channel's second
+  # port): writable by the qube's users, so jos-copy can wake dom0's broker.
+  - path: /etc/udev/rules.d/90-jos.rules
+    permissions: "0644"
+    content: |
+      SUBSYSTEM=="virtio-ports", ATTR{name}=="events", MODE="0622"
   # The guest agent: mounts the dom0 share and sets the hostname (see
   # templates/agent/jos-agent, docs/inter-qube.md).
   - path: /usr/local/sbin/jos-agent
@@ -161,14 +167,24 @@ write_files:
       req="$share/req/$id"
       # The request appears atomically, complete.
       printf 'copy %s %s\n' "$base" "$dst" > "$req.tmp" && mv "$req.tmp" "$req" || exit 1
+      # Ring dom0's doorbell: one line on the qube's events port (the second
+      # virtio-console port, made writable by the template) wakes `jos serve`
+      # before its next poll. Best effort: without it the poll finds the request.
+      for bell in /dev/vtcon/events /dev/virtio-ports/events; do
+          if [ -w "$bell" ]; then
+              printf 'REQUEST %s\n' "$id" > "$bell" 2>/dev/null && break
+          fi
+      done
       echo "jos-copy: asked dom0 to copy $base to $dst (request $id)"
+      # dom0 answers within milliseconds when the doorbell works: look often
+      # (quarter seconds; FreeBSD's and GNU sleep take fractions).
       waited=0
       while [ ! -e "$req.reply" ]; do
-          if [ "$waited" -ge "$timeout" ]; then
+          if [ "$waited" -ge "$((timeout * 4))" ]; then
               echo "jos-copy: no answer from dom0 after ${timeout}s; still pending as $id" >&2
               exit 75
           fi
-          sleep 1
+          sleep 0.25
           waited=$((waited + 1))
       done
       reply=$(cat "$req.reply")

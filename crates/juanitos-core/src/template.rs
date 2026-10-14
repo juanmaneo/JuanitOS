@@ -609,6 +609,9 @@ mod tests {
         assert!(freebsd_agent.contains("mount -t p9fs jos /mnt/jos"));
         assert!(linux_agent.contains("mount -t 9p -o trans=virtio,version=9p2000.L jos /mnt/jos"));
         assert!(jos_copy.contains("printf 'copy %s %s\\n' \"$base\" \"$dst\""));
+        // The doorbell: the events port by its name on both guests.
+        assert!(jos_copy.contains("printf 'REQUEST %s\\n' \"$id\" > \"$bell\""));
+        assert!(jos_copy.contains("/dev/vtcon/events /dev/virtio-ports/events"));
         for r in RECIPES {
             let Some(ud) = r.user_data else {
                 assert!(!r.os.has_share(), "{}", r.name);
@@ -638,6 +641,11 @@ mod tests {
                     );
                     assert!(embedded(ud, freebsd_agentd), "{}: stale jos_agentd", r.name);
                     assert!(ud.contains("jos_agentd_enable=YES"), "{}", r.name);
+                    assert!(
+                        ud.contains("- echo 'perm vtcon/events 0622' >> /etc/devfs.conf"),
+                        "{}: events port not writable",
+                        r.name
+                    );
                 }
                 OsType::Linux => {
                     assert!(
@@ -657,6 +665,14 @@ mod tests {
                             "enable, containerd.service, docker.service, jos-agent.service, jos-agentd.service"
                         ),
                         "{}",
+                        r.name
+                    );
+                    assert!(
+                        ud.contains("path: /etc/udev/rules.d/90-jos.rules\n")
+                            && ud.contains(
+                                "SUBSYSTEM==\"virtio-ports\", ATTR{name}==\"events\", MODE=\"0622\""
+                            ),
+                        "{}: events port not writable",
                         r.name
                     );
                 }
