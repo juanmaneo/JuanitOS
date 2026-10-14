@@ -72,9 +72,11 @@ directory `jos-copy` uses to ask dom0 for a transfer, answered by
   tap `tapd-<qube>` on their own bridge `br-<qube>` (guest slot 4); that is
   where their clients plug in.
 - `sys-net` has no upstream tap; it gets the physical NIC via passthrough
-  and offers `br-sys-net` to `sys-firewall`. Inside, the `fbsd15-net`
+  (`--pci B/S/F`, the device bound to `ppt(4)` through `pptdevs`) and
+  offers `br-sys-net` to `sys-firewall`. Inside, the `fbsd15-net`
   template runs DHCP on the NIC and dnsmasq + pf NAT on `10.138.0.0/24`
-  towards the bridge (`docs/templates.md`).
+  towards the bridge (`docs/templates.md`). Verified end to end in a
+  nested dom0 with an emulated IOMMU (`docs/gpu-passthrough.md`).
 - `sys-firewall` plugs into `br-sys-net` and offers `br-sys-firewall` to
   app qubes.
 - A qube with `uplink = "<iface>"` (`jos create --uplink em0`) gets its
@@ -99,11 +101,14 @@ and loops:
 3. Run `bhyve` with the guest PCI layout documented in
    `crates/juanitos-core/src/bhyve.rs` (virtio disk and NICs; NVMe and
    e1000 for Redox guests). UEFI boot uses the `edk2-bhyve` bootrom; the
-   serial console is an `nmdm` pair reachable via `jos console <name>`,
-   and `jos run <name> <command>` types a command there and returns its
-   output and exit status (`crates/juanitos-core/src/console.rs`: the
-   templates' autologin shell, or a login for Redox). The qube's share
-   is created (or refreshed) just before `bhyve` starts.
+   serial console is an `nmdm` pair reachable via `jos console <name>`.
+   `jos run <name> <command>` runs a command in the qube and returns its
+   output and exit status: through the agent channel, a virtio-console
+   port served by `jos-agentd` in FreeBSD and Linux guests
+   (`crates/juanitos-core/src/agent.rs`), or typed into the serial
+   console when there is no agent (`console.rs`: Redox, or `--console`).
+   The qube's share is created (or refreshed) and the stale agent socket
+   removed just before `bhyve` starts.
 4. On exit, `bhyvectl --destroy` releases the VM slot. bhyve's exit code
    says why the guest left: `0` reset → boot again, `1` poweroff / `2` halt
    → finish, `3` triple fault → finish (reported), anything else → error.

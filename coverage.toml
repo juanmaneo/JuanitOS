@@ -6,7 +6,7 @@
 # Commit the updated file together with the tests that earned it.
 
 [gate]
-total = 93.7
+total = 93.8
 # Floor for a crate that is not listed below yet.
 new_crate = 60.0
 # Points kept below the measurement when ratcheting (host variance).
@@ -19,6 +19,6 @@ jos-fwcfg = 96.9
 jos-fwnet = 91.7
 jos-gfx = 96.2
 jos-install = 95.4
-jos-release = 86.1
+jos-release = 86.4
 jos-splash = 91.6
-juanitos-core = 96.4
+juanitos-core = 96.7

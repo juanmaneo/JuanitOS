@@ -241,4 +241,7 @@ One detail of `jos run` that the bhyve test caught: the host side of an
 *echoes the guest's output back to the guest as input* (the guest shell
 then tries to run its own prompt). `jos run` puts the device in raw mode
 first, as `cu` does; the pseudo-terminal test in `crates/jos/tests`
-reproduces the echo and checks it.
+reproduces the echo and checks it. Since the templates ship `jos-agentd`,
+the console is only the fallback: `jos run` goes through the agent
+channel (`docs/inter-qube.md`), which `work` and `web` answered on the
+same dom0 a second after boot, Redox being the exception.

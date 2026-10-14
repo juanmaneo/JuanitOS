@@ -113,6 +113,13 @@ impl OsType {
         matches!(self, OsType::Freebsd | OsType::Linux)
     }
 
+    /// True when the guest gets an agent channel (a virtio-console port;
+    /// FreeBSD's `virtio_console`, Linux's `virtio_console`) for the
+    /// `jos-agentd` daemon the templates ship; see [`crate::agent`].
+    pub fn has_agent(&self) -> bool {
+        matches!(self, OsType::Freebsd | OsType::Linux)
+    }
+
     /// How `jos run` frames a command for the guest's shell.
     pub fn console_dialect(&self) -> crate::console::Dialect {
         match self {
@@ -460,6 +467,12 @@ impl GlobalConfig {
     /// The directory exported to qube `name` (its share).
     pub fn share_dir_for(&self, name: &str) -> String {
         format!("{}/{name}", self.share_dir)
+    }
+
+    /// UNIX socket bhyve listens on for qube `name`'s agent channel (the
+    /// host end of its virtio-console port; see [`crate::agent`]).
+    pub fn agent_socket(&self, name: &str) -> String {
+        format!("{}/{name}.agent", self.run_dir)
     }
 }
 

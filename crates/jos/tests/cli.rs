@@ -216,7 +216,17 @@ fn start_supervise_stop_kill_console_in_dry_run() {
     e.ok(&["kill", "work"]);
     let console = e.ok(&["console", "work"]);
     assert!(console.contains("+ cu"), "{console}");
+    // The agent channel by default, the console on request.
     let run = e.ok(&["run", "work", "docker", "ps", "-a"]);
+    assert!(run.contains("ask the agent on"), "{run}");
+    assert!(run.contains("work.agent"), "{run}");
+    assert!(run.contains(" user docker ps -a"), "{run}");
+    let run = e.ok(&["run", "work", "--user", "root", "id"]);
+    assert!(run.contains(" root id"), "{run}");
+    assert!(e
+        .err(&["run", "work", "--user", "a b", "id"])
+        .contains("invalid user"));
+    let run = e.ok(&["run", "work", "--console", "docker", "ps", "-a"]);
     assert!(run.contains("nmdm-work.1B"), "{run}");
     assert!(run.contains(": JOS_RUN; docker ps -a; printf"), "{run}");
     assert!(!run.contains("logging in"), "{run}");
@@ -275,9 +285,12 @@ fn start_exports_the_share_and_copy_moves_files() {
     let fw = e.ok(&["start", "sys-firewall"]);
     assert!(!fw.contains("virtio-9p"), "{fw}");
 
-    // Qube to qube: the source exports over its console, dom0 moves.
+    // Qube to qube: the source exports through its agent, dom0 moves.
     let out = e.ok(&["copy", "work:/etc/motd", "gpu"]);
-    assert!(out.contains("type on /dev/nmdm-work.1B"), "{out}");
+    assert!(
+        out.contains("ask the agent on /var/run/juanitos/work.agent"),
+        "{out}"
+    );
     assert!(out.contains("cp -RL /etc/motd /mnt/jos/out/motd"), "{out}");
     assert!(
         out.contains(
@@ -296,7 +309,7 @@ fn start_exports_the_share_and_copy_moves_files() {
         out.contains("cp -RL /root/notes /var/db/juanitos/share/work/in/dom0/notes"),
         "{out}"
     );
-    assert!(!out.contains("type on"), "{out}");
+    assert!(!out.contains("ask the agent"), "{out}");
     let out = e.ok(&["copy", "/root/notes", "work"]);
     assert!(
         out.contains("copied dom0:/root/notes to work:/mnt/jos/in/dom0/notes"),
@@ -758,6 +771,125 @@ fn run_talks_to_the_console_device() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no shell on its serial console"));
 }
 
+/// Play `jos-agentd` on a UNIX socket standing in for the one bhyve
+/// listens on: accept dom0, answer the ping (or not), run `on_command`
+/// for the RUN line, print `output` and the end line. Returns what dom0
+/// sent.
+#[cfg(unix)]
+fn fake_agent(
+    listener: std::os::unix::net::UnixListener,
+    answer_ping: bool,
+    output: &'static str,
+    on_command: impl FnOnce(&str) -> i32 + Send + 'static,
+) -> std::thread::JoinHandle<String> {
+    use std::io::{BufRead, Write};
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut stream = stream;
+        let mut seen = String::new();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        seen.push_str(&line);
+        let id = line.trim().strip_prefix("PING ").unwrap().to_string();
+        if !answer_ping {
+            // Like bhyve with no daemon behind it: the connection stays
+            // open and nothing ever comes back.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            return seen;
+        }
+        stream.write_all(format!("PONG {id}\n").as_bytes()).unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        seen.push_str(&line);
+        let rest = line.trim().strip_prefix("RUN ").unwrap();
+        let (rid, rest) = rest.split_once(' ').unwrap();
+        assert_eq!(rid, id);
+        let (_user, command) = rest.split_once(' ').unwrap();
+        let status = on_command(command);
+        stream.write_all(output.as_bytes()).unwrap();
+        stream
+            .write_all(format!("\nEND {id} {status}\n").as_bytes())
+            .unwrap();
+        seen
+    })
+}
+
+/// `jos run` for real through the agent channel, then its fallback to the
+/// console when nothing answers the ping.
+#[cfg(unix)]
+#[test]
+fn run_talks_to_the_agent_socket() {
+    let e = Env::new("agent");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "linux"]);
+    let run_dir = e.dir.join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let consoles = e.dir.join("consoles");
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "run_dir = {:?}\nconsole_dir = {:?}\n",
+            run_dir.to_string_lossy(),
+            consoles.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let jos = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_jos"))
+            .arg("--config")
+            .arg(&cfg)
+            .args(args)
+            .env("JOS_CONFIG_DIR", &e.dir)
+            .output()
+            .unwrap()
+    };
+
+    // Not running: no socket, a clear error.
+    let out = jos(&["run", "work", "true"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is the qube running?"));
+
+    let sock = run_dir.join("work.agent");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let agent = fake_agent(listener, true, "hello from the agent\n", |cmd| {
+        assert_eq!(cmd, "echo hello");
+        3
+    });
+    let out = jos(&[
+        "run",
+        "work",
+        "--user",
+        "root",
+        "--timeout",
+        "20",
+        "echo",
+        "hello",
+    ]);
+    let sent = agent.join().unwrap();
+    assert!(sent.contains(" root echo hello\n"), "{sent}");
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "hello from the agent\n"
+    );
+
+    // No daemon behind the socket: the console is used instead.
+    std::fs::remove_file(&sock).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let agent = fake_agent(listener, false, "", |_| 0);
+    let (master, _keepalive) = fake_console(&e, "work");
+    let shell = fake_guest(master.try_clone().unwrap(), "via console\r\n", |_| 0);
+    let out = jos(&["run", "work", "--timeout", "20", "echo", "hello"]);
+    agent.join().unwrap();
+    let typed = shell.join().unwrap();
+    assert!(typed.contains(": JOS_RUN; echo hello; printf"), "{typed}");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "via console\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no agent answered"));
+}
+
 /// `jos policy`, `jos requests` and `jos serve --once` for real against a
 /// `share_dir` on disk: requests are files a guest dropped through 9p,
 /// here written on the host side.
@@ -875,6 +1007,35 @@ fn serve_answers_guest_requests_by_policy() {
     ok(&["policy", "clear"]);
     assert!(ok(&["policy", "show"]).contains("no rules"));
     assert!(ok(&["requests"]).contains("[ask]"));
+
+    // The daemon: request 6 waits (no rules); a rule added while it runs
+    // is picked up on the next pass and the request delivered.
+    std::fs::write(share.join("work").join("out").join("notes"), "n\n").unwrap();
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_jos"))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["serve", "--interval", "1"])
+        .env("JOS_CONFIG_DIR", &e.dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(reply("work", "6").is_err(), "still pending");
+    ok(&["policy", "add", "work", "web", "allow"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while reply("work", "6").is_err() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    daemon.kill().unwrap();
+    let out = daemon.wait_with_output().unwrap();
+    let log = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(reply("work", "6").unwrap(), "ok /mnt/jos/in/work/notes\n");
+    assert!(log.contains("policy reloaded (1 rules)"), "{log}");
+    assert!(
+        log.contains("work 6: copy notes -> web: delivered"),
+        "{log}"
+    );
 }
 
 /// `jos copy` for real: a fake guest on the source console, a real

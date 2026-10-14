@@ -113,6 +113,110 @@ write_files:
           *) exit 1;;
       esac
 
+  # jos-agentd: runs what `jos run` sends over the agent channel, a
+  # virtio-console port (see templates/agent/jos-agentd, docs/inter-qube.md).
+  - path: /usr/local/sbin/jos-agentd
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # JuanitOS guest agent daemon: runs the commands dom0 sends over the
+      # qube's agent channel, a bhyve virtio-console port named "jos"
+      # (FreeBSD: /dev/ttyV0.0, Linux: /dev/virtio-ports/jos). Replaces typing
+      # into the serial console for `jos run`; see docs/inter-qube.md.
+      #
+      # Protocol, one request at a time, lines of text:
+      #   dom0  -> guest   PING <id>
+      #   guest -> dom0    PONG <id>
+      #   dom0  -> guest   RUN <id> <user> <command...>
+      #   guest -> dom0    the command's stdout and stderr, then
+      #                    END <id> <exit status>
+      # The id is dom0's (unique per request) so its reply cannot be confused
+      # with the command's output. Commands run as <user> (root included) with
+      # stdin from /dev/null. Nothing is accepted from anyone but dom0: the
+      # channel only exists on this VM's host side.
+      dev=""
+      tty=""
+      if [ -e /dev/ttyV0.0 ]; then
+          dev=/dev/ttyV0.0
+          tty=yes
+      elif [ -e /dev/virtio-ports/jos ]; then
+          dev=/dev/virtio-ports/jos
+      else
+          # No udev symlink: find the port by name in sysfs (vportNpM).
+          for n in /sys/class/virtio-ports/*/name; do
+              if [ -r "$n" ] && [ "$(cat "$n")" = jos ]; then
+                  p=${n%/name}
+                  dev=/dev/${p##*/}
+                  break
+              fi
+          done
+      fi
+      if [ -z "$dev" ]; then
+          echo "jos-agentd: no agent channel (not under JuanitOS?)"
+          exit 0
+      fi
+      echo "jos-agentd: serving $dev"
+
+      # The PATH commands get (rc and systemd start this daemon with a short
+      # one; Linux's su resets it from login.defs anyway).
+      export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+      run_as() {
+          # $1 user, $2 command. su (root included) sets HOME/USER/SHELL for the
+          # target user and runs its shell (a POSIX sh in the templates); the
+          # command starts in the home directory, as after a login. Not `su -l`:
+          # the login profile would print its fortune into the output.
+          su "$1" -c "cd; $2"
+      }
+
+      # One descriptor for both directions, held open for good: Linux allows a
+      # single open of a virtio port and throws away what arrives while the
+      # port is closed, so closing between requests would lose dom0's lines.
+      exec 3<>"$dev" || exit 1
+      # Raw tty: no echo of dom0's lines, no CR/LF translation. Set while the
+      # descriptor is open: FreeBSD resets a tty's modes on its last close.
+      [ -n "$tty" ] && stty raw -echo <&3
+      while :; do
+          # Linux reads EOF until dom0 has connected once (FreeBSD's block);
+          # what dom0 sends meanwhile is queued, so just try again.
+          if ! IFS= read -r line <&3; then
+              sleep 1
+              continue
+          fi
+          case $line in
+          "PING "*)
+              printf 'PONG %s\n' "${line#PING }" >&3
+              ;;
+          "RUN "*)
+              rest=${line#RUN }
+              id=${rest%% *}
+              rest=${rest#* }
+              user=${rest%% *}
+              cmd=${rest#* }
+              run_as "$user" "$cmd" </dev/null >&3 2>&1
+              printf '\nEND %s %s\n' "$id" "$?" >&3
+              ;;
+          esac
+      done
+  - path: /usr/local/etc/rc.d/jos_agentd
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # PROVIDE: jos_agentd
+      # REQUIRE: jos_agent
+      #
+      # JuanitOS guest agent daemon for FreeBSD qubes (templates/agent/jos-agentd):
+      # answers `jos run` over the virtio-console channel. Started early, before
+      # the network, so dom0 can drive a qube that has none.
+      . /etc/rc.subr
+      name=jos_agentd
+      rcvar=jos_agentd_enable
+      pidfile=/var/run/jos-agentd.pid
+      command=/usr/sbin/daemon
+      command_args="-f -r -R 5 -P $pidfile /usr/local/sbin/jos-agentd"
+      load_rc_config $name
+      run_rc_command "$1"
+
 runcmd:
   # Packages: Podman with the ocijail runtime and buildah, plus tools.
   - env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
@@ -128,7 +232,7 @@ runcmd:
   - echo 'fdesc /dev/fd fdescfs rw 0 0' >> /etc/fstab
   - sed -e 's/^v4egress_if = .*/v4egress_if = "vtnet0"/' -e 's/^v6egress_if = .*/v6egress_if = "vtnet0"/' /usr/local/etc/containers/pf.conf.sample > /etc/pf.conf
   # linux_enable: Linux images run too (`podman run --os=linux ...`).
-  - sysrc pf_enable=YES podman_enable=YES linux_enable=YES jos_agent_enable=YES
+  - sysrc pf_enable=YES podman_enable=YES linux_enable=YES jos_agent_enable=YES jos_agentd_enable=YES
   - echo 'net.pf.filter_local=1' >> /etc/sysctl.conf
   # Container storage on its own dataset (the zfs storage driver).
   - zfs create -o mountpoint=/var/db/containers zroot/containers

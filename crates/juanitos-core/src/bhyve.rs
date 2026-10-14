@@ -11,6 +11,7 @@
 //! |      | (Redox qubes: `nvme` and `e1000` in the same slots)         |
 //! | 4+   | passthru devices, after the last network slot               |
 //! | 28   | virtio-9p: the qube's dom0 share (FreeBSD and Linux guests) |
+//! | 30   | virtio-console: the agent channel (FreeBSD and Linux guests)|
 //! | 29   | ahci-cd: cloud-init seed while a template is provisioned    |
 //! | 30   | virtio-blk: raw config disk of a unikernel firewall         |
 //! | 31   | lpc (com1 console, bootrom)                                 |
@@ -147,6 +148,9 @@ pub fn build_run_command(q: &Qube, cfg: &GlobalConfig, taps: &[&str]) -> Result<
     }
     if q.os.has_share() {
         add(&mut args, &["-s", &crate::share::device_arg(cfg, q)]);
+    }
+    if q.os.has_agent() {
+        add(&mut args, &["-s", &crate::agent::device_arg(cfg, q)]);
     }
     let first_passthru = MIN_PASSTHRU_SLOT.max(FIRST_NET_SLOT + taps.len() as u32);
     for (i, addr) in q.pci_passthrough.iter().enumerate() {
@@ -309,6 +313,7 @@ impl<'a> Vm<'a> {
         let tap_refs: Vec<&str> = taps.iter().map(String::as_str).collect();
         self.stage_kernel(q)?;
         self.share().prepare(q)?;
+        self.agent().prepare(q)?;
         let cmd = build_run_command(q, self.cfg, &tap_refs)?;
         let out = cmd.run(self.runner)?;
         let _ = build_destroy_command(&q.name).run(self.runner);
@@ -326,6 +331,10 @@ impl<'a> Vm<'a> {
 
     fn share(&self) -> crate::share::Share<'a> {
         crate::share::Share::new(self.runner, self.cfg)
+    }
+
+    fn agent(&self) -> crate::agent::Agent<'a> {
+        crate::agent::Agent::new(self.runner, self.cfg)
     }
 
     /// A unikernel boots a fresh copy of its `kernel` image under the run
@@ -391,6 +400,7 @@ impl<'a> Vm<'a> {
         let taps = self.setup_taps(q)?;
         let tap_refs: Vec<&str> = taps.iter().map(String::as_str).collect();
         self.share().prepare(q)?;
+        self.agent().prepare(q)?;
         let cmd = build_run_command(q, self.cfg, &tap_refs)?;
         Ok(match seed {
             Some(iso) => with_cdrom(cmd, iso),
@@ -457,6 +467,8 @@ mod tests {
                 "3,virtio-net,tap-work",
                 "-s",
                 "28,virtio-9p,jos=/var/db/juanitos/share/work",
+                "-s",
+                "30,virtio-console,jos=/var/run/juanitos/work.agent",
                 "-l",
                 "com1,/dev/nmdm-work.1A",
                 "-l",

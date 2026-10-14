@@ -7,7 +7,11 @@ device. The host keeps a separate (integrated or secondary) GPU for COSMIC.
 ## Requirements
 
 - CPU and chipset with VT-d / AMD-Vi, enabled in firmware.
-- FreeBSD 13.2+ (14.x recommended) with `vmm`, `hw.vmm.iommu.enable=1`.
+- FreeBSD 13.2+ (14.x recommended) with `vmm`, `hw.vmm.iommu.enable=1`,
+  and on AMD also `hw.vmm.amdvi.enable=1` (vmm picks its IOMMU driver by
+  CPU vendor and AMD-Vi stays off unless asked; the symptom is `jos start`
+  failing with `vm_assign_pptdev: Device not configured`). `jos doctor`
+  checks both; the installer writes both.
 - The GPU and its companion functions (HDMI audio, USB-C controller on newer
   cards) in an IOMMU group that is not shared with devices the host needs.
 - `edk2-bhyve` package: NVIDIA guests must boot UEFI; bhyve's legacy
@@ -73,6 +77,31 @@ nvidia-smi
   host has `vm.max_wired` headroom (see loader.conf sample).
 - **No display**: bhyve has no framebuffer for passthrough cards. Attach a
   monitor to the card for a console, or use the serial console plus SSH.
+
+## Trying passthrough without hardware
+
+The same path (`pptdevs`, `ppt(4)`, `vm_assign_pptdev`, IOMMU domains, DMA
+from the guest) can be exercised in a nested VM: `jos-release qemu --iommu`
+boots the dom0 under QEMU with an emulated IOMMU of the host CPU's vendor
+(`intel-iommu` or `amd-iommu,dma-remap=on`) and a second NIC, an `e1000e`
+at PCI `0/9/0`. Inside the dom0, `pptdevs="0/9/0"` in `/boot/loader.conf`
+(plus the amdvi switch on AMD), reboot, then
+`jos create sys-net --kind net --os freebsd --template fbsd15-net --pci 0/9/0`
+— or, for an existing `sys-net`, stop it, replace its `uplink = ...` line
+in `/usr/local/etc/juanitos/qubes/sys-net.toml` with
+`pci_passthrough = ["0/9/0"]` and start it again.
+
+This was done on an AMD laptop (Ryzen 7, KVM, QEMU 11.1): `sys-net` saw
+the card as `em0`, got a DHCP lease from QEMU's user network through it,
+and an app qube behind `sys-firewall` → `sys-net` → `em0` pinged `9.9.9.9`
+and fetched `https://pkg.freebsd.org/`; the `fbsd15-net` template's
+interface rule (vtnet = downstream, everything else = upstream) needed no
+change. Two things to know: QEMU's AMD-Vi makes FreeBSD's `ivhd0` log
+`completion failed` once per IOMMU command (an emulation gap, harmless
+here), and without `dma-remap=on` the NIC transmits but never receives,
+because the device then DMAs with untranslated guest addresses. A real
+IOMMU has neither problem, but a nest is not real hardware: IOMMU groups,
+resets and option ROMs are only checked for real on a real machine.
 
 ## Roadmap
 

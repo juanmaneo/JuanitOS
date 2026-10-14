@@ -1,0 +1,15 @@
+#!/bin/sh
+# PROVIDE: jos_agentd
+# REQUIRE: jos_agent
+#
+# JuanitOS guest agent daemon for FreeBSD qubes (templates/agent/jos-agentd):
+# answers `jos run` over the virtio-console channel. Started early, before
+# the network, so dom0 can drive a qube that has none.
+. /etc/rc.subr
+name=jos_agentd
+rcvar=jos_agentd_enable
+pidfile=/var/run/jos-agentd.pid
+command=/usr/sbin/daemon
+command_args="-f -r -R 5 -P $pidfile /usr/local/sbin/jos-agentd"
+load_rc_config $name
+run_rc_command "$1"

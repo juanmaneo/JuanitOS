@@ -1,0 +1,14 @@
+[Unit]
+Description=JuanitOS guest agent daemon (jos run)
+DefaultDependencies=no
+After=jos-agent.service
+Before=sysinit.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/sbin/jos-agentd
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=sysinit.target

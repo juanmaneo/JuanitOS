@@ -600,6 +600,12 @@ mod tests {
         let linux_agent = include_str!("../../../templates/agent/jos-agent");
         let linux_unit = include_str!("../../../templates/agent/jos-agent.service");
         let jos_copy = include_str!("../../../templates/agent/jos-copy");
+        let agentd = include_str!("../../../templates/agent/jos-agentd");
+        let freebsd_agentd = include_str!("../../../templates/agent/jos_agentd");
+        let linux_agentd_unit = include_str!("../../../templates/agent/jos-agentd.service");
+        assert!(agentd.contains("printf 'PONG %s\\n'"));
+        assert!(agentd.contains("printf '\\nEND %s %s\\n' \"$id\" \"$?\""));
+        assert!(agentd.contains("/dev/ttyV0.0") && agentd.contains("/dev/virtio-ports/jos"));
         assert!(freebsd_agent.contains("mount -t p9fs jos /mnt/jos"));
         assert!(linux_agent.contains("mount -t 9p -o trans=virtio,version=9p2000.L jos /mnt/jos"));
         assert!(jos_copy.contains("printf 'copy %s %s\\n' \"$base\" \"$dst\""));
@@ -610,23 +616,45 @@ mod tests {
             };
             assert!(ud.contains("path: /usr/local/bin/jos-copy"), "{}", r.name);
             assert!(embedded(ud, jos_copy), "{}: stale jos-copy", r.name);
+            assert!(
+                ud.contains("path: /usr/local/sbin/jos-agentd"),
+                "{}",
+                r.name
+            );
+            assert!(embedded(ud, agentd), "{}: stale jos-agentd", r.name);
             match r.os {
                 OsType::Freebsd => {
                     assert!(
-                        ud.contains("path: /usr/local/etc/rc.d/jos_agent"),
+                        ud.contains("path: /usr/local/etc/rc.d/jos_agent\n"),
                         "{}",
                         r.name
                     );
                     assert!(embedded(ud, freebsd_agent), "{}: stale jos_agent", r.name);
                     assert!(ud.contains("jos_agent_enable=YES"), "{}", r.name);
+                    assert!(
+                        ud.contains("path: /usr/local/etc/rc.d/jos_agentd\n"),
+                        "{}",
+                        r.name
+                    );
+                    assert!(embedded(ud, freebsd_agentd), "{}: stale jos_agentd", r.name);
+                    assert!(ud.contains("jos_agentd_enable=YES"), "{}", r.name);
                 }
                 OsType::Linux => {
-                    assert!(ud.contains("path: /usr/local/sbin/jos-agent"), "{}", r.name);
+                    assert!(
+                        ud.contains("path: /usr/local/sbin/jos-agent\n"),
+                        "{}",
+                        r.name
+                    );
                     assert!(embedded(ud, linux_agent), "{}: stale jos-agent", r.name);
                     assert!(embedded(ud, linux_unit), "{}: stale unit", r.name);
                     assert!(
+                        embedded(ud, linux_agentd_unit),
+                        "{}: stale agentd unit",
+                        r.name
+                    );
+                    assert!(
                         ud.contains(
-                            "enable, containerd.service, docker.service, jos-agent.service"
+                            "enable, containerd.service, docker.service, jos-agent.service, jos-agentd.service"
                         ),
                         "{}",
                         r.name

@@ -129,10 +129,11 @@ jos-release qemu --headless      # serial console only (the ISO enables comconso
 
 For `jos doctor` to pass *inside* the VM the guest needs VT-x: on Linux
 enable nested virtualization (`kvm_intel nested=1` / `kvm_amd nested=1`);
-`jos-release qemu` passes `-cpu host` by default. VT-d (IOMMU) is not
-virtualized by QEMU's default machine, so the `iommu` check will fail in
-the VM — exactly what the installer is for: run it on the real box to find
-out before committing a disk.
+`jos-release qemu` passes `-cpu host` by default. QEMU's default machine
+has no IOMMU, so `ppt devices` stays a warning in the VM — exactly what
+the installer is for: run it on the real box to find out before committing
+a disk. `jos-release qemu --iommu` adds an emulated one plus a NIC to pass
+through, for developing the passthrough path (`docs/gpu-passthrough.md`).
 
 VirtualBox and others work with the same ISO; enable EFI and nested VT-x in
 the VM settings. Docker cannot run FreeBSD; use it only to host QEMU.

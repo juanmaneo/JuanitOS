@@ -66,13 +66,65 @@ pub struct QemuOptions {
     /// Expose VT-x to the guest so bhyve works inside (requires nested
     /// virtualization on the host).
     pub nested: bool,
+    /// Emulate an IOMMU (matching the host CPU's vendor, see
+    /// [`IommuVendor`]) plus a second NIC at `0/9/0` that the dom0 inside can
+    /// hand to `sys-net` with `--pci 0/9/0`: the whole passthrough path
+    /// (`pptdevs`, `vm_assign_pptdev`, DMA remapping) exercised in a nest.
+    pub iommu: Option<IommuVendor>,
 }
+
+/// Which vIOMMU QEMU should emulate. bhyve picks its IOMMU driver from the
+/// CPU vendor it sees (VT-d on Intel, AMD-Vi on AMD), so with `-cpu host`
+/// the emulated IOMMU has to match the host, not the other way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IommuVendor {
+    Intel,
+    Amd,
+}
+
+impl IommuVendor {
+    /// From `/proc/cpuinfo`'s `vendor_id` (Linux); Intel elsewhere.
+    pub fn host() -> Self {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .map(|s| Self::from_cpuinfo(&s))
+            .unwrap_or(IommuVendor::Intel)
+    }
+
+    pub fn from_cpuinfo(text: &str) -> Self {
+        if text.contains("AuthenticAMD") {
+            IommuVendor::Amd
+        } else {
+            IommuVendor::Intel
+        }
+    }
+
+    /// The `-device` spec. Both need `kernel-irqchip=split` and interrupt
+    /// remapping; `dma-remap=on` makes QEMU's AMD-Vi actually translate
+    /// (its default is identity mapping, which the `-S`-wired bhyve guest
+    /// would not survive). Caching mode is what VT-d needs for the same.
+    pub fn device(self) -> &'static str {
+        match self {
+            IommuVendor::Intel => "intel-iommu,intremap=on,caching-mode=on",
+            IommuVendor::Amd => "amd-iommu,intremap=on,dma-remap=on",
+        }
+    }
+}
+
+/// PCI slot of the NIC meant for passthrough inside the nested dom0.
+pub const PASSTHROUGH_NIC_ADDR: &str = "0/9/0";
 
 /// `qemu-system-x86_64` arguments for booting the install medium.
 pub fn qemu_args(o: &QemuOptions) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     a.push("-machine".into());
-    a.push(format!("q35,accel={}", accel()));
+    match o.iommu {
+        Some(_) => a.push(format!("q35,accel={},kernel-irqchip=split", accel())),
+        None => a.push(format!("q35,accel={}", accel())),
+    }
+    if let Some(v) = o.iommu {
+        a.push("-device".into());
+        a.push(v.device().into());
+    }
     a.push("-cpu".into());
     a.push(if o.nested {
         "host".into()
@@ -98,6 +150,14 @@ pub fn qemu_args(o: &QemuOptions) -> Vec<String> {
     }
     a.push("-nic".into());
     a.push("user,model=virtio-net-pci".into());
+    if o.iommu.is_some() {
+        // A second, MSI-X capable NIC pinned to a slot the dom0 can name in
+        // `pptdevs` without it moving when devices are added.
+        a.push("-netdev".into());
+        a.push("user,id=pt".into());
+        a.push("-device".into());
+        a.push("e1000e,netdev=pt,bus=pcie.0,addr=0x9".into());
+    }
     a.push("-serial".into());
     a.push("mon:stdio".into());
     if o.headless {
@@ -479,9 +539,12 @@ mod tests {
             vars: PathBuf::from("/w/vars.fd"),
             headless: true,
             nested: true,
+            iommu: None,
         };
         let a = qemu_args(&o).join(" ");
         assert!(a.contains("-cpu host"));
+        assert!(!a.contains("iommu"));
+        assert!(!a.contains("e1000e"));
         assert!(a.contains("if=pflash,format=raw,readonly=on,file=/f/OVMF_CODE.fd"));
         assert!(a.contains("file=/w/x.iso,media=cdrom,readonly=on"));
         assert!(a.contains("file=/w/d.qcow2,if=virtio,format=qcow2"));
@@ -497,6 +560,51 @@ mod tests {
         assert!(!a2.contains("cdrom"));
         assert!(a2.contains("-cpu max"));
         assert!(!a2.contains("-display none"));
+    }
+
+    #[test]
+    fn qemu_args_with_a_viommu_and_a_passthrough_nic() {
+        let o = QemuOptions {
+            iso: None,
+            disk: PathBuf::from("/w/d.qcow2"),
+            disk_size_gb: 40,
+            memory_mb: 4096,
+            cpus: 2,
+            firmware: PathBuf::from("/f/OVMF_CODE.fd"),
+            vars: PathBuf::from("/w/vars.fd"),
+            headless: true,
+            nested: true,
+            iommu: Some(IommuVendor::Amd),
+        };
+        let a = qemu_args(&o).join(" ");
+        assert!(a.contains("kernel-irqchip=split"));
+        assert!(a.contains("-device amd-iommu,intremap=on,dma-remap=on"));
+        assert!(a.contains("-device e1000e,netdev=pt,bus=pcie.0,addr=0x9"));
+        // The IOMMU device is listed before the NIC it has to cover.
+        assert!(a.find("amd-iommu").unwrap() < a.find("e1000e").unwrap());
+        assert_eq!(PASSTHROUGH_NIC_ADDR, "0/9/0");
+
+        let intel = QemuOptions {
+            iommu: Some(IommuVendor::Intel),
+            ..o
+        };
+        let a = qemu_args(&intel).join(" ");
+        assert!(a.contains("-device intel-iommu,intremap=on,caching-mode=on"));
+    }
+
+    #[test]
+    fn iommu_vendor_from_cpuinfo() {
+        assert_eq!(
+            IommuVendor::from_cpuinfo("vendor_id\t: AuthenticAMD\n"),
+            IommuVendor::Amd
+        );
+        assert_eq!(
+            IommuVendor::from_cpuinfo("vendor_id\t: GenuineIntel\n"),
+            IommuVendor::Intel
+        );
+        assert_eq!(IommuVendor::from_cpuinfo(""), IommuVendor::Intel);
+        // Whatever the host is, the answer is one of the two.
+        let _ = IommuVendor::host();
     }
 
     #[test]

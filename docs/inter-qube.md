@@ -1,14 +1,15 @@
-# Inter-qube: the share, the guest agent, `jos copy` and the policy
+# Inter-qube: the share, the guest agent, `jos run`, `jos copy` and the policy
 
 QubesOS has *qrexec*: a dom0-mediated RPC channel between qubes, with
 `qvm-copy-to-vm` on top of it and a policy deciding which qube may ask
-what of whom. JuanitOS does the same with files rather than a socket
-protocol: a dom0 directory exported into every FreeBSD or Linux qube over
-**virtio-9p** carries requests one way and answers the other, `jos serve`
-on dom0 is the broker applying `jos policy`, and `jos run` (commands
-typed on a qube's serial console) lets dom0 drive a qube when it has to.
-Together they give every clone its own hostname and move files between
-qubes without the qubes ever seeing each other's storage.
+what of whom. JuanitOS does the same with two channels per qube: a dom0
+directory exported into every FreeBSD or Linux qube over **virtio-9p**
+carries files and requests one way and answers the other, with `jos
+serve` on dom0 as the broker applying `jos policy`; and a
+**virtio-console** port served by a small daemon in the guest lets dom0
+run commands in a qube (`jos run`). Together they give every clone its
+own hostname and move files between qubes without the qubes ever seeing
+each other's storage.
 
 ## The share
 
@@ -54,6 +55,62 @@ receive files the same way.
 Without a share (the template booted on another hypervisor) both agents
 print a note and do nothing. Because the template's own name stays in
 `rc.conf` / `/etc/hostname`, the agent does its work on every boot.
+
+## The agent channel and `jos run`
+
+```sh
+jos run work -- docker ps -a
+jos run web --user root -- apt-get update
+jos run rx -- uname -a                # Redox: the serial console
+jos run work --console -- id          # the serial console on purpose
+```
+
+Every FreeBSD or Linux qube gets a second device from dom0:
+`-s 30,virtio-console,jos=/var/run/juanitos/<qube>.agent`
+(`crates/juanitos-core/src/agent.rs`). bhyve listens on that UNIX
+socket; the guest sees the port as `/dev/ttyV0.0` (FreeBSD) or
+`/dev/virtio-ports/jos` (Linux, from the port name). Inside,
+`/usr/local/sbin/jos-agentd` (`templates/agent/jos-agentd`, a POSIX
+`sh` script shared by both; started by `rc.d/jos_agentd` or
+`jos-agentd.service`, early, before the network) reads the port line by
+line and runs what dom0 sends:
+
+```text
+dom0  -> guest   PING <id>
+guest -> dom0    PONG <id>
+dom0  -> guest   RUN <id> <user> <command...>
+guest -> dom0    <stdout and stderr of the command>
+                 END <id> <status>
+```
+
+`jos run` connects, pings, sends the command, prints what comes back and
+exits with the command's status. The command runs through `su <user> -c`
+(root included) with stdin from `/dev/null`, starting in the user's home
+directory; the id is dom0's, so the end line cannot be mistaken for
+output. If nothing answers the ping within 3 s (a clone made before the
+daemon existed, or a template booted elsewhere) `jos run` says so and
+types into the serial console instead, which is also what Redox qubes
+always get and what `--console` forces. Compared with the console path
+there is no login, no echo, no prompt detection, no clash with someone
+using `jos console`, and a command may read its input without eating
+the marker; one request at a time per qube, since bhyve accepts a single
+client on the socket.
+
+bhyve does not remove a stale socket before binding, so dom0 deletes it
+before every boot. Two things about the guests: Linux allows a single
+open of a virtio port and returns EOF from it while dom0 is not
+connected, so the daemon holds one descriptor for both directions and
+sleeps a second between reconnections; FreeBSD's port is a tty, which
+the daemon puts in raw mode (no echo, no CR/LF translation) while it
+holds it open, as the tty forgets its modes on the last close.
+
+Verified on the nested dom0: `work` (FreeBSD) and `web` (Debian) answer
+`id`, `pwd`, multi-command lines, exit statuses, output without a final
+newline and 2 MB of output in one go, in well under a second; `jos copy`
+and `jos-copy` ride on it. The daemon was then added to both templates
+the usual way (`jos template run`, install, power off, `jos template
+snapshot ... agentd`), and a fresh clone of each answers `jos run` as
+soon as it has booted, with nobody logged in on its console.
 
 ## `jos copy`
 
@@ -101,7 +158,9 @@ jos-copy: ok /mnt/jos/in/work/report.pdf
 
 The script copies the file to `/mnt/jos/out/report.pdf`, writes
 `copy report.pdf personal` to `/mnt/jos/req/<id>` (atomically: a
-temporary file renamed into place) and waits for `/mnt/jos/req/<id>.reply`
+`<id>.tmp` renamed into place; the broker ignores `.tmp` files, having
+once failed and removed one while the guest was still writing it) and
+waits for `/mnt/jos/req/<id>.reply`
 (up to `JOS_COPY_TIMEOUT`, 600 s). The exit status says what dom0
 answered: 0 delivered, 77 denied, 75 still pending, 1 error.
 
@@ -159,14 +218,16 @@ others can be added with their own policy rules.
 
 ## Limits and next steps
 
-- `jos copy` reads the source over the serial console, so it needs the
-  source qube to be running with its autologin shell free; a long `cp`
-  is bounded by `--timeout` (default 600 s). `jos-copy` needs no console
-  at all.
+- `jos copy` runs the export in the source qube with `jos run`, so it
+  needs the source qube to be running (with the agent channel, or the
+  console free); a long `cp` is bounded by `--timeout` (default 600 s).
+  `jos-copy` needs neither.
 - The destination need not be running: files wait in its inbox on dom0.
 - Large transfers are a `cp` through 9p; fine for sources and documents,
   not meant for disk images.
-- `jos serve` polls (every 2 s by default); a guest daemon on a
-  virtio-console or vsock would make it event-driven and could replace
-  the serial console under `jos run`, keeping the same share layout,
-  request format and policy.
+- `jos serve` polls (every 2 s by default). The daemon could announce a
+  request on the agent channel to wake it, but bhyve accepts one client
+  per socket, so that would mean a dom0 service multiplexing `jos run`
+  and the notifications; the poll is cheap and the latency acceptable,
+  so it stays for now. The share layout, request format and policy
+  would not change.

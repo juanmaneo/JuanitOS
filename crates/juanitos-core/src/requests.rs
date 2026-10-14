@@ -45,6 +45,9 @@ use crate::sys::Runner;
 pub const POLICY_FILE: &str = "policy";
 /// Suffix of the reply dom0 writes next to a request.
 pub const REPLY_SUFFIX: &str = ".reply";
+/// Suffix of a request still being written by the guest (`jos-copy`
+/// writes `<id>.tmp` and renames it): not a request yet.
+pub const TMP_SUFFIX: &str = ".tmp";
 /// How long a reply stays before dom0 removes it (the guest cannot).
 pub const REPLY_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// The only service so far.
@@ -351,7 +354,11 @@ impl<'a> Broker<'a> {
             for entry in entries {
                 let entry = entry?;
                 let id = entry.file_name().to_string_lossy().into_owned();
-                if id.starts_with('.') || id.ends_with(REPLY_SUFFIX) || !entry.path().is_file() {
+                if id.starts_with('.')
+                    || id.ends_with(REPLY_SUFFIX)
+                    || id.ends_with(TMP_SUFFIX)
+                    || !entry.path().is_file()
+                {
                     continue;
                 }
                 let request = match validate_id(&id) {
@@ -625,6 +632,9 @@ mod tests {
         drop_request(&f, "work", "a", "copy ../x web\n");
         drop_request(&f, "work", "a.reply", "ok\n");
         drop_request(&f, "work", ".tmp", "copy x web\n");
+        // Being written by the guest: a half-written one would otherwise
+        // be read empty, failed and removed under the writer's feet.
+        drop_request(&f, "work", "c.tmp", "");
         drop_request(&f, "web", "bad id", "copy x work\n");
         std::fs::create_dir_all(Path::new(&f.cfg.share_dir).join("Not-A-Qube")).unwrap();
         let found = broker.scan().unwrap();

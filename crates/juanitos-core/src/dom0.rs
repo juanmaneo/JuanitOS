@@ -183,6 +183,9 @@ pub fn loader_conf(flavor: Flavor, opts: &Dom0Options) -> String {
         s.push_str(&format!("{m}_load=\"YES\"\n"));
     }
     s.push_str("hw.vmm.iommu.enable=1\n");
+    // Harmless on Intel (the tunable only exists for AMD-Vi), required on
+    // AMD: without it vmm leaves the IOMMU off and passthrough fails.
+    s.push_str("hw.vmm.amdvi.enable=1\n");
     match flavor {
         Flavor::Live => {
             s.push_str("vfs.mountroot.timeout=\"10\"\n");
@@ -306,6 +309,7 @@ mod tests {
         let live = loader_conf(Flavor::Live, &Dom0Options::default());
         assert!(live.contains("vmm_load=\"YES\""));
         assert!(live.contains("hw.vmm.iommu.enable=1"));
+        assert!(live.contains("hw.vmm.amdvi.enable=1"));
         assert!(live.contains("boot_multicons=\"YES\""));
         assert!(live.contains("hw.uart.console="));
         assert!(

@@ -42,7 +42,7 @@ See `docs/` for details:
 ## Repository layout
 
 ```text
-crates/juanitos-core   library: config, bhyve, zfs, pci, net, doctor, dom0, release, firewall, share, requests
+crates/juanitos-core   library: config, bhyve, zfs, pci, net, doctor, dom0, release, firewall, share, requests, agent
 crates/jos             management CLI
 crates/jos-install     installer on the live ISO: graphical wizard (Calamares/Anaconda-style) + text mode
 crates/jos-release     builds the binaries, the dom0 tarball and the ISO; QEMU harness
@@ -55,7 +55,7 @@ crates/jos-splash      boot splash daemon on the vt(4) framebuffer + rc.d client
 crates/jos-fb          vt(4) framebuffer display and keyboard decoder (splash, installer)
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
 coverage.toml          per-crate line-coverage floors (ratcheted, only go up)
-templates/             cloud-init user-data of the guest template recipes; agent/ the guest agent and jos-copy
+templates/             cloud-init user-data of the guest template recipes; agent/ the guest agents (share, jos-agentd) and jos-copy
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
 freebsd/               loader.conf / sysctl.conf samples and rc.d scripts
 docs/                  design notes (docs/images: rendered previews)
@@ -129,7 +129,8 @@ jos create vault       --kind app      --os freebsd --template fbsd15-dev --netv
 
 jos start work
 jos console work                         # serial console (nmdm), autologin shell
-jos run work docker ps                   # run a command there, get its exit status
+jos run work docker ps                   # run a command via the agent channel, get its exit status
+jos run work --user root -- apt-get update
 jos copy work:/home/user/report.pdf jail # qube to qube, lands in jail:/mnt/jos/in/work/
 jos copy /root/notes.txt work            # dom0 to qube, lands in work:/mnt/jos/in/dom0/
 jos policy add work jail allow           # let work push files to jail by itself...
@@ -139,15 +140,21 @@ jos ls
 ```
 
 `jos serve` (started by `rc.d/jos`) answers the qubes' requests according
-to the policy; anything the policy does not settle waits for
-`jos requests approve|deny`.
+to the policy, re-reading it as it changes; anything the policy does not
+settle waits for `jos requests approve|deny`. `jos run` talks to
+`jos-agentd` in the qube over a virtio-console port (no login, no
+console), falling back to the serial console for qubes without it
+(Redox).
 
 Every command accepts `--dry-run` to print the host commands it would run,
 which also makes the CLI usable on a non-FreeBSD development machine
 (set `JOS_CONFIG_DIR` to keep qube definitions out of `/usr/local/etc`).
 On a machine without IOMMU (no NIC passthrough for `sys-net`), or before
 `sys-net` exists, `--uplink IFACE` bridges a host interface straight into
-a qube.
+a qube. Qube definitions are plain TOML files under
+`/usr/local/etc/juanitos/qubes/`, edited while the qube is stopped (that
+is how `sys-net` moves from `uplink` to `pci_passthrough` once the NIC is
+bound to `ppt(4)`).
 
 ## Guest templates
 
@@ -171,11 +178,13 @@ Four templates ship today:
 
 The two development templates come with git, a compiler toolchain and
 the usual tools, an unprivileged `user` with password-less `sudo`/`doas`,
-and autologin on the serial console (`jos console`, reachable from dom0
-only), which is also what `jos run <qube> <command>` uses. Redox qubes
-have no autologin, so `jos run` logs in as Redox's `user` first, and
-get NVMe + e1000 devices instead of virtio (Redox's virtio drivers need
-the modern transport bhyve lacks).
+autologin on the serial console (`jos console`, reachable from dom0
+only), and the guest agents: the share mount that names each clone, and
+`jos-agentd`, which runs what `jos run <qube> <command>` sends over the
+qube's virtio-console channel (`docs/inter-qube.md`). Redox qubes have
+neither: `jos run` types into their console after logging in as Redox's
+`user`, and they get NVMe + e1000 devices instead of virtio (Redox's
+virtio drivers need the modern transport bhyve lacks).
 
 ```sh
 jos template recipes
@@ -246,10 +255,11 @@ provisioning, bhyve command generation, networking plumbing, per-qube
 supervisor (restart on reboot, pidfiles and logs under
 `/var/run/juanitos`), host checks, release builder, the graphical
 installer, guest templates from the distributions' images (Debian 13 +
-Docker, FreeBSD 15 + Podman, Redox), `jos run` over the serial console,
-the per-qube virtio-9p share with its guest agent (own hostname per
-clone), `jos copy` on top of it and the request broker (`jos-copy` in a
-qube, `jos policy`, `jos serve`), the `sys-firewall` unikernel, and the graphical boot chain
+Docker, FreeBSD 15 + Podman, Redox), `jos run` through a virtio-console
+agent channel (serial console as the fallback), the per-qube virtio-9p
+share with its guest agent (own hostname per clone), `jos copy` on top
+of it and the request broker (`jos-copy` in a qube, `jos policy`, `jos
+serve`), the `sys-firewall` unikernel, and the graphical boot chain
 (`jos-boot.efi`, kernel splash, `jos-splash`). Everything is verified
 with `--dry-run` and unit tests on the development host; on Linux,
 `tools/uefi-test.sh` boots the UEFI pieces under QEMU + OVMF:
@@ -280,7 +290,18 @@ image and a clone `web` boots as `web`, takes its address from
 With `jos serve` running, `jos-copy` inside `work`, `test` and `web`
 moved files to each other as the policy allowed, was refused where it
 said `deny`, and waited for `jos requests approve` where it said
-nothing. The test suite reaches 94% line coverage, gated per crate in CI.
+nothing. NIC passthrough was exercised in the same nest: `jos-release
+qemu --iommu` gives the dom0 an emulated AMD-Vi (the laptop is a Ryzen)
+and a second NIC; bound to `ppt(4)` and handed to `sys-net` with `--pci`,
+it shows up as `em0` in the qube, takes a DHCP lease, and `work` reaches
+the Internet through `sys-firewall` → `sys-net` → that NIC
+(`docs/gpu-passthrough.md`; it also found that AMD hosts need
+`hw.vmm.amdvi.enable=1`, which the installer and `jos doctor` now cover).
+The agent channel was brought up there as well: `work` and `web` answer
+`jos run` through `jos-agentd` a second after they boot, in a tenth of a
+second per command, 2 MB of output included, and `jos copy` and
+`jos-copy` ride on it. The test suite reaches 94% line coverage, gated
+per crate in CI.
 
 Stage 2 is done too: the stage-1 ISO was installed headless (`qemu -vga
 none`, text installer on the serial port) and the installed JuanitOS
@@ -291,10 +312,10 @@ differ only in the JuanitOS binaries, `release.toml` and `pkg`'s
 bookkeeping (`docs/bootstrap.md` has the comparison and what it
 uncovered).
 
-Not yet done: NIC passthrough on real hardware (the chain above used
-`--uplink`; `--pci` is implemented but only dry-run tested), a display
-for Redox qubes (bhyve's `fbuf` asserts when Redox programs it), COSMIC
-(no FreeBSD packages yet: the dom0 falls back to the console), and an
-event-driven guest agent (`jos serve` polls the shares every two
-seconds and `jos run` still goes through the serial console;
+Not yet done: passthrough on real hardware (the nested run above proves
+the plumbing, not IOMMU groups, device resets or GPU option ROMs), a
+display for Redox qubes (bhyve's `fbuf` asserts when Redox programs it),
+COSMIC (no FreeBSD packages yet: the dom0 falls back to the console), and
+qube-initiated events (`jos serve` still polls the shares every two
+seconds; the agent channel is dom0-initiated only, one client per qube;
 `docs/inter-qube.md`).

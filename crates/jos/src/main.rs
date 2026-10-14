@@ -75,14 +75,21 @@ enum Cmd {
     Kill { name: String },
     /// Attach to a qube's serial console.
     Console { name: String },
-    /// Run a command inside a qube over its serial console and print the
-    /// output (the templates log a shell in on the console).
+    /// Run a command inside a qube and print its output: through the
+    /// qube's agent channel (`jos-agentd` in the templates), or over the
+    /// serial console when the qube has no agent.
     Run {
         name: String,
         /// Seconds to wait for the command to finish.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
-        /// Log in as USER[:PASSWORD] if the console shows a login prompt
+        /// User the agent runs the command as.
+        #[arg(long, default_value = juanitos_core::agent::DEFAULT_USER)]
+        user: String,
+        /// Type into the serial console even when the agent is there.
+        #[arg(long)]
+        console: bool,
+        /// Console only: log in as USER[:PASSWORD] if a login prompt shows
         /// (default: the guest OS's stock user; Redox: `user`).
         #[arg(long, value_name = "USER[:PASSWORD]")]
         login: Option<String>,
@@ -453,7 +460,7 @@ impl App {
     }
 
     fn serve(&self, once: bool, interval: u64) -> Result<()> {
-        let broker = self.broker()?;
+        let mut broker = self.broker()?;
         if !once {
             println!(
                 "serving qube requests from {} with policy {} ({} rules)",
@@ -472,6 +479,17 @@ impl App {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+            // `jos policy add` must reach the running daemon: re-read the
+            // file every pass (a few lines), keeping the last good policy
+            // while an edit is half-written or wrong.
+            match Policy::load(&self.policy_path()) {
+                Ok(p) if p != broker.policy => {
+                    println!("policy reloaded ({} rules)", p.rules.len());
+                    broker.policy = p;
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("policy not reloaded: {e}"),
+            }
         }
     }
 
@@ -740,17 +758,20 @@ impl App {
         }
         let timeout = std::time::Duration::from_secs(timeout);
         let mut run_in_qube = |name: &str, command: &str| -> juanitos_core::Result<()> {
-            let dev = self.cfg.console_host_device(name);
-            let dialect = juanitos_core::console::Dialect::Posix;
-            if self.dry_run {
-                println!(
-                    "+ type on {dev}: {}",
-                    juanitos_core::console::script_for(dialect, command).trim_end()
-                );
+            let q = self.store.get(name)?;
+            let Some(outcome) = self
+                .run_in(
+                    &q,
+                    juanitos_core::agent::DEFAULT_USER,
+                    command,
+                    timeout,
+                    None,
+                    false,
+                )
+                .map_err(|e| juanitos_core::Error::Other(format!("{e:#}")))?
+            else {
                 return Ok(());
-            }
-            let outcome = console_run(&dev, command, timeout, None, dialect)
-                .map_err(|e| juanitos_core::Error::Other(format!("{e:#}")))?;
+            };
             match outcome.status {
                 Some(0) => Ok(()),
                 Some(code) => Err(juanitos_core::Error::Other(format!(
@@ -769,6 +790,68 @@ impl App {
             dst.name, delivery.guest_path, delivery.dom0_path
         );
         Ok(())
+    }
+
+    /// Run `command` in `q` as `user`: through the agent channel when the
+    /// qube has one and its daemon answers, else over the serial console
+    /// (always, with `console`). `None` in dry-run mode, after printing
+    /// what would be sent.
+    fn run_in(
+        &self,
+        q: &Qube,
+        user: &str,
+        command: &str,
+        timeout: std::time::Duration,
+        login: Option<&juanitos_core::console::Login>,
+        console: bool,
+    ) -> Result<Option<juanitos_core::console::Outcome>> {
+        if !console && q.os.has_agent() {
+            juanitos_core::agent::validate_user(user)?;
+            juanitos_core::agent::validate_command(command)?;
+            let sock = self.cfg.agent_socket(&q.name);
+            let id = juanitos_core::agent::new_id();
+            if self.dry_run {
+                println!(
+                    "+ ask the agent on {sock}: {}",
+                    juanitos_core::agent::request(&id, user, command).trim_end()
+                );
+                return Ok(None);
+            }
+            let agent = juanitos_core::agent::Agent::new(self.runner.as_ref(), &self.cfg);
+            if agent.available(q) {
+                match agent_run(&sock, &id, user, command, timeout)? {
+                    Some(outcome) => return Ok(Some(outcome)),
+                    None => eprintln!("{}: no agent answered; using the serial console", q.name),
+                }
+            }
+        }
+        if !q.os.has_console_shell() {
+            bail!(
+                "{} runs {} which has no shell on its serial console; `jos run` needs one",
+                q.name,
+                q.os
+            );
+        }
+        let dev = self.cfg.console_host_device(&q.name);
+        let login = login.cloned().or_else(|| q.os.console_login());
+        let dialect = q.os.console_dialect();
+        if self.dry_run {
+            println!(
+                "+ type on {dev}: {}",
+                juanitos_core::console::script_for(dialect, command).trim_end()
+            );
+            if let Some(l) = &login {
+                println!("  (logging in as {} first if asked)", l.user);
+            }
+            return Ok(None);
+        }
+        Ok(Some(console_run(
+            &dev,
+            command,
+            timeout,
+            login.as_ref(),
+            dialect,
+        )?))
     }
 
     fn check_not_running(&self, name: &str) -> Result<()> {
@@ -951,6 +1034,68 @@ fn report(found: &Found, disposition: &Disposition) -> Result<()> {
     Ok(())
 }
 
+/// Print what the guest printed and exit with the command's status.
+fn finish(name: &str, outcome: juanitos_core::console::Outcome) -> Result<()> {
+    print!("{}", outcome.output);
+    match outcome.status {
+        Some(0) => Ok(()),
+        Some(code) => std::process::exit(code),
+        None => bail!("{name}: could not read the exit status"),
+    }
+}
+
+/// `jos run` through the agent channel: connect to the socket bhyve
+/// listens on, ping, then run. `None` when nothing answers the ping (no
+/// daemon in the guest).
+#[cfg(unix)]
+fn agent_run(
+    sock: &str,
+    id: &str,
+    user: &str,
+    command: &str,
+    timeout: std::time::Duration,
+) -> Result<Option<juanitos_core::console::Outcome>> {
+    use std::io::Read;
+    let mut stream = std::os::unix::net::UnixStream::connect(sock)
+        .with_context(|| format!("connecting to {sock} (is the qube running?)"))?;
+    stream.set_nonblocking(true)?;
+    let poll = |s: &mut std::os::unix::net::UnixStream| -> std::io::Result<Vec<u8>> {
+        let mut buf = [0u8; 4096];
+        match s.read(&mut buf) {
+            Ok(0) => Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "the agent channel closed (bhyve exited, or another client took it)",
+            )),
+            Ok(n) => Ok(buf.get(..n).unwrap_or(&[]).to_vec()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    };
+    if !juanitos_core::agent::handshake(&mut stream, id, juanitos_core::agent::PING_TIMEOUT, &poll)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(juanitos_core::agent::run(
+        &mut stream,
+        id,
+        user,
+        command,
+        timeout,
+        &poll,
+    )?))
+}
+
+#[cfg(not(unix))]
+fn agent_run(
+    _sock: &str,
+    _id: &str,
+    _user: &str,
+    _command: &str,
+    _timeout: std::time::Duration,
+) -> Result<Option<juanitos_core::console::Outcome>> {
+    bail!("jos run needs a FreeBSD host (UNIX socket to bhyve)")
+}
+
 fn parse_login(s: &str) -> juanitos_core::console::Login {
     let (user, password) = s.split_once(':').unwrap_or((s, ""));
     juanitos_core::console::Login {
@@ -1073,45 +1218,18 @@ fn main() -> Result<()> {
         Cmd::Run {
             name,
             timeout,
+            user,
+            console,
             login,
             command,
         } => {
             let q = app.store.get(&name)?;
-            if !q.os.has_console_shell() {
-                bail!(
-                    "{name} runs {} which has no shell on its serial console; `jos run` needs one",
-                    q.os
-                );
-            }
-            let dev = app.cfg.console_host_device(&name);
             let command = command.join(" ");
-            let login = login
-                .as_deref()
-                .map(parse_login)
-                .or_else(|| q.os.console_login());
-            let dialect = q.os.console_dialect();
-            if cli.dry_run {
-                println!(
-                    "+ type on {dev}: {}",
-                    juanitos_core::console::script_for(dialect, &command).trim_end()
-                );
-                if let Some(l) = &login {
-                    println!("  (logging in as {} first if asked)", l.user);
-                }
-                return Ok(());
-            }
-            let outcome = console_run(
-                &dev,
-                &command,
-                std::time::Duration::from_secs(timeout),
-                login.as_ref(),
-                dialect,
-            )?;
-            print!("{}", outcome.output);
-            match outcome.status {
-                Some(0) => Ok(()),
-                Some(code) => std::process::exit(code),
-                None => bail!("{name}: could not read the exit status"),
+            let timeout = std::time::Duration::from_secs(timeout);
+            let login = login.as_deref().map(parse_login);
+            match app.run_in(&q, &user, &command, timeout, login.as_ref(), console)? {
+                Some(outcome) => finish(&name, outcome),
+                None => Ok(()),
             }
         }
         Cmd::Copy { src, dst, timeout } => app.copy(&src, &dst, timeout),

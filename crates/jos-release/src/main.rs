@@ -107,6 +107,11 @@ struct QemuArgs {
     /// Do not pass the host CPU through (disables bhyve inside the VM).
     #[arg(long)]
     no_nested: bool,
+    /// Emulate an IOMMU (VT-d or AMD-Vi, matching the host CPU) and a
+    /// second NIC at PCI 0/9/0, so `jos create sys-net --pci 0/9/0` can be
+    /// exercised inside the VM.
+    #[arg(long)]
+    iommu: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -235,7 +240,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 vars: work.join("qemu-vars.fd"),
                 headless: a.headless,
                 nested: !a.no_nested,
+                iommu: a.iommu.then(qemu::IommuVendor::host),
             };
+            if let Some(v) = opts.iommu {
+                println!(
+                    "# {v:?} vIOMMU; inside the dom0: pptdevs=\"{nic}\" (and hw.vmm.amdvi.enable=1 on AMD) \
+                     in /boot/loader.conf, then `jos create sys-net ... --pci {nic}`",
+                    nic = qemu::PASSTHROUGH_NIC_ADDR
+                );
+            }
             qemu::run_qemu(&opts, cli.dry_run)
         }
         Cmd::Builder(a) if a.auto => qemu::run_auto_builder(

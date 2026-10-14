@@ -53,7 +53,11 @@ JuanitOS is less the architecture than the engineering discipline:
    operator with `jos requests`). That is qrexec's policy model, with
    files in place of a socket protocol; see `docs/inter-qube.md`. A
    qube names a file in its own outbox and a destination, nothing more:
-   it cannot address another qube's share or any path on dom0.
+   it cannot address another qube's share or any path on dom0. The
+   agent channel (`jos run`) only goes the other way: dom0 sends
+   commands, the qube answers; a qube cannot reach dom0 or another qube
+   through it, and its daemon takes orders from the channel alone, which
+   only bhyve on dom0 holds the other end of.
 
 ## Where JuanitOS deliberately differs
 

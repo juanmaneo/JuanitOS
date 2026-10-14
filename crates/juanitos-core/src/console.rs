@@ -1,12 +1,12 @@
-//! Running a command inside a qube over its serial console (`jos run`).
+//! Running a command inside a qube over its serial console: what `jos
+//! run` falls back to when the qube has no agent channel
+//! ([`crate::agent`]): Redox qubes, clones made before the daemon
+//! existed, or `jos run --console`.
 //!
-//! JuanitOS has no guest agent yet; what every qube does have is a serial
-//! console on an `nmdm(4)` pair, with the templates logging a shell in on
-//! it automatically. `jos run <qube> <command>` types the command there,
-//! bracketed by a marker, and prints what comes back. Good enough for
-//! `jos run work docker ps` and for the test suite; a proper agent (the
-//! QubesOS `qrexec` idea) can replace the transport later without
-//! changing the command.
+//! What every qube does have is a serial console on an `nmdm(4)` pair,
+//! with the templates logging a shell in on it automatically. `jos run
+//! <qube> <command>` types the command there, bracketed by a marker, and
+//! prints what comes back.
 //!
 //! The protocol — framing, prompt synchronisation, exit status — is pure
 //! and tested here; the host side is a few `read`/`write`s on the device.

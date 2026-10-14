@@ -5,6 +5,7 @@
 //! free of Unix-only APIs so it builds and tests on any development host;
 //! all host interaction goes through [`sys::Runner`].
 
+pub mod agent;
 pub mod bhyve;
 pub mod config;
 pub mod console;

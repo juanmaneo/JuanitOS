@@ -6,8 +6,11 @@ vmm_load="YES"
 nmdm_load="YES"
 if_bridge_load="YES"
 
-# Required for PCI passthrough (VT-d / AMD-Vi must be enabled in firmware)
+# Required for PCI passthrough (VT-d / AMD-Vi must be enabled in firmware).
+# AMD CPUs additionally need the amdvi switch (vmm picks the IOMMU driver
+# by CPU vendor and amdvi stays off unless asked); it is ignored on Intel.
 hw.vmm.iommu.enable=1
+hw.vmm.amdvi.enable=1
 
 # Devices reserved for passthrough, as bus/slot/function.
 # Find candidates with `jos pci list --gpus` and generate this line with

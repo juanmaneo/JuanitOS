@@ -51,6 +51,14 @@ pub fn parse_sysctl_value(text: &str) -> String {
     }
 }
 
+/// True when `sysctl hw.model` names an AMD processor.
+pub fn is_amd_cpu(runner: &dyn Runner) -> bool {
+    match runner.run("sysctl", &["hw.model"]) {
+        Ok(out) if out.success() => parse_sysctl_value(&out.stdout).contains("AMD"),
+        _ => false,
+    }
+}
+
 /// Pool names from `zpool list -H -o name`.
 pub fn parse_zpool_list(text: &str) -> Vec<String> {
     text.lines()
@@ -126,6 +134,23 @@ pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
             Status::Fail,
             "sysctl hw.vmm.iommu.enable unavailable (vmm not loaded?)",
         )),
+    }
+
+    // AMD-Vi needs its own switch: vmm picks the IOMMU driver by CPU vendor
+    // and amdvi refuses to initialise ("use hw.vmm.amdvi.enable=1") unless
+    // asked, so on AMD `hw.vmm.iommu.enable=1` alone leaves `jos start`
+    // failing with `vm_assign_pptdev: Device not configured`.
+    if is_amd_cpu(runner) {
+        match runner.run("sysctl", &["hw.vmm.amdvi.enable"]) {
+            Ok(out) if out.success() && parse_sysctl_value(&out.stdout) == "1" => {
+                checks.push(Check::new("amd-vi", Status::Ok, "hw.vmm.amdvi.enable=1"));
+            }
+            _ => checks.push(Check::new(
+                "amd-vi",
+                Status::Fail,
+                "AMD CPU: also set hw.vmm.amdvi.enable=1 in /boot/loader.conf (needed for PCI passthrough)",
+            )),
+        }
     }
 
     // /dev/vmm
@@ -271,6 +296,7 @@ mod tests {
         assert_eq!(get("kernel module if_bridge").status, Status::Fail);
         assert!(m.calls().iter().any(|c| c == "kldstat -q -m if_tap"));
         assert_eq!(get("iommu").status, Status::Fail);
+        assert!(checks.iter().all(|c| c.name != "amd-vi"));
         assert_eq!(get("zpool").status, Status::Fail);
         assert_eq!(get("dataset zroot/juanitos/qubes").status, Status::Warn);
         assert_eq!(get("ppt devices").status, Status::Ok);
@@ -280,5 +306,54 @@ mod tests {
         let host = run_host_checks(&m, &cfg);
         assert!(host.iter().all(|c| c.name != "zpool"));
         assert!(host.iter().any(|c| c.name == "ppt devices"));
+    }
+
+    #[test]
+    fn amd_hosts_need_the_amdvi_switch() {
+        let cfg = GlobalConfig::default();
+        let amd = |amdvi: &str| {
+            MockRunner::new()
+                .respond("kldstat", &[], CmdOutput::ok(""))
+                .respond(
+                    "sysctl",
+                    &["hw.model"],
+                    CmdOutput::ok("hw.model: AMD Ryzen 7 5800U with Radeon Graphics\n"),
+                )
+                .respond(
+                    "sysctl",
+                    &["hw.vmm.iommu.enable"],
+                    CmdOutput::ok("hw.vmm.iommu.enable: 1\n"),
+                )
+                .respond(
+                    "sysctl",
+                    &["hw.vmm.amdvi.enable"],
+                    CmdOutput::ok(format!("hw.vmm.amdvi.enable: {amdvi}\n")),
+                )
+                .respond("pciconf", &[], CmdOutput::ok(""))
+        };
+        let m = amd("0");
+        assert!(is_amd_cpu(&m));
+        let checks = run_host_checks(&m, &cfg);
+        let c = checks.iter().find(|c| c.name == "amd-vi").unwrap();
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.detail.contains("hw.vmm.amdvi.enable=1"));
+        assert!(!all_passed(&checks));
+
+        let checks = run_host_checks(&amd("1"), &cfg);
+        let c = checks.iter().find(|c| c.name == "amd-vi").unwrap();
+        assert_eq!(c.status, Status::Ok);
+
+        let intel = MockRunner::new()
+            .respond("kldstat", &[], CmdOutput::ok(""))
+            .respond(
+                "sysctl",
+                &["hw.model"],
+                CmdOutput::ok("hw.model: Intel(R) Core(TM) i7-8700\n"),
+            )
+            .respond("sysctl", &[], CmdOutput::ok("hw.vmm.iommu.enable: 1\n"))
+            .respond("pciconf", &[], CmdOutput::ok(""));
+        assert!(!is_amd_cpu(&intel));
+        let checks = run_host_checks(&intel, &cfg);
+        assert!(checks.iter().all(|c| c.name != "amd-vi"));
     }
 }
