@@ -23,12 +23,21 @@ label = "JUANITOS"
 bios = true
 
 [packages]
-# Install the COSMIC desktop packages (best effort, missing ports are skipped).
+# Install the COSMIC desktop (best effort: a component that did not build
+# is skipped) and the ly login screen.
 gui = true
 # Install rust + git so the installed system can rebuild JuanitOS (stage 2).
 selfhost = true
 # Anything else you want in every dom0.
 extra = ["tmux", "vim"]
+# FreeBSD package branch: "quarterly" or "latest". The COSMIC packages are
+# built against it (tools/dev/cosmic-build.sh in the build VM) and their
+# shared libraries must match what the dom0 installs.
+repo = "latest"
+# pkg repository with the COSMIC packages (output of `cosmic-build.sh repo`,
+# copied from the build VM), relative to this source tree. Shipped in the
+# dom0 at /usr/local/share/juanitos/pkg.
+local_repo = "target/work/cosmic/repo"
 
 [source]
 # Copy this repository into /usr/local/src/juanitos and vendor its crates so

@@ -25,6 +25,14 @@ pub struct Packages {
     pub gui: bool,
     pub selfhost: bool,
     pub extra: Vec<String>,
+    /// FreeBSD package branch the dom0 installs from: `quarterly` (what
+    /// FreeBSD ships configured) or `latest`. The COSMIC packages are
+    /// built against one of them and must use the same shared libraries.
+    pub repo: String,
+    /// A pkg(8) repository directory (`pkg repo` output) with the COSMIC
+    /// packages, relative to the source tree; shipped in the dom0 at
+    /// `dom0::COSMIC_REPO_DIR`. Produced by `tools/dev/cosmic-build.sh`.
+    pub local_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +64,8 @@ impl Default for Packages {
             gui: true,
             selfhost: true,
             extra: Vec::new(),
+            repo: "quarterly".into(),
+            local_repo: None,
         }
     }
 }
@@ -89,6 +99,16 @@ impl Profile {
 
     pub fn iso_name(&self) -> String {
         format!("JuanitOS-{}-{}.iso", self.version, self.arch)
+    }
+
+    /// The package branch, validated: pkg would silently 404 on a typo.
+    pub fn package_branch(&self) -> anyhow::Result<&str> {
+        match self.packages.repo.as_str() {
+            b @ ("quarterly" | "latest") => Ok(b),
+            other => {
+                anyhow::bail!("[packages] repo = {other:?}: expected \"quarterly\" or \"latest\"")
+            }
+        }
     }
 
     /// Everything to install with `pkg`, split into (required, best-effort).
@@ -125,6 +145,21 @@ mod tests {
             )
         );
         assert!(p.iso_name().starts_with("JuanitOS-"));
+        // The dom0 tracks the branch the COSMIC packages are built on.
+        assert_eq!(p.package_branch().unwrap(), "latest");
+        assert_eq!(
+            p.packages.local_repo.as_deref(),
+            Some("target/work/cosmic/repo")
+        );
+    }
+
+    #[test]
+    fn package_branch_is_validated() {
+        let mut p = Profile::default();
+        assert_eq!(p.package_branch().unwrap(), "quarterly");
+        p.packages.repo = "lastest".into();
+        let err = p.package_branch().unwrap_err().to_string();
+        assert!(err.contains("lastest"), "{err}");
     }
 
     #[test]
@@ -150,5 +185,7 @@ mod tests {
         assert_eq!(p.freebsd_version, "15.0-RELEASE");
         assert_eq!(p.label, "JUANITOS");
         assert!(p.source.vendor);
+        assert_eq!(p.packages.repo, "quarterly");
+        assert!(p.packages.local_repo.is_none());
     }
 }

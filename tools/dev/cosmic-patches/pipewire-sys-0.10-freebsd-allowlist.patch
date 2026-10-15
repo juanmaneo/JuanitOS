@@ -1,0 +1,15 @@
+FreeBSD's pipewire.h renames pw_init/pw_deinit to pipewire_init/pipewire_deinit
+("BSD has pw_init already"); the bindgen allowlist of pipewire-sys only
+keeps pw_* functions, so the renamed ones were missing from the bindings.
+Applied to the registry copy of pipewire-sys by tools/dev/cosmic-build.sh
+patch, together with pipewire-0.10-freebsd-init.patch.
+--- a/build.rs
++++ b/build.rs
+@@ -23,6 +23,7 @@
+         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+         .size_t_is_usize(true)
+         .allowlist_function("pw_.*")
++        .allowlist_function("pipewire_.*")
+         .allowlist_type("pw_.*")
+         .allowlist_var("pw_.*")
+         .allowlist_var("PW_.*")

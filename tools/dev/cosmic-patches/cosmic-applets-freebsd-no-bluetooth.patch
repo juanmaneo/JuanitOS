@@ -1,0 +1,32 @@
+The bluetooth applet is built on bluer, which refuses to compile anywhere
+but Linux (compile_error!). Make it a Linux-only dependency of the applets
+binary; its desktop entry is still installed and the binary answers it by
+exiting. Applied to cosmic-applets by tools/dev/cosmic-build.sh patch.
+--- a/cosmic-applets/Cargo.toml
++++ b/cosmic-applets/Cargo.toml
+@@ -7,12 +7,14 @@
+ [build-dependencies]
+ xdgen = "0.1"
+ 
++[target.'cfg(target_os = "linux")'.dependencies]
++cosmic-applet-bluetooth = { path = "../cosmic-applet-bluetooth" }
++
+ [dependencies]
+ cosmic-app-list = { path = "../cosmic-app-list" }
+ cosmic-applet-audio = { path = "../cosmic-applet-audio" }
+ cosmic-applet-a11y = { path = "../cosmic-applet-a11y" }
+ cosmic-applet-battery = { path = "../cosmic-applet-battery" }
+-cosmic-applet-bluetooth = { path = "../cosmic-applet-bluetooth" }
+ cosmic-applet-minimize = { path = "../cosmic-applet-minimize" }
+ cosmic-applet-network = { path = "../cosmic-applet-network" }
+ cosmic-applet-notifications = { path = "../cosmic-applet-notifications" }
+--- a/cosmic-applets/src/main.rs
++++ b/cosmic-applets/src/main.rs
+@@ -21,6 +21,7 @@
+         "cosmic-applet-a11y" => cosmic_applet_a11y::run(),
+         "cosmic-applet-audio" => cosmic_applet_audio::run(),
+         "cosmic-applet-battery" => cosmic_applet_battery::run(),
++        #[cfg(target_os = "linux")]
+         "cosmic-applet-bluetooth" => cosmic_applet_bluetooth::run(),
+         "cosmic-applet-minimize" => cosmic_applet_minimize::run(),
+         "cosmic-applet-network" => cosmic_applet_network::run(),

@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# PROVIDE: jos-login
+# REQUIRE: LOGIN seatd dbus
+# BEFORE: jos-splash-finish
+#
+# The JuanitOS login screen is ly(1), started by getty(8) on ttyv1 (see
+# /etc/ttys and the "Ly" gettytab entry the installer adds), so there is
+# no daemon to run here. This script prepares what a desktop session
+# needs before the first login:
+#
+# jos_login_enable="YES"   /var/run/user for the sessions' XDG_RUNTIME_DIR;
+#                          rc.d/jos-splash-finish then keeps the splash on
+#                          the screen until ly takes over.
+
+. /etc/rc.subr
+
+name="jos_login"
+rcvar="jos_login_enable"
+
+load_rc_config $name
+
+: ${jos_login_enable:="NO"}
+: ${jos_login_ly:="/usr/local/bin/ly"}
+
+start_cmd="jos_login_start"
+stop_cmd=":"
+
+jos_login_start()
+{
+	# Sticky and world-writable like /tmp: /usr/local/libexec/jos-session
+	# makes the per-user directory (mode 700) at login.
+	mkdir -p /var/run/user
+	chmod 1777 /var/run/user
+	if [ ! -x "${jos_login_ly}" ]; then
+		echo "jos-login: ${jos_login_ly} is not installed; ttyv1 has no login screen" >&2
+	elif ! grep -q 'getty Ly' /etc/ttys; then
+		echo "jos-login: /etc/ttys does not start ly on ttyv1" >&2
+	fi
+}
+
+run_rc_command "$1"

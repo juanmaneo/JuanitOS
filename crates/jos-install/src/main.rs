@@ -171,6 +171,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         swap_gb: cli.swap_gb,
         gui: !cli.no_gui,
         serial_console: !cli.no_serial,
+        gpu_module: detect_gpu_module(runner),
         root_password: cli.root_password.clone(),
         user,
         dist_dir: cli.dist.clone(),
@@ -200,6 +201,22 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
     let mut prompter = Prompter::new(stdin.lock(), std::io::stdout(), runner);
     text_install(&cli, runner, plan, &checks, &disks, &report, &mut prompter)
+}
+
+/// The KMS driver for the dom0's display: the first GPU `pciconf` lists
+/// that `drm-kmod` has a driver for. A GPU meant for passthrough (the
+/// NVIDIA card of the `gpu` qube) has none, so it is skipped.
+fn detect_gpu_module(runner: &dyn Runner) -> Option<String> {
+    let devices = juanitos_core::pci::list_devices(runner).ok()?;
+    gpu_module_from(&devices)
+}
+
+fn gpu_module_from(devices: &[juanitos_core::pci::PciDevice]) -> Option<String> {
+    devices
+        .iter()
+        .filter(|d| d.is_gpu())
+        .find_map(|d| juanitos_core::dom0::gpu_kernel_module(d.vendor))
+        .map(str::to_string)
 }
 
 /// Should an interactive install use the graphical front end?
@@ -433,6 +450,25 @@ mod tests {
         let s = render_checks(&checks(Status::Fail));
         assert!(s.starts_with("Host checks:\n"));
         assert!(s.contains("[FAIL] iommu"));
+    }
+
+    #[test]
+    fn gpu_detection_picks_the_first_kms_capable_card() {
+        use juanitos_core::sys::CmdOutput;
+        let pciconf = "vgapci0@pci0:1:0:0:\tclass=0x030000 rev=0xa1 hdr=0x00 vendor=0x10de device=0x1b80 subvendor=0x1458 subdevice=0x3702\n\
+                       vgapci1@pci0:6:0:0:\tclass=0x030000 rev=0xc8 hdr=0x00 vendor=0x1002 device=0x1638 subvendor=0x1d05 subdevice=0x1127\n\
+                       igb0@pci0:5:0:0:\tclass=0x020000 rev=0x03 hdr=0x00 vendor=0x8086 device=0x1533 subvendor=0x8086 subdevice=0x0000\n";
+        let devices = juanitos_core::pci::parse_pciconf(pciconf);
+        // The NVIDIA card (for the gpu qube) is skipped, the AMD one drives the console.
+        assert_eq!(gpu_module_from(&devices).as_deref(), Some("amdgpu"));
+        assert_eq!(gpu_module_from(&devices[..1]), None);
+        assert_eq!(gpu_module_from(&[]), None);
+
+        let m = MockRunner::new().respond("pciconf", &["-l", "-v"], CmdOutput::ok(pciconf));
+        assert_eq!(detect_gpu_module(&m).as_deref(), Some("amdgpu"));
+        // No pciconf (a development host): no module, no error.
+        let m = MockRunner::new().respond("pciconf", &["-l", "-v"], CmdOutput::failed(1, ""));
+        assert_eq!(detect_gpu_module(&m), None);
     }
 
     #[test]

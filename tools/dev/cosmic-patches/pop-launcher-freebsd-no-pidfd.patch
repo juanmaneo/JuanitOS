@@ -1,0 +1,43 @@
+The pulse plugin waits for pactl through async-pidfd, which is Linux only
+(pidfd_open). tokio's own Child::wait does the same job everywhere.
+Applied to pop-launcher by tools/dev/cosmic-build.sh patch.
+--- a/plugins/Cargo.toml
++++ b/plugins/Cargo.toml
+@@ -7,7 +7,6 @@
+ publish = false
+ 
+ [dependencies]
+-async-pidfd = "0.1.5"
+ fork = "0.2.0"
+ freedesktop-desktop-entry = "0.7.19"
+ human_format = "1.1.0"
+--- a/plugins/src/pulse/mod.rs
++++ b/plugins/src/pulse/mod.rs
+@@ -1,7 +1,6 @@
+ // SPDX-License-Identifier: GPL-3.0-only
+ // Copyright © 2021 System76
+ 
+-use async_pidfd::AsyncPidFd;
+ use futures::prelude::*;
+ use pop_launcher::*;
+ use std::io;
+@@ -118,16 +117,16 @@
+ }
+ 
+ async fn command_spawn(cmd: &str, args: &[&str]) -> io::Result<()> {
+-    use std::process::{Command, Stdio};
++    use std::process::Stdio;
+ 
+-    let child = Command::new(cmd)
++    let mut child = tokio::process::Command::new(cmd)
+         .stdin(Stdio::null())
+         .stdout(Stdio::null())
+         .stderr(Stdio::null())
+         .args(args)
+         .spawn()?;
+ 
+-    let _ = AsyncPidFd::from_pid(child.id() as i32)?.wait().await;
++    let _ = child.wait().await;
+ 
+     Ok(())
+ }

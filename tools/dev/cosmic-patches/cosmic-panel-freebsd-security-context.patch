@@ -1,0 +1,43 @@
+Abstract unix socket names (std::os::linux::net::SocketAddrExt) are Linux
+only. Elsewhere the security-context listener gets a socket file under
+XDG_RUNTIME_DIR, removed when the context is dropped. Applied to
+cosmic-panel by tools/dev/cosmic-build.sh patch.
+--- a/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/wp_security_context.rs
++++ b/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/wp_security_context.rs
+@@ -1,3 +1,4 @@
++#[cfg(target_os = "linux")]
+ use std::os::linux::net::SocketAddrExt;
+ use std::os::unix::io::AsFd;
+ use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+@@ -28,8 +29,13 @@
+ impl Drop for SecurityContext {
+     fn drop(&mut self) {
+         let mut guard = self.conn.lock().unwrap();
+-        if let Some((stream, _)) = guard.take() {
++        if let Some((stream, listener)) = guard.take() {
+             let _ = stream.shutdown(std::net::Shutdown::Both);
++            if let Some(path) =
++                listener.local_addr().ok().and_then(|a| a.as_pathname().map(|p| p.to_path_buf()))
++            {
++                let _ = std::fs::remove_file(path);
++            }
+         }
+     }
+ }
+@@ -52,7 +58,16 @@
+         // create a close fd that we can use to close the listener
+         let (close_fd_ours, close_fd) = smithay::reexports::rustix::pipe::pipe()?;
+         let s: String = Alphanumeric.sample_string(&mut rand::rng(), 50);
++        #[cfg(target_os = "linux")]
+         let addr = SocketAddr::from_abstract_name(s)?;
++        #[cfg(not(target_os = "linux"))]
++        let addr = {
++            let dir = std::env::var_os("XDG_RUNTIME_DIR")
++                .map(std::path::PathBuf::from)
++                .unwrap_or_else(std::env::temp_dir);
++            let _ = std::fs::remove_file(dir.join(format!("cosmic-panel-sc-{s}")));
++            SocketAddr::from_pathname(dir.join(format!("cosmic-panel-sc-{s}")))?
++        };
+         // this also listens on the socket
+         let listener = UnixListener::bind_addr(&addr)?;
+         let wp_security_context: WpSecurityContextV1 = self.manager.create_listener(

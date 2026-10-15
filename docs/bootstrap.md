@@ -143,8 +143,12 @@ and the extracted `rootfs/` for inspection.
 
 The package set lives in `crates/juanitos-core/src/dom0.rs`: required
 (`edk2-bhyve`, `seatd`, `dbus`, …), self-hosting (`rust`, `git`) and
-best-effort COSMIC packages. The root also gets a copy of this repository at
-`/usr/local/src/juanitos` with vendored crates, so stage 2 needs no network.
+best-effort desktop packages (COSMIC, `ly`, `drm-kmod`). FreeBSD has no
+COSMIC packages: they come from the repository `tools/dev/cosmic-build.sh`
+builds in the FreeBSD VM (`docs/relibc-cosmic.md`), which `[packages]
+local_repo` points at and the root carries at `/usr/local/share/juanitos/pkg`.
+The root also gets a copy of this repository at `/usr/local/src/juanitos`
+with vendored crates, so stage 2 needs no network.
 
 ### What the first native run taught (FreeBSD 15.1, 2026-10)
 
@@ -160,8 +164,9 @@ The unattended builder found three things the dry runs could not:
   copy), so `jos` is unchanged.
 - Removing a previous `rootfs/` needs `chflags -R noschg` first: an
   extracted base has immutable files (`FsOps::remove_tree`).
-- The COSMIC packages are not in the 15.1 quarterly repository yet; they
-  are best-effort and the build goes on without them.
+- The COSMIC packages are not in any FreeBSD repository; they are
+  best-effort and the build goes on without them, or with the ones
+  `tools/dev/cosmic-build.sh` produced.
 - FreeBSD's `rust` package has no `x86_64-unknown-uefi` standard library,
   so `jos-boot.efi` and `jos-firewall.efi` are built on the Linux side
   (`tools/docker-build.sh` or plain cargo with the target installed) and

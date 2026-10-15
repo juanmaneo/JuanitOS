@@ -1,0 +1,22 @@
+FreeBSD's pipewire.h renames pw_init/pw_deinit to pipewire_init/pipewire_deinit
+("BSD has pw_init already": libc's pw_init from <pwd.h>), so the bindings
+pipewire-sys generates carry the renamed symbols. Applied to the registry
+copy of the pipewire crate by tools/dev/cosmic-build.sh patch.
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -180,7 +180,7 @@
+ pub fn init() {
+     use std::sync::OnceLock;
+     static INITIALIZED: OnceLock<()> = OnceLock::new();
+-    INITIALIZED.get_or_init(|| unsafe { pw_sys::pw_init(ptr::null_mut(), ptr::null_mut()) });
++    INITIALIZED.get_or_init(|| unsafe { pw_sys::pipewire_init(ptr::null_mut(), ptr::null_mut()) });
+ }
+ 
+ /// Deinitialize PipeWire
+@@ -189,5 +189,5 @@
+ /// This must only be called once during the lifetime of the process, once no PipeWire threads
+ /// are running anymore and all PipeWire resources are released.
+ pub unsafe fn deinit() {
+-    pw_sys::pw_deinit()
++    pw_sys::pipewire_deinit()
+ }

@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# JuanitOS: run a desktop session for the user who just logged in. This is
+# the login screen's `login_cmd` (ly, /usr/local/etc/ly/config.ini), so it
+# ends by exec'ing the session command it was given (`start-cosmic`).
+#
+# ly does not set XDG_RUNTIME_DIR on FreeBSD and a Wayland compositor
+# refuses to start without one: use /var/run/user/<uid> (rc.d/jos-login
+# creates /var/run/user), else a private directory under /tmp.
+
+uid=$(id -u)
+if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+	for dir in "/var/run/user/${uid}" "/tmp/jos-run-${uid}"; do
+		if mkdir -p "${dir}" 2>/dev/null && [ -O "${dir}" ] && chmod 700 "${dir}"; then
+			XDG_RUNTIME_DIR=${dir}
+			break
+		fi
+	done
+	export XDG_RUNTIME_DIR
+fi
+export XDG_SESSION_TYPE=wayland
+: "${XDG_CURRENT_DESKTOP:=COSMIC}"
+export XDG_CURRENT_DESKTOP
+exec "$@"

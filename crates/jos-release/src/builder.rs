@@ -292,6 +292,54 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// pkg(8) repository configuration inside the root: the FreeBSD branch
+    /// the profile asks for, and the local COSMIC repository when the
+    /// profile points at one (copied into the root so it is usable both
+    /// from the chroot now and from the installed system later).
+    fn install_repositories(&self) -> anyhow::Result<()> {
+        let root = self.rootfs();
+        let branch = self.profile.package_branch()?;
+        if branch != "quarterly" {
+            self.fs.write(
+                &root.join(dom0::FREEBSD_REPO_CONF.trim_start_matches('/')),
+                &dom0::freebsd_repo_conf(branch),
+            )?;
+        }
+        let Some(rel) = &self.profile.packages.local_repo else {
+            return Ok(());
+        };
+        // The profile's directory, else the one this dom0 was installed
+        // with: stage 2 has no build VM output but keeps its desktop.
+        let has_catalogue =
+            |d: &Path| d.join("packagesite.pkg").is_file() || d.join("packagesite.txz").is_file();
+        let from_profile = self.repo.join(rel);
+        let from_install = self
+            .installed_root
+            .join(dom0::COSMIC_REPO_DIR.trim_start_matches('/'));
+        let Some(src) = [&from_profile, &from_install]
+            .into_iter()
+            .find(|d| has_catalogue(d))
+        else {
+            println!(
+                "   warning: no package catalogue in {} (run tools/dev/cosmic-build.sh); \
+                 COSMIC packages will not be installed",
+                from_profile.display()
+            );
+            return Ok(());
+        };
+        let dst = root.join(dom0::COSMIC_REPO_DIR.trim_start_matches('/'));
+        self.step(&format!(
+            "Shipping the COSMIC package repository from {}",
+            src.display()
+        ));
+        self.fs.copy_tree(src, &dst, &[])?;
+        self.fs.write(
+            &root.join(dom0::COSMIC_REPO_CONF.trim_start_matches('/')),
+            &dom0::cosmic_repo_conf(),
+        )?;
+        Ok(())
+    }
+
     fn install_packages(&self) -> anyhow::Result<()> {
         let root = self.rootfs();
         let root_s = Self::s(&root);
@@ -301,6 +349,7 @@ impl<'a> Builder<'a> {
             required.len(),
             optional.len()
         ));
+        self.install_repositories()?;
 
         // pkg needs DNS and /dev inside the chroot (as release/tools/vmimage.subr).
         if Path::new("/etc/resolv.conf").is_file() {
@@ -558,6 +607,9 @@ impl<'a> Builder<'a> {
             hostname: "juanitos-live".into(),
             gui: p.packages.gui,
             serial_console: true,
+            // The live medium runs the installer on the text console; the
+            // KMS driver is chosen for the installed system.
+            gpu_module: None,
         };
         self.fs
             .write(&root.join("etc/fstab"), &dom0::live_fstab(&p.label))?;
@@ -1140,6 +1192,73 @@ mod tests {
         assert!(!calls.iter().any(|c| c.contains("clean -ay")));
         // devfs is unmounted whatever happened inside the chroot.
         assert_eq!(calls.last().unwrap(), "umount /work/rootfs/dev");
+    }
+
+    #[test]
+    fn repositories_follow_the_profile() {
+        // Default profile: FreeBSD's quarterly branch, no local repository:
+        // nothing to write.
+        let s = Scratch::new("repos");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        real_builder(&m, &profile, &s.0)
+            .install_repositories()
+            .unwrap();
+        assert!(!s.0.join("work/rootfs").exists());
+
+        // `latest` is written as an override of /etc/pkg/FreeBSD.conf.
+        let mut profile = Profile::default();
+        profile.packages.repo = "latest".into();
+        profile.packages.local_repo = Some("cosmic/repo".into());
+        let b = real_builder(&m, &profile, &s.0);
+        b.install_repositories().unwrap();
+        let conf = std::fs::read_to_string(
+            s.0.join("work/rootfs")
+                .join(dom0::FREEBSD_REPO_CONF.trim_start_matches('/')),
+        )
+        .unwrap();
+        assert!(conf.contains("/latest\""));
+        // No catalogue in the local repository yet: skipped with a warning.
+        assert!(!s
+            .0
+            .join("work/rootfs")
+            .join(dom0::COSMIC_REPO_CONF.trim_start_matches('/'))
+            .exists());
+
+        // Stage 2: no build VM output, but the running dom0 was installed
+        // with the repository; it is handed on.
+        let installed =
+            s.0.join("root")
+                .join(dom0::COSMIC_REPO_DIR.trim_start_matches('/'));
+        s.put(
+            "root/usr/local/share/juanitos/pkg/packagesite.pkg",
+            b"catalogue",
+        );
+        s.put(
+            "root/usr/local/share/juanitos/pkg/cosmic-term-1.10.0.pkg",
+            b"pkg",
+        );
+        assert!(installed.join("packagesite.pkg").is_file());
+        b.install_repositories().unwrap();
+        let root = s.0.join("work/rootfs");
+        let shipped = root.join(dom0::COSMIC_REPO_DIR.trim_start_matches('/'));
+        assert!(shipped.join("cosmic-term-1.10.0.pkg").is_file());
+
+        // With a catalogue in the profile's directory, that one wins.
+        s.put("repo/cosmic/repo/packagesite.pkg", b"catalogue");
+        s.put("repo/cosmic/repo/cosmic-comp-1.10.0.pkg", b"pkg");
+        b.install_repositories().unwrap();
+        assert!(shipped.join("cosmic-comp-1.10.0.pkg").is_file());
+        let conf =
+            std::fs::read_to_string(root.join(dom0::COSMIC_REPO_CONF.trim_start_matches('/')))
+                .unwrap();
+        assert!(conf.contains("file:///usr/local/share/juanitos/pkg"));
+
+        // A bad branch is refused before anything runs.
+        profile.packages.repo = "nightly".into();
+        assert!(real_builder(&m, &profile, &s.0)
+            .install_repositories()
+            .is_err());
     }
 
     #[test]

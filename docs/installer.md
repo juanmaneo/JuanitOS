@@ -104,9 +104,11 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
    datasets as `bsdinstall zfsboot` makes them, `bootfs=zroot/ROOT/default`,
    and `zroot/juanitos/{templates,qubes}` via the same code as `jos init`.
 5. `tar -xpf juanitos-dom0.txz -C /mnt --unlink` after verifying the sha256.
-6. `rc.conf` (`zfs_enable`, `jos_enable`, `seatd`, `dbus`,
-   `cosmic_greeter`), `loader.conf`, `fstab` (swap + ESP at `/boot/efi`),
-   `zpool.cache`, `jos.toml`.
+6. `rc.conf` (`zfs_enable`, `jos_enable`, `seatd`, `dbus`, `jos_login`;
+   `kld_list` gains the `drm-kmod` driver for the GPU `pciconf` reports),
+   `loader.conf`, `fstab` (swap + ESP at `/boot/efi`), `zpool.cache`,
+   `jos.toml`. With the desktop, `/etc/ttys` hands `ttyv1` to the `ly`
+   login screen (gettytab entry `Ly`), see `docs/relibc-cosmic.md`.
 7. ESP: `EFI/FREEBSD/LOADER.EFI` from `/boot/loader.efi`, and
    `EFI/BOOT/BOOTX64.EFI` from `/boot/jos-boot.efi` (graphical boot, see
    `docs/boot-splash.md`) or from `loader.efi` when the release has no

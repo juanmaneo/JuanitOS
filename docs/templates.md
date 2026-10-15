@@ -163,12 +163,20 @@ jos run rx uname -a          # Redox redox 0.5.12 ... x86_64 Redox
 jos run rx ping -c 1 10.0.2.2
 ```
 
-What does not work: a display. bhyve's `fbuf` device trips an assertion
-in bhyve's PCI BAR registration (`pci_emul.c`, `modify_bar_registration`)
-when Redox's `pcid` programs it, which kills the VM; so Redox qubes are
-console-only until that is fixed on one side or the other, and the
-`desktop` image is not offered as a recipe. Redox's 0.9.0 release hangs
-in its NVMe driver on bhyve, hence the nightly.
+What does not work: a display. With bhyve's `fbuf` device the VM dies as
+soon as Redox's `pcid` reaches it (`Assertion failed: (error == 0),
+function modify_bar_registration`, `pci_emul.c`). The cause is on the
+Redox side: `pcid` sizes BARs through `pci_types::EndpointHeader::bar()`
+without disabling memory decoding first, so the 32 MiB framebuffer BAR
+transiently decodes `0xfe000000-0xffffffff` over the HPET, which bhyve
+refuses and asserts on. Every other guest (and the PCI specification)
+clears the decode bits before sizing. `tools/dev/redox-fbuf/` has the
+reproducer (`repro.sh run` aborts, `control` boots, `trace` shows the
+config-space writes with an instrumented bhyve), the captured trace and
+the report to send upstream. Until `pci_types`/`pcid` are fixed, Redox
+qubes are console-only and the `desktop` image is not offered as a
+recipe. Redox's 0.9.0 release hangs in its NVMe driver on bhyve, hence
+the nightly.
 
 ## Updating a template
 

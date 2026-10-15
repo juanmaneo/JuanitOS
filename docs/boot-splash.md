@@ -85,10 +85,12 @@ Hooks:
 | `jos-splash`          | `FILESYSTEMS`   | starts the daemon (`--reached storage`) |
 | `jos-splash-network`  | `NETWORKING`    | `stage network`                         |
 | `jos`                 | `LOGIN`         | `status Starting qubes`, `stage qubes`  |
-| `jos-splash-finish`   | `LOGIN jos`, before `cosmic_greeter` | `stage desktop`, then `finish` if the greeter is enabled, else `finish --console` |
+| `jos-login`           | `LOGIN seatd dbus` | nothing; makes `/var/run/user` for the desktop sessions |
+| `jos-splash-finish`   | `LOGIN jos jos-login` | `stage desktop`, then `finish` if the login screen is enabled and installed, else `finish --console` |
 
 `finish` (keep) lights every icon and leaves the frame on screen; the
-compositor then takes the display. The installed system enables all of
+login screen (`ly` on `ttyv1`, `docs/relibc-cosmic.md`) then switches
+to its terminal and the compositor takes the display after login. The installed system enables all of
 this with `jos_splash_enable="YES"` and `rc_startmsgs="NO"` in `rc.conf`.
 The live medium does the same but always ends on the console, where the
 installer runs.

@@ -248,6 +248,23 @@ cargo run -p jos-splash -- render preview.png --stage network --status "Starting
 cargo run -p jos-install -- --screenshots /tmp/installer
 ```
 
+Work that needs a FreeBSD userland (building the COSMIC packages, bhyve
+experiments with guests) runs in a stock FreeBSD VM under QEMU/KVM:
+
+```sh
+tools/fetch-freebsd.sh vm                       # the official 15.1 VM image
+tools/dev/freebsd-vm.sh create freebsd 80       # raw disk, serial console on a socket
+VM_NESTED=1 tools/dev/freebsd-vm.sh start freebsd
+tools/dev/freebsd-vm.sh firstboot freebsd       # installs the ssh key over the serial console
+tools/dev/freebsd-vm.sh ssh freebsd uname -a
+tools/dev/freebsd-vm.sh ssh freebsd ./cosmic-build.sh all   # tools/dev/cosmic-build.sh, copied over
+```
+
+Everything it makes lives under `target/work` (reclaimed by `cargo
+clean`). `tools/dev/cosmic-build.sh` builds COSMIC from `pop-os/cosmic-epoch`
+and packages it (`docs/relibc-cosmic.md`); `tools/dev/redox-fbuf/`
+reproduces the Redox display problem (`docs/templates.md`).
+
 ## Status
 
 v0.1 scaffold targeting FreeBSD 15.1-RELEASE: configuration, storage
@@ -255,7 +272,8 @@ provisioning, bhyve command generation, networking plumbing, per-qube
 supervisor (restart on reboot, pidfiles and logs under
 `/var/run/juanitos`), host checks, release builder, the graphical
 installer, guest templates from the distributions' images (Debian 13 +
-Docker, FreeBSD 15 + Podman, Redox), `jos run` through a virtio-console
+Docker, FreeBSD 15 + Podman, Redox), the COSMIC desktop built from
+source for the dom0 (packaged, with a login screen), `jos run` through a virtio-console
 agent channel (serial console as the fallback), the per-qube virtio-9p
 share with its guest agent (own hostname per clone), `jos copy` on top
 of it and the request broker (`jos-copy` in a qube, `jos policy`, `jos

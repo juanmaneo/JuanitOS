@@ -1,0 +1,82 @@
+# bhyve stderr with tools/dev/redox-fbuf/instrument-bhyve.pl applied (BHYVE_BAR_DEBUG=1), lines about fbuf@pci.0.4.0,
+# prefixed with their line number. FreeBSD 15.1-RELEASE bhyve, edk2-bhyve g202508_3,
+# Redox server nightly 2026-10-14 (build 553). Lines 27-143: the UEFI firmware sizes the BARs with
+# the command register cleared (coff=0x4 val=0x0) and assigns them. Line 170 on: Redox. Line 235 on:
+# pcid sizes the BARs with decoding enabled (cmd=0x17); the 32 MB BAR1 transiently lands on
+# 0xfe000000 and overlaps the HPET, bhyve refuses the registration and asserts.
+27  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x0
+28  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xffffffff
+29  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xc2006000
+30  cfg-debug: fbuf@pci.0.4.0 write coff=0x14 bytes=4 val=0xffffffff
+31  cfg-debug: fbuf@pci.0.4.0 write coff=0x14 bytes=4 val=0xc0000000
+32  cfg-debug: fbuf@pci.0.4.0 write coff=0x18 bytes=4 val=0xffffffff
+33  cfg-debug: fbuf@pci.0.4.0 write coff=0x18 bytes=4 val=0x0
+34  cfg-debug: fbuf@pci.0.4.0 write coff=0x1c bytes=4 val=0xffffffff
+35  cfg-debug: fbuf@pci.0.4.0 write coff=0x1c bytes=4 val=0x0
+36  cfg-debug: fbuf@pci.0.4.0 write coff=0x20 bytes=4 val=0xffffffff
+37  cfg-debug: fbuf@pci.0.4.0 write coff=0x20 bytes=4 val=0x0
+38  cfg-debug: fbuf@pci.0.4.0 write coff=0x24 bytes=4 val=0xffffffff
+39  cfg-debug: fbuf@pci.0.4.0 write coff=0x24 bytes=4 val=0x0
+79  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x0
+80  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xffffffff
+81  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xc2006000
+82  cfg-debug: fbuf@pci.0.4.0 write coff=0x14 bytes=4 val=0xffffffff
+83  cfg-debug: fbuf@pci.0.4.0 write coff=0x14 bytes=4 val=0xc0000000
+84  cfg-debug: fbuf@pci.0.4.0 write coff=0x18 bytes=4 val=0xffffffff
+85  cfg-debug: fbuf@pci.0.4.0 write coff=0x18 bytes=4 val=0x0
+86  cfg-debug: fbuf@pci.0.4.0 write coff=0x1c bytes=4 val=0xffffffff
+87  cfg-debug: fbuf@pci.0.4.0 write coff=0x1c bytes=4 val=0x0
+88  cfg-debug: fbuf@pci.0.4.0 write coff=0x20 bytes=4 val=0xffffffff
+89  cfg-debug: fbuf@pci.0.4.0 write coff=0x20 bytes=4 val=0x0
+90  cfg-debug: fbuf@pci.0.4.0 write coff=0x24 bytes=4 val=0xffffffff
+91  cfg-debug: fbuf@pci.0.4.0 write coff=0x24 bytes=4 val=0x0
+131  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x0
+132  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xffffffff
+133  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xc2006000
+134  cfg-debug: fbuf@pci.0.4.0 write coff=0x14 bytes=4 val=0xffffffff
+135  cfg-debug: fbuf@pci.0.4.0 write coff=0x14 bytes=4 val=0xc0000000
+136  cfg-debug: fbuf@pci.0.4.0 write coff=0x18 bytes=4 val=0xffffffff
+137  cfg-debug: fbuf@pci.0.4.0 write coff=0x18 bytes=4 val=0x0
+138  cfg-debug: fbuf@pci.0.4.0 write coff=0x1c bytes=4 val=0xffffffff
+139  cfg-debug: fbuf@pci.0.4.0 write coff=0x1c bytes=4 val=0x0
+140  cfg-debug: fbuf@pci.0.4.0 write coff=0x20 bytes=4 val=0xffffffff
+141  cfg-debug: fbuf@pci.0.4.0 write coff=0x20 bytes=4 val=0x0
+142  cfg-debug: fbuf@pci.0.4.0 write coff=0x24 bytes=4 val=0xffffffff
+143  cfg-debug: fbuf@pci.0.4.0 write coff=0x24 bytes=4 val=0x0
+157  cfg-debug: fbuf@pci.0.4.0 write coff=0x14 bytes=4 val=0xc0000000
+159  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xc2002000
+170  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x27
+171  bar-debug: fbuf@pci.0.4.0 idx=0 register base=0xc2002000 size=0x80 cmd=0x27 error=0
+172  bar-debug: fbuf@pci.0.4.0 idx=1 register base=0xc0000000 size=0x2000000 cmd=0x27 error=0
+173  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x0
+174  bar-debug: fbuf@pci.0.4.0 idx=0 unregister base=0xc2002000 size=0x80 cmd=0x0 error=0
+175  bar-debug: fbuf@pci.0.4.0 idx=1 unregister base=0xc0000000 size=0x2000000 cmd=0x0 error=0
+176  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x10
+182  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x10
+188  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x17
+189  bar-debug: fbuf@pci.0.4.0 idx=0 register base=0xc2002000 size=0x80 cmd=0x17 error=0
+190  bar-debug: fbuf@pci.0.4.0 idx=1 register base=0xc0000000 size=0x2000000 cmd=0x17 error=0
+194  cfg-debug: fbuf@pci.0.4.0 write coff=0x4 bytes=2 val=0x17
+235  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xffffffff
+236  bar-debug: fbuf@pci.0.4.0 idx=0 unregister base=0xc2002000 size=0x80 cmd=0x17 error=0
+237  bar-debug: fbuf@pci.0.4.0 idx=0 register base=0xffffff80 size=0x80 cmd=0x17 error=0
+238  cfg-debug: fbuf@pci.0.4.0 write coff=0x10 bytes=4 val=0xc2002000
+239  bar-debug: fbuf@pci.0.4.0 idx=0 unregister base=0xffffff80 size=0x80 cmd=0x17 error=0
+240  bar-debug: fbuf@pci.0.4.0 idx=0 register base=0xc2002000 size=0x80 cmd=0x17 error=0
+241  cfg-debug: fbuf@pci.0.4.0 write coff=0x14 bytes=4 val=0xffffffff
+242  bar-debug: fbuf@pci.0.4.0 idx=1 unregister base=0xc0000000 size=0x2000000 cmd=0x17 error=0
+243  overlap detected: new fe000000:ffffffff, tree fed00000:fed003ff, 'fbuf@pci.0.4.0' claims region already claimed for 'kern-hpet-mmio'
+244  mem-debug: register fbuf@pci.0.4.0 [0xfe000000,0xffffffff] overlaps an existing range
+245  bar-debug: fbuf@pci.0.4.0 idx=1 register base=0xfe000000 size=0x2000000 cmd=0x17 error=17
+246  Assertion failed: (error == 0), function modify_bar_registration, file /usr/src/usr.sbin/bhyve/pci_emul.c, line 713.
+247  fbuf frame buffer base: 0xb69bfe00000 [sz 33554432]
+
+# Redox serial console, last lines before bhyve aborted
+2026-10-15T18-15-26.126Z [@ps2d::vm:77 INFO] No vmmouse support
+2026-10-15T18-15-26.118Z [@acpid:32 INFO] acpid start
+2026-10-15T18-15-26.167Z [@acpid:116 INFO] acpid ready
+2026-10-15T18-15-26.171Z [@hwd:25 INFO] using ACPI backend
+2026-10-15T18-15-26.256Z [@pcid:250 INFO] PCI SG-BS:DV.F VEND:DEVI CL.SC.IN.RV
+2026-10-15T18-15-26.276Z [@pcid:347 INFO] PCI 0000:00:00.0 1275:1275 06.00.00.00 HostBridge
+2026-10-15T18-15-26.305Z [@pcid:347 INFO] PCI 0000:00:03.0 FB5D:0A0A 01.08.02.00 NvmeController
+2026-10-15T18-15-26.329Z [@pcid:347 INFO] PCI 0000:00:04.0 FB5D:40FB 03.00.00.00 VgaCompatibleController
