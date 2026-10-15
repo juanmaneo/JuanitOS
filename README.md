@@ -352,9 +352,17 @@ point where it needs a seat and a KMS device; neither QEMU nor bhyve
 gives a FreeBSD guest one, so the first COSMIC session has to be on real
 hardware.
 
+The Redox display problem was traced with an instrumented bhyve: Redox's
+`pcid` sizes PCI BARs through `pci_types` without disabling memory
+decoding first (every other OS, and the PCI specification, do), so the
+32 MiB framebuffer BAR of bhyve's `fbuf` transiently decodes over the
+HPET and bhyve asserts. It is a Redox/`pci_types` bug; the reproducer,
+the trace and the upstream report are in `tools/dev/redox-fbuf/`
+(`docs/templates.md`).
+
 Not yet done: passthrough on real hardware (the nested run above proves
 the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
 Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
-but has not been booted), a display for Redox qubes (bhyve's `fbuf`
-asserts when Redox programs it), and a COSMIC session on real hardware
-(the packages install; the desktop has not been seen running yet).
+but has not been booted), a display for Redox qubes (until `pci_types`
+is fixed upstream), and a COSMIC session on real hardware (the packages
+install; the desktop has not been seen running yet).
