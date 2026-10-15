@@ -8,7 +8,9 @@
 #   tools/dev/freebsd-vm.sh start  [NAME]             boot in the background; serial on a unix socket, ssh on :2222
 #   tools/dev/freebsd-vm.sh stop   [NAME]             ACPI power button, then wait
 #   tools/dev/freebsd-vm.sh ssh    [NAME] [CMD...]    ssh root@localhost -p 2222
+#   tools/dev/freebsd-vm.sh scp    [NAME] ARGS...     scp with the key and port (remote side as root@127.0.0.1:path)
 #   tools/dev/freebsd-vm.sh status [NAME]
+#   tools/dev/freebsd-vm.sh trim   [NAME]             zpool trim inside; the sparse disk gives the space back to the host
 #
 # The serial console is at $JOS_WORK/vm/NAME/serial.sock (talk to it with
 # tools/dev/serial.py). A QEMU monitor is at monitor.sock. `create` makes
@@ -81,7 +83,7 @@ start)
 		-machine q35,accel=kvm -cpu "$cpu" -smp "${VM_CPUS:-8}" -m "${VM_MEM_MB:-16384}" \
 		-drive if=pflash,format=raw,readonly=on,file="$ovmf_code" \
 		-drive if=pflash,format=raw,file="$dir/ovmf_vars.fd" \
-		-drive file="$disk",if=virtio,format=raw,cache=unsafe \
+		-drive file="$disk",if=virtio,format=raw,cache=unsafe,discard=unmap,detect-zeroes=unmap \
 		-virtfs "local,path=$here,mount_tag=juanitos,security_model=mapped-xattr,id=juanitos" \
 		-nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:$ssh_port-:22" \
 		-display none -vga none \
@@ -124,6 +126,13 @@ status)
 	else
 		echo "stopped"
 	fi
+	;;
+trim)
+	# The disk is attached with discard=unmap: blocks ZFS trims become
+	# holes in disk.raw. Builds leave tens of GB behind otherwise.
+	before=$(du -h "$disk" | cut -f1)
+	"$0" ssh "$name" 'zpool set autotrim=on zroot; zpool trim -w zroot'
+	echo "disk.raw: $before -> $(du -h "$disk" | cut -f1)"
 	;;
 *)
 	sed -n 2,21p "$0"; exit 2 ;;

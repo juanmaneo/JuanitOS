@@ -336,9 +336,25 @@ sources, qubes running alongside: 4 min 49 s, `stage = 2`, the stage-1
 file list plus the 13 new source files, after fixing a source copy that
 had shipped that dom0's UEFI build output and a dangling `vendor` link.
 
+COSMIC is built from source for the dom0, since FreeBSD has no packages
+for it: `tools/dev/cosmic-build.sh` compiles `pop-os/cosmic-epoch`
+(`epoch-1.10.0`) in the FreeBSD build VM with the systemd/logind
+features off and a handful of portability patches
+(`tools/dev/cosmic-patches/`: Linux-only abstract sockets, pidfd, bluez,
+the stale BSD paths in libcosmic's iced fork, FreeBSD's renamed
+`pw_init`), and packages every component for `pkg`. The compositor,
+session, panel, applets, launcher, settings, terminal, files, editor and
+the rest install into the dom0 root from that repository, which the
+installed system keeps; `ly` is the login screen on `ttyv1` and the
+installer picks the `drm-kmod` driver for the GPU it finds
+(`docs/relibc-cosmic.md`). The compositor starts on FreeBSD up to the
+point where it needs a seat and a KMS device; neither QEMU nor bhyve
+gives a FreeBSD guest one, so the first COSMIC session has to be on real
+hardware.
+
 Not yet done: passthrough on real hardware (the nested run above proves
 the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
 Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
 but has not been booted), a display for Redox qubes (bhyve's `fbuf`
-asserts when Redox programs it), and COSMIC (no FreeBSD packages yet:
-the dom0 falls back to the console).
+asserts when Redox programs it), and a COSMIC session on real hardware
+(the packages install; the desktop has not been seen running yet).

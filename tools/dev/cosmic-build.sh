@@ -58,7 +58,7 @@ features() {
 	cosmic-comp) echo "--no-default-features" ;;
 	cosmic-session) echo "--no-default-features --features autostart" ;;
 	cosmic-notifications | xdg-desktop-portal-cosmic) echo "--no-default-features" ;;
-	cosmic-files) echo "--no-default-features --features bzip2,dbus-config,desktop,gvfs,lzma-rust2,notify,wayland,wgpu" ;;
+	# cosmic-files' `io-uring` default is harmless here: compio only uses it on Linux.
 	*) echo "" ;;
 	esac
 }
@@ -126,9 +126,39 @@ log() { printf '==> %s\n' "$*"; }
 
 setup_env() {
 	mkdir -p "$work/gnubin" "$work/target" "$work/stage" "$work/meta" "$work/repo" "$work/logs"
-	[ -x "$work/gnubin/install" ] || ln -sf /usr/local/bin/ginstall "$work/gnubin/install"
+	# GNU install(1), with `install ... /dev/stdin ...` spooled to a file
+	# first: coreutils 9 refuses a pipe there ("replaced while being
+	# copied") and xdg-desktop-portal-cosmic's recipe installs from sed.
+	cat > "$work/gnubin/install" <<'EOF'
+#!/bin/sh
+spool=""
+for a in "$@"; do
+	if [ "$a" = /dev/stdin ]; then
+		spool=$(mktemp -t install) && cat > "$spool"
+		break
+	fi
+done
+if [ -n "$spool" ]; then
+	n=$#
+	i=0
+	while [ "$i" -lt "$n" ]; do
+		a=$1
+		shift
+		[ "$a" = /dev/stdin ] && a=$spool
+		set -- "$@" "$a"
+		i=$((i + 1))
+	done
+	/usr/local/bin/ginstall "$@"
+	rc=$?
+	rm -f "$spool"
+	exit "$rc"
+fi
+exec /usr/local/bin/ginstall "$@"
+EOF
+	chmod +x "$work/gnubin/install"
 	[ -x "$work/gnubin/sed" ] || ln -sf /usr/local/bin/gsed "$work/gnubin/sed"
 	[ -x "$work/gnubin/xargs" ] || ln -sf /usr/local/bin/gxargs "$work/gnubin/xargs"
+	[ -x "$work/gnubin/ln" ] || ln -sf /usr/local/bin/gln "$work/gnubin/ln"
 	PATH="$work/gnubin:$PATH"
 	export PATH
 	CARGO_TARGET_DIR="$work/target"
@@ -140,6 +170,9 @@ setup_env() {
 	# LIBRARY_PATH and cargo does not fingerprint it, unlike RUSTFLAGS.
 	LIBRARY_PATH=/usr/local/lib
 	export LIBRARY_PATH
+	# turbojpeg-sys (cosmic-viewer) would otherwise compile its own libjpeg-turbo.
+	TURBOJPEG_SOURCE=pkg-config
+	export TURBOJPEG_SOURCE
 	# vergen-style build scripts want a git hash; keep them happy outside git.
 	export VERGEN_GIT_SHA=${VERGEN_GIT_SHA:-$tag}
 }
@@ -152,7 +185,7 @@ cmd_deps() {
 		fontconfig freetype2 expat dbus gettext-runtime desktop-file-utils \
 		hicolor-icon-theme xdg-desktop-portal xdg-utils libxcb xcb-util xcb-util-wm \
 		pulseaudio pipewire gstreamer1 gstreamer1-plugins gstreamer1-plugins-good \
-		glib gtk3 llvm bash gmake python3 libglvnd ly
+		glib gtk3 llvm bash gmake python3 libglvnd libjpeg-turbo ly
 }
 
 cmd_fetch() {
@@ -220,6 +253,12 @@ cmd_patch() {
 	for d in "$HOME"/.cargo/registry/src/*/pipewire-sys-0.10.*; do
 		[ -f "$d/build.rs" ] && apply_patch "$d" "$patches/pipewire-sys-0.10-freebsd-allowlist.patch"
 	done
+	# xdg-desktop-portal-cosmic takes pipewire-rs from git instead.
+	for d in "$HOME"/.cargo/git/checkouts/pipewire-rs-*/*; do
+		[ -f "$d/pipewire/src/lib.rs" ] || continue
+		apply_patch "$d/pipewire" "$patches/pipewire-0.10-freebsd-init.patch"
+		apply_patch "$d/pipewire-sys" "$patches/pipewire-sys-0.10-freebsd-allowlist.patch"
+	done
 	for d in "$HOME"/.cargo/git/checkouts/libcosmic-*/*; do
 		[ -f "$d/iced/winit/src/conversion.rs" ] || continue
 		if perl "$patches/libcosmic-freebsd-winit.pl" "$d" | grep -v '^nothing to do'; then
@@ -235,9 +274,27 @@ cmd_patch() {
 			log "patched $f: pop-launcher paths under /usr/local"
 		fi
 	done
+	# libc 0.2.190 dropped FreeBSD's NOTE_PCTRLMASK (still in sys/event.h)
+	# and nix 0.31 lists it in its kevent flags; cosmic-osk pulls both.
+	for d in "$HOME"/.cargo/registry/src/*/nix-0.3*; do
+		[ -f "$d/src/sys/event.rs" ] || continue
+		if grep -q '^        NOTE_PCTRLMASK;$' "$d/src/sys/event.rs"; then
+			perl -0pi -e 's/        #\[allow\(missing_docs\)\]\n        NOTE_PCTRLMASK;\n//' "$d/src/sys/event.rs"
+			log "patched $(basename "$d"): no NOTE_PCTRLMASK in libc 0.2.190"
+		fi
+	done
+	# ddc-hi (display brightness, cosmic-settings-daemon) enables its i2c
+	# backend on every unix but only depends on ddc-i2c on Linux.
+	for d in "$HOME"/.cargo/registry/src/*/ddc-hi-0.*; do
+		[ -f "$d/build.rs" ] || continue
+		if grep -q 'var("CARGO_CFG_UNIX").is_ok()' "$d/build.rs"; then
+			sed -i -e 's/var("CARGO_CFG_UNIX").is_ok()/var("CARGO_CFG_TARGET_OS") == Ok("linux".into())/' "$d/build.rs"
+			log "patched $(basename "$d"): i2c backend is Linux-only"
+		fi
+	done
 	# cargo trusts registry and git sources not to change: forget what it
 	# built from the patched crates so they are compiled again.
-	for crate in fontdb libdisplay-info-sys pipewire pipewire-sys iced_core iced_winit pop-launcher pop-launcher-plugins cosmic-applets; do
+	for crate in fontdb libdisplay-info-sys pipewire pipewire-sys iced_core iced_winit pop-launcher pop-launcher-plugins cosmic-applets nix ddc-hi; do
 		rm -rf "$work/target/release/.fingerprint/$crate-"*
 	done
 }
@@ -347,9 +404,11 @@ package_one() {
 	stage="$work/stage/$name"
 	[ -f "$work/logs/$name.built" ] || { echo "   $name: not built, skipped"; return 0; }
 	log "Packaging $name"
-	rm -rf "$stage" "$work/repo/$name-"*.pkg
+	rm -rf "$stage" "$work/repo/$name-$version.pkg"
 	mkdir -p "$stage"
 	cd "$dir"
+	# pop-launcher's recipes read target/release in the source tree.
+	[ -e target ] || ln -s "$work/target" target
 	# shellcheck disable=SC2046
 	if [ -f justfile ] || [ -f Justfile ]; then
 		just $(just_vars "$name" "$stage") install

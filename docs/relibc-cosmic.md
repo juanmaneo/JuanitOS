@@ -91,19 +91,38 @@ tools/dev/freebsd-vm.sh scp freebsd -r root@127.0.0.1:/root/cosmic/repo target/w
 ```
 
 It clones `cosmic-epoch` with its submodules (minus the git-lfs
-wallpapers), applies the FreeBSD fixes the old port carried (`/sys`
-is not sysfs; fontdb's `fonts.conf` lives under `/usr/local/etc`) plus
-one for the `libdisplay-info` 0.4 bindings cap, then builds every
-component with `--release` into one shared target directory. Components
-whose default features are Linux-only get them switched off:
-`cosmic-comp` and `cosmic-session` (`systemd`, `logind`),
-`cosmic-notifications` and `xdg-desktop-portal-cosmic` (journald),
-`cosmic-files` (`io-uring`). `cosmic-greeter` (greetd), `cosmic-store`
-(flatpak, systemd scopes) and the wallpapers are not built. Each
-component is staged with its own `just install` recipe (with GNU
-`install`/`sed` on the path, which the recipes assume) and turned into a
-package named after it, version `1.10.0`, origin `juanitos/<name>`;
-`pkg repo` writes the catalogue.
+wallpapers), applies the portability fixes, then builds every component
+with `--release` into one shared target directory. Components whose
+default features are Linux-only get them switched off: `cosmic-comp` and
+`cosmic-session` (`systemd`, `logind`), `cosmic-notifications` and
+`xdg-desktop-portal-cosmic` (journald). `cosmic-greeter` (greetd),
+`cosmic-store` (flatpak, systemd scopes) and the wallpapers are not
+built. Each component is staged with its own `just install` recipe (with
+GNU `install`/`sed`/`ln`/`xargs` on the path, which the recipes assume;
+`/usr/bin` in session scripts and desktop entries becomes
+`/usr/local/bin`) and turned into a package named after it, version
+`1.10.0`, origin `juanitos/<name>`; `pkg repo` writes the catalogue.
+
+The fixes (`tools/dev/cosmic-patches/`, applied by `cosmic-build.sh
+patch` to the checkout and to cargo's registry/git copies, which cargo
+does not verify after download):
+
+| Where | What |
+|-------|------|
+| `cosmic-comp` | `/sys` is not sysfs (`/compat/linux/sys`, as the old port did) |
+| `fontdb` | `fonts.conf` lives under `/usr/local/etc` |
+| `libdisplay-info-sys` | accept libdisplay-info 0.4 (FreeBSD ships 0.4.0; the 0.3 API is a subset) |
+| libcosmic (iced fork) | drop a stale BSD-only block with an old winit API, give the BSDs the Linux Wayland code paths; older pinned revisions gate everything Wayland on `target_os = "linux"` and are rewritten wholesale |
+| `cosmic-panel` | abstract unix sockets for the security context are Linux-only; a socket file under `XDG_RUNTIME_DIR` elsewhere |
+| `cosmic-applets` | the bluetooth applet (bluer) is Linux-only |
+| `pop-launcher` | pidfd is Linux-only (tokio's `Child::wait` instead); plugins and config under `/usr/local` |
+| `pipewire`, `pipewire-sys` | FreeBSD renames `pw_init` to `pipewire_init` (libc has a `pw_init`); the bindgen allowlist missed it |
+| `ddc-hi` | its i2c backend is only a dependency on Linux but was enabled on every unix |
+| `nix` 0.30/0.31 | libc 0.2.190 dropped FreeBSD's `NOTE_PCTRLMASK` |
+
+All 26 components of the tag build and package this way (2026-10-15,
+FreeBSD 15.1-RELEASE, rust 1.98.1, about 3 hours on 10 vCPUs for the
+first build; `target/` reaches 45 GB).
 
 `release/juanitos.toml` points `[packages] local_repo` at the copied
 repository and `repo = "latest"` at the package branch the VM built
@@ -127,11 +146,17 @@ makes `/var/run/user/<uid>` (the directory is created by
 `rc.d/jos-login`) and execs `start-cosmic`. `rc.d/jos-splash-finish`
 keeps the boot splash on the screen until ly switches to its terminal.
 
-What has been verified: the packages build and install into the dom0
-root. Running the compositor needs a KMS device, which neither the QEMU
-build VM nor bhyve provide to a FreeBSD guest (`drm-kmod` has no
-virtio-gpu driver), so the first COSMIC session has to be on real
-hardware — a stage-1 ISO on the StarBook is the planned test.
+What has been verified: the packages build, `jos-release rootfs` in the
+build VM installs the 23 of `dom0::GUI_PACKAGES` (the rest of the 26,
+`cosmic-viewer`, `cosmic-monitor`, `cosmic-player`, `cosmic-osk`,
+`cosmic-initial-setup`, stay in the shipped repository for `pkg
+install`) together with `ly`, `drm-kmod` and the X/Mesa run-time into
+the dom0 root, and `cosmic-comp` starts on FreeBSD up to "Failed to
+acquire session". Running the compositor needs a seat and a KMS device,
+which neither the QEMU build VM nor bhyve provide to a FreeBSD guest
+(`drm-kmod` has no virtio-gpu driver), so the first COSMIC session has
+to be on real hardware — a stage-1 ISO on the StarBook is the planned
+test.
 
 On the host COSMIC is the *management* UI only: the long-term plan is a
 `jos`-backed applet (qube list, start/stop, colour labels) and

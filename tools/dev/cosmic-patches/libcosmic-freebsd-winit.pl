@@ -52,9 +52,9 @@ $n += edit($settings,
 # in its build.rs) gate the whole Wayland side, cctk and the layer-shell
 # commands included, on target_os = "linux". Treat the BSDs as Linux in
 # every cfg of such a checkout; the theme-detection crate stays Linux-only.
-my $old = system("grep -rqs --include=*.rs 'all(feature = \"cctk\", target_os = \"linux\")' '$dir'") == 0;
+my $old = system("grep -rqs --include=*.rs wayland_platform '$dir'") != 0;
 if ($old) {
-    my @files = split /\n/, `find '$dir' -name '*.rs' -not -path '*/target/*' | xargs grep -l 'target_os = "linux"' 2>/dev/null`;
+    my @files = split /\n/, `find '$dir' \\( -name '*.rs' -o -name Cargo.toml \\) -not -path '*/target/*' | xargs grep -l 'target_os = "linux"' 2>/dev/null`;
     for my $f (@files) {
         $n += edit($f,
             qr/^(?!.*linux-theme-detection)(.*)target_os = "linux"(?!, target_os = "freebsd")/m => sub { "$1$bsd" },
