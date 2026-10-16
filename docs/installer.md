@@ -18,6 +18,12 @@ is what you get after installing. `jos-install` runs exactly those checks
 writes the report to `/usr/local/etc/juanitos/install-report.txt` on the
 target.
 
+The first check reads the `VT-x:` / `SVM:` line that the kernel prints to
+`/var/run/dmesg.boot`. bhyve needs EPT plus unrestricted guest on Intel
+(Nehalem, 2008, or later) and nested paging on AMD. A Core 2 therefore
+fails this check even though it has VT-x: the medium still boots and
+installs, but no qube will start.
+
 ## ISO layout
 
 ```text

@@ -68,6 +68,69 @@ pub fn parse_zpool_list(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Boot messages, where identcpu(9) lists the CPU's virtualisation features
+/// whether or not vmm is loaded.
+pub const DMESG_BOOT: &str = "/var/run/dmesg.boot";
+
+/// What bhyve needs from the CPU, judged from the `VT-x:` / `SVM:` line
+/// identcpu prints into `dmesg.boot`. vmx.c refuses to initialise without
+/// EPT and bhyve's UEFI (ROM) boot exits without unrestricted guest; svm.c
+/// requires nested paging. Pre-Nehalem Intel CPUs (Core 2) have VT-x but
+/// neither, so vmm cannot run any qube there even though VT-x is present.
+pub fn cpu_virt_check(dmesg: Option<&str>) -> Check {
+    const NAME: &str = "cpu virtualization";
+    let Some(dmesg) = dmesg else {
+        return Check::new(
+            NAME,
+            Status::Warn,
+            format!("could not read {DMESG_BOOT}; cannot tell whether the CPU supports bhyve"),
+        );
+    };
+    let line = dmesg.lines().map(str::trim).find_map(|l| {
+        l.strip_prefix("VT-x:")
+            .map(|r| ("VT-x", r))
+            .or_else(|| l.strip_prefix("SVM:").map(|r| ("SVM", r)))
+    });
+    let Some((kind, rest)) = line else {
+        return Check::new(
+            NAME,
+            Status::Fail,
+            "the CPU has neither Intel VT-x nor AMD-V (SVM); bhyve cannot run",
+        );
+    };
+    let rest = rest.trim();
+    if rest.starts_with("(disabled in BIOS)") {
+        return Check::new(
+            NAME,
+            Status::Fail,
+            format!("{kind} is disabled in the firmware; enable it in the BIOS/UEFI setup"),
+        );
+    }
+    let features: Vec<&str> = rest.split(',').map(str::trim).collect();
+    let required: &[(&str, &str)] = if kind == "VT-x" {
+        &[("EPT", "EPT"), ("UG", "unrestricted guest")]
+    } else {
+        &[("NP", "nested paging")]
+    };
+    let missing: Vec<&str> = required
+        .iter()
+        .filter(|(flag, _)| !features.contains(flag))
+        .map(|(_, what)| *what)
+        .collect();
+    if missing.is_empty() {
+        Check::new(NAME, Status::Ok, format!("{kind}: {rest}"))
+    } else {
+        Check::new(
+            NAME,
+            Status::Fail,
+            format!(
+                "{kind} lacks {}, which bhyve requires (Intel needs Nehalem/Core i 2008+); no qube can start",
+                missing.join(" and ")
+            ),
+        )
+    }
+}
+
 /// Kernel modules a dom0 needs. Checked by *module* name (`kldstat -q -m`,
 /// as rc.subr's `load_kld` does), which also finds modules compiled into
 /// GENERIC such as `if_tap` (part of `if_tuntap`), unlike the file names a
@@ -91,7 +154,9 @@ pub fn all_passed(checks: &[Check]) -> bool {
 /// the live medium *is* the dom0 that gets installed, passing here means
 /// the installed system will run qubes.
 pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
-    let mut checks = Vec::new();
+    let mut checks = vec![cpu_virt_check(
+        std::fs::read_to_string(DMESG_BOOT).ok().as_deref(),
+    )];
 
     // Kernel modules
     for &m in REQUIRED_MODULES {
@@ -265,6 +330,37 @@ mod tests {
         assert_eq!(parse_sysctl_value("hw.vmm.iommu.enable: 1\n"), "1");
         assert_eq!(parse_sysctl_value("0\n"), "0");
         assert_eq!(parse_sysctl_value(""), "");
+    }
+
+    #[test]
+    fn cpu_virtualization_from_dmesg() {
+        let check = |text: &str| cpu_virt_check(Some(text));
+        let intel_ok = "CPU: Intel(R) Core(TM) i7-8700\n  VT-x: PAT,HLT,MTF,PAUSE,EPT,UG,VPID\n";
+        assert_eq!(check(intel_ok).status, Status::Ok);
+        assert!(check(intel_ok).detail.contains("EPT,UG"));
+
+        let amd_ok = "  SVM: NP,NRIP,VClean,AFlush,NAsids=16\n";
+        assert_eq!(check(amd_ok).status, Status::Ok);
+
+        // Core 2 Duo: VT-x without EPT or unrestricted guest.
+        let core2 = check("  VT-x: HLT,PAUSE\n");
+        assert_eq!(core2.status, Status::Fail);
+        assert!(core2.detail.contains("EPT and unrestricted guest"));
+        let no_ug = check("  VT-x: PAT,HLT,MTF,PAUSE,EPT,VPID\n");
+        assert_eq!(no_ug.status, Status::Fail);
+        assert!(no_ug.detail.contains("lacks unrestricted guest,"));
+        let no_np = check("  SVM: NRIP\n");
+        assert!(no_np.detail.contains("nested paging"));
+
+        let locked = check("  VT-x: (disabled in BIOS) HLT,PAUSE\n");
+        assert_eq!(locked.status, Status::Fail);
+        assert!(locked.detail.contains("disabled in the firmware"));
+
+        let none = check("CPU: Intel(R) Atom(TM)\n");
+        assert_eq!(none.status, Status::Fail);
+        assert!(none.detail.contains("neither"));
+
+        assert_eq!(cpu_virt_check(None).status, Status::Warn);
     }
 
     #[test]
