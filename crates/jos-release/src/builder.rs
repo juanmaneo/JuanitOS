@@ -17,6 +17,12 @@ use juanitos_core::sys::Runner;
 use juanitos_core::Error;
 
 use crate::profile::Profile;
+use crate::ventoy;
+
+/// FreeBSD source set, fetched only to build kernel modules.
+pub const SRC_SET: &str = "src.txz";
+/// Ventoy's GEOM class, shipped on the live ISO.
+pub const VENTOY_KO: &str = "geom_ventoy.ko";
 
 pub struct Builder<'a> {
     pub runner: &'a dyn Runner,
@@ -617,10 +623,17 @@ impl<'a> Builder<'a> {
             &root.join("etc/rc.conf"),
             &dom0::rc_conf(Flavor::Live, &opts),
         )?;
-        self.fs.write(
-            &root.join("boot/loader.conf"),
-            &dom0::loader_conf(Flavor::Live, &opts),
-        )?;
+        let mut loader_conf = dom0::loader_conf(Flavor::Live, &opts);
+        match self.ventoy_module() {
+            Ok(true) => loader_conf.push_str(&ventoy::loader_conf_lines()),
+            Ok(false) => {}
+            Err(e) => println!(
+                "   warning: geom_ventoy.ko not built ({e:#}); \
+                 the ISO needs Ventoy >= 1.1.08 or a dd-written stick"
+            ),
+        }
+        self.fs
+            .write(&root.join("boot/loader.conf"), &loader_conf)?;
         self.fs
             .write_executable(&root.join("etc/rc.local"), &dom0::live_rc_local())?;
 
@@ -685,6 +698,78 @@ impl<'a> Builder<'a> {
 }
 
 impl Builder<'_> {
+    /// FreeBSD kernel sources for building modules: the running system's
+    /// `/usr/src/sys` when it matches, else `src.txz` of the profile's
+    /// release (verified against its MANIFEST), extracted under the work
+    /// directory.
+    fn kernel_sources(&self) -> anyhow::Result<PathBuf> {
+        let installed = self.installed_root.join("usr/src/sys");
+        if installed.join("conf/kmod.mk").is_file() {
+            return Ok(installed);
+        }
+        let dir = self.dist_dir();
+        let src = dir.join(SRC_SET);
+        if !src.is_file() {
+            self.fs.mkdir_p(&dir)?;
+            if !dir.join("MANIFEST").is_file() {
+                self.download(&self.profile.dist_url("MANIFEST"), &dir.join("MANIFEST"))?;
+            }
+            self.download(&self.profile.dist_url(SRC_SET), &src)?;
+        }
+        if !self.fs.dry_run {
+            let manifest = parse_freebsd_manifest(&std::fs::read_to_string(dir.join("MANIFEST"))?);
+            let entry = manifest
+                .iter()
+                .find(|e| e.file == SRC_SET)
+                .ok_or_else(|| anyhow!("{SRC_SET} not listed in FreeBSD MANIFEST"))?;
+            DistManifest::verify_sha256(&src, &entry.sha256)?;
+        }
+        let out = self.work.join("src");
+        let sys = out.join("usr/src/sys");
+        if !sys.join("conf/kmod.mk").is_file() {
+            self.fs.mkdir_p(&out)?;
+            self.runner.run_checked(
+                "tar",
+                &["-xf", &Self::s(&src), "-C", &Self::s(&out), "usr/src/sys"],
+            )?;
+        }
+        Ok(sys)
+    }
+
+    /// Build `freebsd/geom_ventoy` against the release's kernel sources
+    /// and put it in the live root (see [`ventoy`]). `Ok(false)` when
+    /// there is nothing to build (no vendored source).
+    fn ventoy_module(&self) -> anyhow::Result<bool> {
+        let vendored = self.repo.join("freebsd/geom_ventoy");
+        if !vendored.join("Makefile").is_file() {
+            return Ok(false);
+        }
+        self.step("Building geom_ventoy.ko (boot from any Ventoy version)");
+        let sys = self.kernel_sources()?;
+        let build = self.work.join("geom_ventoy");
+        self.fs.remove_tree(&build)?;
+        self.fs.copy_tree(&vendored, &build, &[])?;
+        self.runner.run_checked(
+            "make",
+            &["-C", &Self::s(&build), &format!("SYSDIR={}", Self::s(&sys))],
+        )?;
+        let ko = build.join(VENTOY_KO);
+        let dst = self.rootfs().join("boot/kernel").join(VENTOY_KO);
+        if self.fs.dry_run {
+            self.fs.copy(&ko, &dst)?;
+        } else {
+            let mut bytes = std::fs::read(&ko)?;
+            let at = ventoy::patch_module(&mut bytes)?;
+            println!("   Ventoy disk map at file offset {at:#x}");
+            self.fs.write_bytes(&dst, &bytes)?;
+        }
+        // linker.hints; the loader also finds the module by file name.
+        let _ = self
+            .runner
+            .run("kldxref", &[&Self::s(&self.rootfs().join("boot/kernel"))]);
+        Ok(true)
+    }
+
     /// Make the ISO bootable when written to a USB stick, as FreeBSD's
     /// `mkisoimages.sh` does: a protective MBR plus a GPT in the ISO's
     /// system area, with `isoboot` for BIOS and a partition pointing at
@@ -1507,6 +1592,109 @@ mod tests {
         assert!(!cd.contains("cdboot"), "{cd}");
         // No boot/pmbr either: no hybrid boot area.
         assert!(!m.calls().iter().any(|c| c.starts_with("mkimg")));
+    }
+
+    #[test]
+    fn the_live_iso_ships_geom_ventoy_when_it_builds() {
+        let s = Scratch::new("ventoy");
+        let profile = Profile::default();
+        s.put("work/juanitos-dom0.txz", b"tarball");
+        s.put("work/MANIFEST", b"manifest");
+        s.put(&format!("work/{}", profile.iso_name()), b"iso9660");
+        s.put(&format!("work/rootfs{}", dom0::LOADER_EFI), b"loader");
+        s.put("repo/freebsd/geom_ventoy/Makefile", b"KMOD=geom_ventoy\n");
+        s.put("root/usr/src/sys/conf/kmod.mk", b"");
+        // `make` is mocked: the module it would build.
+        s.put(
+            "repo/freebsd/geom_ventoy/geom_ventoy.ko",
+            &crate::ventoy::tests::fake_module(0x10000, 65536, true),
+        );
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        b.iso_build().unwrap();
+
+        let root = s.0.join("work/rootfs");
+        let conf = std::fs::read_to_string(root.join("boot/loader.conf")).unwrap();
+        assert!(conf.contains("geom_ventoy_load=\"YES\""), "{conf}");
+        let mut shipped = std::fs::read(root.join("boot/kernel/geom_ventoy.ko")).unwrap();
+        let before = shipped.clone();
+        // Already patched to a page alignment: a second patch changes nothing.
+        crate::ventoy::patch_module(&mut shipped).unwrap();
+        assert_eq!(shipped, before);
+        let calls = m.calls();
+        assert!(calls.contains(&format!(
+            "make -C {} SYSDIR={}",
+            unix(&s.0.join("work/geom_ventoy")),
+            unix(&s.0.join("root/usr/src/sys"))
+        )));
+        assert!(calls.iter().any(|c| c.starts_with("kldxref ")));
+        // The installed system does not need it: the tarball was packed before.
+        assert!(!calls.iter().any(|c| c.starts_with("tar ")));
+
+        // A module Ventoy could not fill is not shipped.
+        s.put(
+            "repo/freebsd/geom_ventoy/geom_ventoy.ko",
+            &crate::ventoy::tests::fake_module(0x11000, 4096, true),
+        );
+        std::fs::remove_file(root.join("boot/kernel/geom_ventoy.ko")).unwrap();
+        b.iso_build().unwrap();
+        let conf = std::fs::read_to_string(root.join("boot/loader.conf")).unwrap();
+        assert!(!conf.contains("geom_ventoy"), "{conf}");
+        assert!(!root.join("boot/kernel/geom_ventoy.ko").exists());
+
+        // Neither does a failed build stop the ISO.
+        let m = MockRunner::new().respond("make", &[], CmdOutput::failed(2, "cc: error"));
+        let b = real_builder(&m, &profile, &s.0);
+        b.iso_build().unwrap();
+        let conf = std::fs::read_to_string(root.join("boot/loader.conf")).unwrap();
+        assert!(!conf.contains("geom_ventoy"), "{conf}");
+    }
+
+    #[test]
+    fn kernel_sources_come_from_the_verified_src_set() {
+        let s = Scratch::new("ksrc");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let src = s.put("work/dist/src.txz", b"sources");
+        let entry = format!(
+            "src.txz\t{}\t1\tsrc\t\"Source\"\toff\n",
+            sha256_file(&src).unwrap()
+        );
+        s.put("work/dist/MANIFEST", entry.as_bytes());
+        let sys = b.kernel_sources().unwrap();
+        assert_eq!(sys, s.0.join("work/src/usr/src/sys"));
+        assert_eq!(
+            m.calls(),
+            vec![format!(
+                "tar -xf {} -C {} usr/src/sys",
+                unix(&src),
+                unix(&s.0.join("work/src"))
+            )]
+        );
+
+        // Extracted already: no second tar.
+        s.put("work/src/usr/src/sys/conf/kmod.mk", b"");
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        b.kernel_sources().unwrap();
+        assert!(m.calls().is_empty());
+
+        std::fs::write(&src, b"tampered").unwrap();
+        assert!(b.kernel_sources().is_err());
+        s.put("work/dist/MANIFEST", b"");
+        let err = b.kernel_sources().unwrap_err();
+        assert!(err.to_string().contains("src.txz not listed"), "{err}");
+
+        // Missing set: MANIFEST and src.txz are downloaded (here they
+        // fail, as nothing is really fetched).
+        std::fs::remove_dir_all(s.0.join("work/dist")).unwrap();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        assert!(b.kernel_sources().is_err());
+        let calls = m.calls();
+        assert!(calls[0].ends_with("/15.1-RELEASE/MANIFEST"), "{calls:?}");
+        assert!(calls[1].ends_with("/15.1-RELEASE/src.txz"), "{calls:?}");
     }
 
     #[test]

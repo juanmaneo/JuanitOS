@@ -8,6 +8,7 @@ mod console;
 mod disk;
 mod profile;
 mod qemu;
+mod ventoy;
 
 use std::path::PathBuf;
 

@@ -61,8 +61,8 @@ dd if=JuanitOS-0.1.0-amd64.iso of=/dev/sdX bs=4M conv=fsync status=progress
 
 The ISO can also just be copied onto a [Ventoy](https://www.ventoy.net)
 stick (the data partition must be exFAT, NTFS or ext4: the file is larger
-than FAT32 allows). Ventoy recognises it as a FreeBSD image, injects its
-`geom_ventoy` module and boots the ISO's own El Torito entries, so both
+than FAT32 allows). Ventoy recognises it as a FreeBSD image and boots the
+ISO's own El Torito entries, so both
 firmware paths work: UEFI (`jos-boot.efi`, graphical installer) and BIOS
 (`isoboot`, text installer). Verified with Ventoy 1.1.18 in QEMU: the live
 system mounts `/dev/iso9660/JUANITOS` on top of `ventoy/IMAGE`, and an
@@ -71,6 +71,17 @@ must be a plain, fully allocated copy: a sparse file (holes punched where
 the image is zero, as `mkfs.ext4 -d` or `debugfs write` do) cannot be
 mapped and Ventoy stops with `No bootfile found for UEFI!`. Any normal
 `cp` or file-manager copy is fine.
+
+Ventoy normally injects a prebuilt `geom_ventoy.ko` matching the ISO's
+FreeBSD version, and only Ventoy 1.1.08 (December 2025) and later have one
+for FreeBSD 15. With an older Ventoy, stock FreeBSD 15 images stop at
+`mountroot` with error 19. The live ISO therefore ships its own module,
+built by `jos-release` from `freebsd/geom_ventoy` against the release's
+`src.txz`. When an ISO contains `/boot/kernel/geom_ventoy.ko`, every Ventoy
+since 1.0.62 skips the injection and writes the disk map into that file
+(see `crates/jos-release/src/ventoy.rs` for the layout constraints). On
+any other medium the module finds no Ventoy disk and does nothing. The
+installed system does not ship it.
 
 `tools/dev/ventoy-rig.sh` rebuilds that test on a Linux host: `make ISO`
 writes a Ventoy stick image (the layout `Ventoy2Disk.sh` produces, the ISO
