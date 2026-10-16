@@ -252,6 +252,13 @@ impl Display for VtDisplay {
         Ok(())
     }
 
+    fn release(&mut self) -> anyhow::Result<()> {
+        ioctl_int(self.fd(), ioc::KDSETMODE, ioc::KD_TEXT, "KDSETMODE")?;
+        self.restore_tty_settings();
+        self.console_restored = true;
+        Ok(())
+    }
+
     fn poll_key(&mut self) -> Option<u8> {
         let mut b = [0u8; 1];
         match self.tty.read(&mut b) {

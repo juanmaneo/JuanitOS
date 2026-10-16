@@ -6,6 +6,7 @@ members = [
     "crates/jos-gfx",
     "crates/jos-fb",
     "crates/jos-splash",
+    "crates/jos-greet",
     "crates/juanitos-core",
     "crates/jos",
     "crates/jos-install",

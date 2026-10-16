@@ -27,9 +27,10 @@ pub const REQUIRED_PACKAGES: &[&str] = &[
 /// `pop-os/cosmic-epoch` and `jos-release` ships in the root
 /// ([`COSMIC_REPO_DIR`]). They are installed best-effort: a component that
 /// did not build must not break the release (the installer and `jos` are
-/// fully usable from the console). `ly` is the login screen (COSMIC's own
-/// greeter needs greetd, which FreeBSD does not have) and `drm-kmod` the
-/// KMS drivers the compositor needs on real hardware.
+/// fully usable from the console). `drm-kmod` provides the KMS drivers the
+/// compositor needs on real hardware. The login screen is `jos-greet`, a
+/// JuanitOS binary (COSMIC's own greeter needs greetd, which FreeBSD does
+/// not have).
 pub const GUI_PACKAGES: &[&str] = &[
     "cosmic-comp",
     "cosmic-session",
@@ -52,7 +53,6 @@ pub const GUI_PACKAGES: &[&str] = &[
     "cosmic-files",
     "cosmic-edit",
     "cosmic-screenshot",
-    "ly",
     "drm-kmod",
 ];
 
@@ -102,80 +102,22 @@ pub fn gpu_kernel_module(vendor: u16) -> Option<&'static str> {
     }
 }
 
-/// The login screen: `ly` started by getty(8) on `ttyv1` through this
-/// gettytab(5) entry (what the FreeBSD port documents).
-pub const GETTYTAB_LOGIN_SCREEN: &str = "Ly:\\\n\t:lo=/usr/local/bin/ly_wrapper:\\\n\t:al=root:\n";
+/// The login screen, `jos-greet`, runs on this virtual terminal (1-based).
+/// VT 9 is `ttyv8`, whose line in FreeBSD's stock `/etc/ttys` is `off`
+/// (it is reserved for xdm), so no getty competes for it and neither
+/// `/etc/ttys` nor `/etc/gettytab` needs editing. `ttyv0` (Alt+F1) keeps
+/// its text login.
+pub const LOGIN_VT: i32 = 9;
 
-/// The ttys(5) line that runs the login screen.
-pub const TTYS_LOGIN_SCREEN: &str = "ttyv1\t\"/usr/libexec/getty Ly\"\t\txterm\ton  secure";
+/// PAM policy of the login screen (its PAM service is `jos-greet`).
+pub const PAM_JOS_GREET_PATH: &str = "/etc/pam.d/jos-greet";
+pub const PAM_JOS_GREET: &str = include_str!("../../../freebsd/pam.d/jos-greet");
 
-/// `/etc/gettytab` with the login screen entry appended (idempotent).
-pub fn gettytab_with_login_screen(gettytab: &str) -> String {
-    if gettytab.lines().any(|l| l.starts_with("Ly:")) {
-        return gettytab.to_string();
-    }
-    let mut s = gettytab.to_string();
-    if !s.is_empty() && !s.ends_with('\n') {
-        s.push('\n');
-    }
-    s.push_str("# JuanitOS login screen (ly) on ttyv1\n");
-    s.push_str(GETTYTAB_LOGIN_SCREEN);
-    s
-}
-
-/// `/etc/ttys` with `ttyv1` handed to the login screen (idempotent). The
-/// console on `ttyv0` keeps its plain getty: Alt+F1 is always a text
-/// login.
-pub fn ttys_with_login_screen(ttys: &str) -> String {
-    let mut out = String::new();
-    let mut replaced = false;
-    for line in ttys.lines() {
-        let is_ttyv1 = line
-            .split_whitespace()
-            .next()
-            .is_some_and(|tty| tty == "ttyv1");
-        if is_ttyv1 && !replaced {
-            out.push_str(TTYS_LOGIN_SCREEN);
-            replaced = true;
-        } else {
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-    if !replaced {
-        out.push_str(TTYS_LOGIN_SCREEN);
-        out.push('\n');
-    }
-    out
-}
-
-/// `ly`'s configuration: only the keys that differ from its defaults.
-pub const LY_CONFIG_PATH: &str = "/usr/local/etc/ly/config.ini";
-
-pub fn ly_config() -> String {
-    "# JuanitOS login screen; ly(1) fills in its defaults for every other key.
-# ly runs on ttyv1 (see /etc/ttys); rc.d/jos-splash-finish keeps the boot
-# splash on the screen until it takes over.
-animation = none
-box_title = JuanitOS
-hide_version_string = true
-clock = %H:%M
-# A dom0 has Wayland sessions only (COSMIC).
-xsessions = null
-xinitrc = null
-waylandsessions = /usr/local/share/wayland-sessions
-# Sets XDG_RUNTIME_DIR (ly leaves it unset on FreeBSD) and execs the session.
-login_cmd = /usr/local/libexec/jos-session
-"
-    .to_string()
-}
-
-/// `login_cmd` of the login screen: environment a Wayland session needs,
-/// then the session itself.
+/// What every desktop session started by the login screen goes through:
+/// last environment fixes, then `exec "$@"`.
 pub const JOS_SESSION: &str = include_str!("../../../freebsd/jos-session");
 
-/// Creates the per-user runtime directory root and documents the login
-/// screen's rc.conf knob.
+/// Runs `jos-greet` under daemon(8) (`jos_login_enable`).
 pub const RC_D_JOS_LOGIN: &str = include_str!("../../../freebsd/rc.d/jos-login");
 
 /// Packages needed to rebuild JuanitOS on JuanitOS (stage 2 of the
@@ -318,7 +260,7 @@ pub fn rc_conf(flavor: Flavor, opts: &Dom0Options) -> String {
         s.push_str("seatd_enable=\"YES\"\n");
         s.push_str("dbus_enable=\"YES\"\n");
         if flavor == Flavor::Installed {
-            s.push_str("# Login screen: ly on ttyv1 (/etc/ttys), see rc.d/jos-login\n");
+            s.push_str("# Login screen: jos-greet on ttyv8 (Alt+F9), see rc.d/jos-login\n");
             s.push_str("jos_login_enable=\"YES\"\n");
         }
     }
@@ -413,7 +355,7 @@ pub fn static_files() -> Vec<(&'static str, String, bool)> {
         ),
         ("/usr/local/etc/rc.d/jos-login", lf(RC_D_JOS_LOGIN), true),
         ("/usr/local/libexec/jos-session", lf(JOS_SESSION), true),
-        (LY_CONFIG_PATH, ly_config(), false),
+        (PAM_JOS_GREET_PATH, lf(PAM_JOS_GREET), false),
         (
             "/usr/local/share/juanitos/loader.conf.sample",
             lf(LOADER_CONF_SAMPLE),
@@ -428,7 +370,13 @@ pub fn static_files() -> Vec<(&'static str, String, bool)> {
 }
 
 /// Binaries copied into `/usr/local/bin`.
-pub const BINARIES: &[&str] = &["jos", "jos-install", "jos-release", "jos-splash"];
+pub const BINARIES: &[&str] = &[
+    "jos",
+    "jos-install",
+    "jos-release",
+    "jos-splash",
+    "jos-greet",
+];
 
 #[cfg(test)]
 mod tests {
@@ -498,61 +446,36 @@ mod tests {
     }
 
     #[test]
-    fn login_screen_takes_ttyv1_only() {
-        let ttys = "# $FreeBSD$\nconsole\tnone\tunknown\toff secure\n\
-                    ttyv0\t\"/usr/libexec/getty Pc\"\txterm\tonifexists secure\n\
-                    # Virtual terminals\n\
-                    ttyv1\t\"/usr/libexec/getty Pc\"\txterm\tonifexists secure\n\
-                    ttyv2\t\"/usr/libexec/getty Pc\"\txterm\tonifexists secure\n";
-        let out = ttys_with_login_screen(ttys);
-        assert!(
-            out.contains("ttyv0\t\"/usr/libexec/getty Pc\""),
-            "console untouched"
-        );
-        assert!(out.contains("ttyv1\t\"/usr/libexec/getty Ly\""));
-        assert!(out.contains("ttyv2\t\"/usr/libexec/getty Pc\""));
-        assert_eq!(out.lines().count(), ttys.lines().count());
-        assert_eq!(ttys_with_login_screen(&out), out, "idempotent");
-        // A ttys without ttyv1 still gets the login screen.
-        let appended = ttys_with_login_screen("console\tnone\tunknown\toff secure\n");
-        assert!(appended.ends_with("getty Ly\"\t\txterm\ton  secure\n"));
-    }
-
-    #[test]
-    fn gettytab_gains_the_ly_entry_once() {
-        let base = "default:\\\n\t:cb:ce:ck:lc:fd#1000:im=\\r\\n%s/%m (%h) (%t)\\r\\n\\r\\n:sp#1200:\\\n\t:if=/etc/issue:\n";
-        let once = gettytab_with_login_screen(base);
-        assert!(once.starts_with(base));
-        assert!(once.contains("\nLy:\\\n\t:lo=/usr/local/bin/ly_wrapper:\\\n\t:al=root:\n"));
-        assert_eq!(gettytab_with_login_screen(&once), once);
-        // A file without a trailing newline does not get its last line glued.
-        let glued = gettytab_with_login_screen("x:\\\n\t:al=root:");
-        assert!(glued.contains(":al=root:\n# JuanitOS login screen"));
-    }
-
-    #[test]
     fn login_screen_files_are_shipped() {
         let files = static_files();
         let find = |p: &str| files.iter().find(|(path, _, _)| *path == p).unwrap();
         let session = find("/usr/local/libexec/jos-session");
-        assert!(session.2, "login_cmd must be executable");
+        assert!(session.2, "the session wrapper must be executable");
         assert!(session.1.contains("XDG_RUNTIME_DIR"));
         assert!(
             session.1.trim_end().ends_with("exec \"$@\""),
-            "ly's login_cmd contract"
+            "jos-greet passes the session command as arguments"
         );
-        let ly = find(LY_CONFIG_PATH);
-        assert!(!ly.2);
-        assert!(ly.1.contains("login_cmd = /usr/local/libexec/jos-session"));
-        assert!(ly
-            .1
-            .contains("waylandsessions = /usr/local/share/wayland-sessions"));
+        let pam = find(PAM_JOS_GREET_PATH);
+        assert!(!pam.2);
+        assert!(pam.1.contains("auth\t\tinclude\t\tsystem"));
+        assert!(pam.1.contains("session\t\tinclude\t\tsystem"));
+        assert!(
+            !pam.1
+                .lines()
+                .any(|l| l.contains("pam_self") && !l.starts_with('#')),
+            "the greeter runs as root: pam_self would let root in without a password"
+        );
         let rc = find("/usr/local/etc/rc.d/jos-login");
         assert!(rc.1.contains("PROVIDE: jos-login"));
         assert!(rc.1.contains("/var/run/user"));
-        assert!(GUI_PACKAGES.contains(&"ly"));
+        assert!(rc.1.contains("/usr/local/bin/jos-greet"));
+        assert!(rc.1.contains(&format!("jos_login_vt:=\"{LOGIN_VT}\"")));
+        assert!(BINARIES.contains(&"jos-greet"));
+        assert!(!GUI_PACKAGES.contains(&"ly"));
         assert!(GUI_PACKAGES.contains(&"cosmic-comp"));
         assert!(GUI_PACKAGES.contains(&"drm-kmod"));
+        assert!(!files.iter().any(|(p, _, _)| p.contains("/ly/")));
     }
 
     #[test]

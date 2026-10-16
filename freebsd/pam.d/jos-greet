@@ -1,0 +1,21 @@
+#
+# PAM configuration for the JuanitOS login screen (jos-greet).
+#
+# /etc/pam.d/login without pam_self: jos-greet runs as root, and pam_self
+# accepts any login whose target is the caller's own uid, so it would
+# let root in without a password.
+#
+
+# auth
+auth		include		system
+
+# account
+account		requisite	pam_securetty.so
+account		required	pam_nologin.so
+account		include		system
+
+# session
+session		include		system
+
+# password
+password	include		system

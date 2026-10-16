@@ -52,12 +52,13 @@ crates/jos-firewall    the sys-firewall unikernel (UEFI application)
 crates/jos-gfx         no_std boot artwork: icons, font, rasteriser, PNG export
 crates/jos-boot        graphical UEFI pre-loader that chain-loads loader.efi
 crates/jos-splash      boot splash daemon on the vt(4) framebuffer + rc.d clients
-crates/jos-fb          vt(4) framebuffer display and keyboard decoder (splash, installer)
+crates/jos-fb          vt(4) framebuffer display and keyboard decoder (splash, installer, greeter)
+crates/jos-greet       login screen: PAM, then the COSMIC session on the same VT
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
 coverage.toml          per-crate line-coverage floors (ratcheted, only go up)
 templates/             cloud-init user-data of the guest template recipes; agent/ the guest agents (share, jos-agentd) and jos-copy
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
-freebsd/               loader.conf / sysctl.conf samples and rc.d scripts
+freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet
 docs/                  design notes (docs/images: rendered previews)
 ```
 
@@ -232,8 +233,9 @@ How the code stays testable on a Linux or macOS laptop:
 - the binaries have end-to-end tests (`crates/*/tests/cli.rs`) that run
   them in dry-run mode, e.g. the README quick start against a temporary
   `JOS_CONFIG_DIR`;
-- the installer and the splash are pure state machines rendered into
-  images; only the thin `vt(4)` layer in `jos-fb` needs FreeBSD;
+- the installer, the splash and the login screen are pure state machines
+  rendered into images; only the thin `vt(4)` layer in `jos-fb` (and the
+  greeter's PAM backend) needs FreeBSD;
 - the UEFI applications keep their logic in host-testable libraries
   (`jos-gfx`, `jos-fwnet`, `jos-fwcfg`, `jos-boot`'s lib) and boot under
   QEMU + OVMF with `tools/uefi-test.sh`.
@@ -345,8 +347,9 @@ the stale BSD paths in libcosmic's iced fork, FreeBSD's renamed
 `pw_init`), and packages every component for `pkg`. The compositor,
 session, panel, applets, launcher, settings, terminal, files, editor and
 the rest install into the dom0 root from that repository, which the
-installed system keeps; `ly` is the login screen on `ttyv1` and the
-installer picks the `drm-kmod` driver for the GPU it finds
+installed system keeps; `jos-greet`, a Rust login screen on the same
+framebuffer stack as the splash and the installer, authenticates with
+PAM on `ttyv8` and starts the session there, and the installer picks the `drm-kmod` driver for the GPU it finds
 (`docs/relibc-cosmic.md`). The compositor starts on FreeBSD up to the
 point where it needs a seat and a KMS device; neither QEMU nor bhyve
 gives a FreeBSD guest one, so the first COSMIC session has to be on real

@@ -30,6 +30,7 @@ const DOM0_CRATES: &[&str] = &[
     "jos-install",
     "jos-release",
     "jos-splash",
+    "jos-greet",
     "jos-fb",
 ];
 const FREEBSD: &str = "x86_64-unknown-freebsd";
@@ -314,6 +315,19 @@ fn screenshots(ctx: &Ctx) -> anyhow::Result<()> {
             "jos-install",
             "--",
             "--screenshots",
+            &images_s,
+        ],
+    )?;
+    cargo(
+        ctx,
+        &ctx.root,
+        &[
+            "run",
+            "-q",
+            "-p",
+            "jos-greet",
+            "--",
+            "screenshots",
             &images_s,
         ],
     )?;

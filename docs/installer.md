@@ -107,8 +107,9 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
 6. `rc.conf` (`zfs_enable`, `jos_enable`, `seatd`, `dbus`, `jos_login`;
    `kld_list` gains the `drm-kmod` driver for the GPU `pciconf` reports),
    `loader.conf`, `fstab` (swap + ESP at `/boot/efi`), `zpool.cache`,
-   `jos.toml`. With the desktop, `/etc/ttys` hands `ttyv1` to the `ly`
-   login screen (gettytab entry `Ly`), see `docs/relibc-cosmic.md`.
+   `jos.toml`. The login screen (`jos-greet` on `ttyv8`, see
+   `docs/relibc-cosmic.md`) needs no `/etc/ttys` change: that terminal
+   has no getty.
 7. ESP: `EFI/FREEBSD/LOADER.EFI` from `/boot/loader.efi`, and
    `EFI/BOOT/BOOTX64.EFI` from `/boot/jos-boot.efi` (graphical boot, see
    `docs/boot-splash.md`) or from `loader.efi` when the release has no

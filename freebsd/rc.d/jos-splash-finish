@@ -1,11 +1,12 @@
 #!/bin/sh
 #
 # PROVIDE: jos-splash-finish
-# REQUIRE: LOGIN jos jos-login
+# REQUIRE: LOGIN jos
+# BEFORE: jos-login
 #
 # Ends the boot splash. With the login screen enabled the last frame
-# (every icon lit) stays on the framebuffer until ly(1) switches to its
-# terminal; otherwise the text console comes back for the login prompt.
+# (every icon lit) stays on the framebuffer until jos-greet switches to
+# its terminal; otherwise the text console comes back for the login prompt.
 
 . /etc/rc.subr
 
@@ -18,7 +19,7 @@ load_rc_config jos_login
 : ${jos_splash_enable:="NO"}
 : ${jos_splash_bin:="/usr/local/bin/jos-splash"}
 : ${jos_login_enable:="NO"}
-: ${jos_login_ly:="/usr/local/bin/ly"}
+: ${jos_login_bin:="/usr/local/bin/jos-greet"}
 
 start_cmd="jos_splash_finish_start"
 stop_cmd=":"
@@ -28,10 +29,9 @@ jos_splash_finish_start()
 	[ -x "${jos_splash_bin}" ] || return 0
 	"${jos_splash_bin}" stage desktop
 	# Keep the picture only for a login screen that will actually take
-	# the display: the desktop may be enabled in rc.conf but not (yet)
-	# installed, or /etc/ttys may not start it.
-	if checkyesno jos_login_enable && [ -x "${jos_login_ly}" ] && \
-	    grep -q 'getty Ly' /etc/ttys; then
+	# the display: the desktop may be enabled in rc.conf but the greeter
+	# missing.
+	if checkyesno jos_login_enable && [ -x "${jos_login_bin}" ]; then
 		"${jos_splash_bin}" finish
 	else
 		"${jos_splash_bin}" finish --console

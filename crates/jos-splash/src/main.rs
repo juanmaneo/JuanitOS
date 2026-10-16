@@ -4,7 +4,8 @@
 //! systems are mounted; it draws the boot card on the `vt(4)` framebuffer
 //! and lights up one icon per stage as the other rc.d hooks report
 //! progress with `jos-splash stage <name>`. `finish` hands the screen to
-//! the COSMIC greeter (keeping the picture) or back to the text console.
+//! the login screen, `jos-greet` (keeping the picture), or back to the text
+//! console.
 //! See `docs/boot-splash.md`.
 
 mod proto;

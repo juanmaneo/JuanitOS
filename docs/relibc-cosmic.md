@@ -76,7 +76,7 @@ builds COSMIC itself.
 | KMS drivers          | kernel          | `graphics/drm-kmod`; the installer adds `amdgpu`/`i915kms` to `kld_list` from `pciconf` |
 | seat / VT handling   | `logind`        | `sysutils/seatd` (+ `libseat`)         |
 | desktop IPC          | `dbus`          | `devel/dbus`                           |
-| login                | `cosmic-greeter`| `x11/ly` on `ttyv1` (`cosmic-greeter` needs greetd) |
+| login                | `cosmic-greeter`| `jos-greet` (Rust, `crates/jos-greet`) on `ttyv8`; `cosmic-greeter` needs greetd |
 | audio (optional)     | PipeWire        | `multimedia/pipewire` or none in dom0  |
 
 ### Building the packages
@@ -135,22 +135,64 @@ components best-effort; the installed system keeps the repository, so
 ### Login
 
 `rc.conf` enables `seatd_enable`, `dbus_enable` and `jos_login_enable`;
-`jos` runs independently of all of it. The installer hands `ttyv1` to
-`ly` (a `Ly` gettytab entry and the `/etc/ttys` line the FreeBSD port
-documents; `ttyv0` keeps its text login) and writes
-`/usr/local/etc/ly/config.ini`, which lists the Wayland sessions in
-`/usr/local/share/wayland-sessions` and runs
-`/usr/local/libexec/jos-session` as `login_cmd`: ly does not set
-`XDG_RUNTIME_DIR` on FreeBSD and a compositor needs one, so the script
-makes `/var/run/user/<uid>` (the directory is created by
-`rc.d/jos-login`) and execs `start-cosmic`. `rc.d/jos-splash-finish`
-keeps the boot splash on the screen until ly switches to its terminal.
+`jos` runs independently of all of it. The login screen is `jos-greet`,
+a JuanitOS binary built on the same `jos-fb`/`jos-gfx` stack as the boot
+splash and the installer, so boot, install and login look like one
+product:
+
+| ![login](images/greeter-1-login.png) | ![refused](images/greeter-2-failed.png) |
+|---|---|
+
+- `rc.d/jos-login` runs it under daemon(8) (restarted if it dies) on
+  `ttyv8` (VT 9, Alt+F9), the terminal FreeBSD's stock `/etc/ttys`
+  leaves `off`, so no getty competes and nothing is edited; `ttyv0`
+  (Alt+F1) keeps its text login. `rc.d/jos-splash-finish` runs just
+  before it and leaves the boot picture up until the greeter switches.
+- The user field is pre-filled with the first account of uid ≥ 1000
+  (Left/Right cycles), the session list comes from
+  `/usr/local/share/wayland-sessions/*.desktop` (COSMIC's
+  `cosmic.desktop`; COSMIC if there is none). F1/F2 pressed twice power
+  off/reboot.
+- Authentication is OpenPAM, service `jos-greet`
+  (`/etc/pam.d/jos-greet`: `login`'s policy without `pam_self`, which
+  would let root, the greeter's own uid, in without a password); root
+  and `nologin` accounts are refused, and a refused password costs two
+  seconds.
+- The session: `pam_setcred` + `pam_open_session`, then
+  `/var/run/user/<uid>` (mode 700, owned by the user) as
+  `XDG_RUNTIME_DIR`, and a child that calls `setsid` and
+  `setusercontext(3)` (groups, login class, umask, `setlogin`, uid —
+  what login(1) does) and execs `/usr/local/libexec/jos-session
+  <Exec=>` with a clean environment (`HOME`, `PATH`, `XDG_SESSION_TYPE=wayland`,
+  `XDG_CURRENT_DESKTOP`, `XDG_VTNR`, ... plus PAM's). Before that the
+  greeter puts its terminal back in text mode *without* switching away,
+  so seatd hands that VT to the compositor. Output goes to
+  `/var/run/user/<uid>/jos-session.log`; when the session ends the
+  greeter comes back and shows its exit status if it failed.
+- Not done: utmpx/wtmp records (`who`, `last` do not see graphical
+  logins) and a lock screen (COSMIC's `cosmic-greeter` locker needs
+  greetd too).
+
+Verified in the FreeBSD 15.1 build VM (QEMU VGA, efifb 1280×800):
+`rc.d/jos-login` brings the greeter up on VT 9; a wrong password shows
+"Login incorrect"; the right one runs the session as the user (uid,
+`video` group, umask 022, home, the environment above,
+`/var/run/user/<uid>` mode 700) on VT 9 with its output in the log; a
+missing `start-cosmic` comes back as "COSMIC exited with status 127";
+after a session the greeter redraws and says the user logged out; root
+and unknown users are refused (`jos-greet try-login --user NAME --
+COMMAND` exercises PAM and the session setup without the screen). The
+COSMIC session itself still needs real hardware, as above.
+
+`jos-greet screenshots DIR` renders the screen on any host;
+`jos-greet run --dry-run` on a FreeBSD console accepts any non-empty
+password and starts nothing, to try the UI.
 
 What has been verified: the packages build, `jos-release rootfs` in the
 build VM installs the 23 of `dom0::GUI_PACKAGES` (the rest of the 26,
 `cosmic-viewer`, `cosmic-monitor`, `cosmic-player`, `cosmic-osk`,
 `cosmic-initial-setup`, stay in the shipped repository for `pkg
-install`) together with `ly`, `drm-kmod` and the X/Mesa run-time into
+install`) together with `drm-kmod` and the X/Mesa run-time into
 the dom0 root, and `cosmic-comp` starts on FreeBSD up to "Failed to
 acquire session". Running the compositor needs a seat and a KMS device,
 which neither the QEMU build VM nor bhyve provide to a FreeBSD guest

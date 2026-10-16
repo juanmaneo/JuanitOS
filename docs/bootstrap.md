@@ -143,7 +143,7 @@ and the extracted `rootfs/` for inspection.
 
 The package set lives in `crates/juanitos-core/src/dom0.rs`: required
 (`edk2-bhyve`, `seatd`, `dbus`, …), self-hosting (`rust`, `git`) and
-best-effort desktop packages (COSMIC, `ly`, `drm-kmod`). FreeBSD has no
+best-effort desktop packages (COSMIC, `drm-kmod`). FreeBSD has no
 COSMIC packages: they come from the repository `tools/dev/cosmic-build.sh`
 builds in the FreeBSD VM (`docs/relibc-cosmic.md`), which `[packages]
 local_repo` points at and the root carries at `/usr/local/share/juanitos/pkg`.

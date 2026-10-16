@@ -17,6 +17,13 @@ pub trait Display {
     fn present(&mut self, frame: &Image) -> anyhow::Result<()>;
     /// Restore the text console (end of the splash, console mode).
     fn restore_console(&mut self) -> anyhow::Result<()>;
+    /// Hand the terminal to another program on the *same* VT (the login
+    /// screen starting a desktop session): back to text mode with the tty
+    /// settings restored, without switching away. The display must not be
+    /// presented on afterwards; open a new one instead.
+    fn release(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// Next byte typed on the terminal, if any (Esc → `Some(0x1b)`;
     /// arrows etc. arrive as escape sequences, see [`keys::Decoder`]).
     fn poll_key(&mut self) -> Option<u8>;
@@ -88,6 +95,7 @@ pub struct NullDisplay {
     pub height: u32,
     pub presented: usize,
     pub restored: bool,
+    pub released: bool,
     /// Bytes `poll_key` returns, in order.
     pub keys: std::collections::VecDeque<u8>,
     /// The last frame presented, when [`NullDisplay::keep_frames`] is set.
@@ -129,6 +137,11 @@ impl Display for NullDisplay {
 
     fn restore_console(&mut self) -> anyhow::Result<()> {
         self.restored = true;
+        Ok(())
+    }
+
+    fn release(&mut self) -> anyhow::Result<()> {
+        self.released = true;
         Ok(())
     }
 
@@ -189,5 +202,31 @@ mod tests {
         assert_eq!(d.poll_key(), None);
         d.restore_console().unwrap();
         assert!(d.restored);
+        d.release().unwrap();
+        assert!(d.released);
+    }
+
+    #[test]
+    fn release_defaults_to_nothing() {
+        struct Bare;
+        impl Display for Bare {
+            fn size(&self) -> (u32, u32) {
+                (1, 1)
+            }
+            fn present(&mut self, _: &Image) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn restore_console(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn poll_key(&mut self) -> Option<u8> {
+                None
+            }
+        }
+        let mut b = Bare;
+        assert!(b.release().is_ok());
+        assert!(b.present(&Image::new(1, 1, Rgba::TRANSPARENT)).is_ok());
+        assert!(b.restore_console().is_ok());
+        assert_eq!((b.size(), b.poll_key()), ((1, 1), None));
     }
 }

@@ -185,7 +185,7 @@ cmd_deps() {
 		fontconfig freetype2 expat dbus gettext-runtime desktop-file-utils \
 		hicolor-icon-theme xdg-desktop-portal xdg-utils libxcb xcb-util xcb-util-wm \
 		pulseaudio pipewire gstreamer1 gstreamer1-plugins gstreamer1-plugins-good \
-		glib gtk3 llvm bash gmake python3 libglvnd libjpeg-turbo ly
+		glib gtk3 llvm bash gmake python3 libglvnd libjpeg-turbo
 }
 
 cmd_fetch() {

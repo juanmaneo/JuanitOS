@@ -378,9 +378,6 @@ impl<'a> Installer<'a> {
             &dom0::loader_conf(Flavor::Installed, &opts),
         )?;
         self.fs.write(&self.target_path("etc/fstab"), &fstab(p))?;
-        if p.gui {
-            self.install_login_screen()?;
-        }
         self.fs.mkdir_p(&self.target_path("boot/efi"))?;
         self.fs.mkdir_p(&self.target_path("boot/zfs"))?;
         self.runner.run_checked(
@@ -401,24 +398,6 @@ impl<'a> Installer<'a> {
             doctor_report,
         )?;
         Ok(())
-    }
-
-    /// Hand `ttyv1` to the login screen (`ly`, see `dom0::ly_config`): the
-    /// gettytab entry and the ttys line the FreeBSD port documents. The
-    /// files come from the tarball just extracted; in a dry run they may
-    /// not exist, in which case FreeBSD's defaults are assumed.
-    fn install_login_screen(&self) -> Result<()> {
-        let edit = |rel: &str, f: fn(&str) -> String, fallback: &str| -> Result<()> {
-            let path = self.target_path(rel);
-            let current = std::fs::read_to_string(&path).unwrap_or_else(|_| fallback.to_string());
-            self.fs.write(&path, &f(&current))
-        };
-        edit("etc/gettytab", dom0::gettytab_with_login_screen, "")?;
-        edit(
-            "etc/ttys",
-            dom0::ttys_with_login_screen,
-            "ttyv0\t\"/usr/libexec/getty Pc\"\txterm\tonifexists secure\n",
-        )
     }
 
     pub fn install_bootloader(&self) -> Result<()> {
@@ -720,28 +699,16 @@ mod tests {
         };
         let m = MockRunner::new();
         let inst = Installer::new(&m, false, &p);
-        // What the extracted base has before configuration.
-        std::fs::create_dir_all(dir.join("etc")).unwrap();
-        std::fs::write(
-            dir.join("etc/ttys"),
-            "ttyv0\t\"/usr/libexec/getty Pc\"\txterm\tonifexists secure\n\
-             ttyv1\t\"/usr/libexec/getty Pc\"\txterm\tonifexists secure\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("etc/gettytab"), "default:\\\n\t:cb:ce:\n").unwrap();
         inst.configure("doctor says ok").unwrap();
         let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).unwrap();
         assert!(read("etc/rc.conf").contains("hostname=\"box\""));
         assert!(read("etc/rc.conf").contains("jos_login_enable=\"YES\""));
         assert!(read("boot/loader.conf").contains("zfs_load=\"YES\""));
         assert!(read("etc/fstab").contains("/boot/efi"));
-        // The login screen took ttyv1 and got its gettytab entry.
-        let ttys = read("etc/ttys");
-        assert!(ttys.contains("ttyv0\t\"/usr/libexec/getty Pc\""));
-        assert!(ttys.contains("ttyv1\t\"/usr/libexec/getty Ly\""));
-        let gettytab = read("etc/gettytab");
-        assert!(gettytab.starts_with("default:"));
-        assert!(gettytab.contains("\nLy:\\\n"));
+        // The login screen has a VT of its own: the base's ttys/gettytab
+        // stay as FreeBSD ships them.
+        assert!(!dir.join("etc/ttys").exists());
+        assert!(!dir.join("etc/gettytab").exists());
         assert!(read("usr/local/etc/juanitos/jos.toml").contains("zroot"));
         assert_eq!(
             read("usr/local/etc/juanitos/install-report.txt"),
@@ -765,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn console_only_installs_leave_ttys_alone() {
+    fn console_only_installs_have_no_login_screen() {
         let dir = std::env::temp_dir().join(format!("jos-install-nogui-{}", std::process::id()));
         let p = InstallPlan {
             target: dir.to_string_lossy().into_owned(),
@@ -776,25 +743,9 @@ mod tests {
         Installer::new(&m, false, &p)
             .configure("doctor says ok")
             .unwrap();
-        assert!(!dir.join("etc/ttys").exists());
-        assert!(!dir.join("etc/gettytab").exists());
         let rc = std::fs::read_to_string(dir.join("etc/rc.conf")).unwrap();
         assert!(!rc.contains("jos_login_enable"));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn login_screen_files_default_when_the_root_has_none() {
-        // A dry run never extracted the tarball: FreeBSD's stock ttys is
-        // assumed so the plan still prints what it would write.
-        let dir = std::env::temp_dir().join(format!("jos-install-dry-{}", std::process::id()));
-        let p = InstallPlan {
-            target: dir.to_string_lossy().into_owned(),
-            ..plan()
-        };
-        let m = MockRunner::new();
-        Installer::new(&m, true, &p).install_login_screen().unwrap();
-        assert!(!dir.exists(), "dry run writes nothing");
     }
 
     #[test]

@@ -275,6 +275,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jos-greet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "jos-fb",
+ "jos-gfx",
+ "juanitos-core",
+ "libc",
+]
+
+[[package]]
 name = "jos-install"
 version = "0.1.0"
 dependencies = [
