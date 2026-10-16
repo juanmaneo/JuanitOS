@@ -72,6 +72,13 @@ the image is zero, as `mkfs.ext4 -d` or `debugfs write` do) cannot be
 mapped and Ventoy stops with `No bootfile found for UEFI!`. Any normal
 `cp` or file-manager copy is fine.
 
+`tools/dev/ventoy-rig.sh` rebuilds that test on a Linux host: `make ISO`
+writes a Ventoy stick image (the layout `Ventoy2Disk.sh` produces, the ISO
+copied in through `fuse2fs`), `start uefi|bios` boots it under QEMU/KVM
+with a blank virtio target disk, `key`/`type`/`shot` drive the installer
+through the QEMU monitor. The Disk page must list the target disk only,
+never the stick.
+
 ## The graphical installer
 
 `rc.local` starts `jos-install --live` once the boot splash has finished.
