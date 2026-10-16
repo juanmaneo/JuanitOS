@@ -12,6 +12,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 
+/// Serial input pacing for [`Console::send_line`]: measured on a FreeBSD
+/// 15.1 guest under QEMU/KVM, a 500-byte line sent at once loses bytes,
+/// 2000 bytes in 32-byte chunks 10 ms apart arrive intact.
+const SEND_CHUNK: usize = 32;
+const SEND_PAUSE: Duration = Duration::from_millis(10);
+
 pub struct Console {
     child: Child,
     stdin: ChildStdin,
@@ -95,10 +101,17 @@ impl Console {
         }
     }
 
+    /// Send a line, paced: written in one burst, a line longer than a few
+    /// hundred bytes overruns the guest's emulated 16550 and the shell
+    /// never sees its end (the command then hangs instead of failing).
     pub fn send_line(&mut self, line: &str) -> anyhow::Result<()> {
-        self.stdin.write_all(line.as_bytes())?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
+        let mut data = line.as_bytes().to_vec();
+        data.push(b'\n');
+        for chunk in data.chunks(SEND_CHUNK) {
+            self.stdin.write_all(chunk)?;
+            self.stdin.flush()?;
+            std::thread::sleep(SEND_PAUSE);
+        }
         Ok(())
     }
 
@@ -182,6 +195,9 @@ mod tests {
         c.expect("ready", Duration::from_secs(5)).unwrap();
         c.run("true", Duration::from_secs(5)).unwrap();
         assert!(c.run("false", Duration::from_secs(5)).is_err());
+        // A line spanning many send chunks arrives whole.
+        let long = format!("test {} = {}", "y".repeat(700), "y".repeat(700));
+        c.run(&long, Duration::from_secs(10)).unwrap();
         c.send_line("exit 0").unwrap();
         c.wait_exit(Duration::from_secs(5)).unwrap();
     }

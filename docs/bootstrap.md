@@ -170,6 +170,10 @@ The unattended builder found three things the dry runs could not:
   tree without `target/`, so it carries the profile's `local_repo` over
   separately (otherwise an ISO built with `builder --auto` silently
   lacked COSMIC).
+- Command lines typed into the serial console in one burst lose bytes
+  past a few hundred characters (the emulated 16550 overruns) and the step
+  hangs waiting for a shell that never got the end of the line; the
+  console driver now sends in 32-byte chunks 10 ms apart.
 - FreeBSD's `rust` package has no `x86_64-unknown-uefi` standard library,
   so `jos-boot.efi` and `jos-firewall.efi` are built on the Linux side
   (`tools/docker-build.sh` or plain cargo with the target installed) and
