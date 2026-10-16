@@ -23,6 +23,18 @@
 //! (its console init erases the terminal area), so there is a short black
 //! gap between this program and the kernel splash; the stock loader offers
 //! no way around that.
+//!
+//! # When a quiet boot never finishes
+//!
+//! `RB_MUTE` also mutes the kernel console *input* (`cn_mute` in
+//! `kern_cons.c`): a root mount failure leaves an invisible `mountroot>`
+//! prompt that ignores the keyboard. So before chain-loading a muted
+//! entry this program sets the non-volatile UEFI variable
+//! [`PENDING_NAME`] (vendor [`PENDING_VENDOR`]); `rc.d/jos-bootok` deletes
+//! it once the file systems are mounted. If it is still there on the next
+//! start, the previous quiet boot died before `rc(8)`, and the default
+//! becomes [`VERBOSE_ENTRY`] with a note on the card. Only userland ever
+//! clears it, so a failing verbose boot stays verbose until one succeeds.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -34,13 +46,30 @@ use alloc::vec::Vec;
 
 use jos_gfx::scene::Menu;
 use jos_gfx::{Scene, Stage};
+use uguid::{guid, Guid};
 
 /// Where the installer and the ISO put FreeBSD's loader (see
 /// `juanitos_core::dom0::ESP_LOADER`).
 pub const LOADER_PATH: &str = "\\EFI\\FREEBSD\\LOADER.EFI";
 
 /// How long the card is shown before the default entry boots.
-pub const COUNTDOWN_MS: u64 = 1500;
+pub const COUNTDOWN_MS: u64 = 3000;
+
+/// Vendor GUID of the JuanitOS UEFI variables.
+pub const PENDING_VENDOR: Guid = guid!("62c99c6c-b34c-4e15-9e6c-fe06ff08543b");
+
+/// "A muted boot was started and has not reached `rc(8)` yet."
+pub const PENDING_NAME: &str = "JuanitOSBootPending";
+
+/// The same variable as `efivar(8)` names it (`GUID-Name`), used by
+/// `freebsd/rc.d/jos-bootok`.
+pub const PENDING_EFIVAR: &str = "62c99c6c-b34c-4e15-9e6c-fe06ff08543b-JuanitOSBootPending";
+
+/// Shown under the icons when the previous boot did not finish.
+pub const PENDING_NOTE: &str = "The last boot did not finish - booting verbose";
+
+/// The entry booted by default after a quiet boot that never finished.
+pub const VERBOSE_ENTRY: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -87,6 +116,21 @@ pub const ENTRIES: [Entry; 5] = [
 
 pub const DEFAULT_ENTRY: usize = 0;
 
+/// The entry Enter, Esc and the timeout boot: verbose if the previous
+/// quiet boot is still marked pending, the quiet one otherwise.
+pub fn default_entry(pending: bool) -> usize {
+    if pending {
+        VERBOSE_ENTRY
+    } else {
+        DEFAULT_ENTRY
+    }
+}
+
+/// Does booting `entry` mute the console (and so need the pending mark)?
+pub fn marks_pending(entry: &Entry) -> bool {
+    entry.action == Action::Chain && entry.args.split(' ').any(|w| w == "-m")
+}
+
 /// Arguments for a machine without a graphics output (serial-only servers,
 /// `qemu -vga none`): there is nothing to draw the card on and no splash
 /// to show, so `loader.efi` is chain-loaded straight away and keeps its
@@ -123,6 +167,8 @@ pub fn on_countdown_key(key: Key) -> Countdown {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuState {
     pub selected: usize,
+    /// What Esc chooses (see [`default_entry`]).
+    pub default: usize,
 }
 
 /// What the menu asks the caller to do after a key.
@@ -141,8 +187,19 @@ impl Default for MenuState {
 
 impl MenuState {
     pub fn new() -> Self {
+        Self::with_default(DEFAULT_ENTRY)
+    }
+
+    /// A menu that starts on, and falls back to, `default`.
+    pub fn with_default(default: usize) -> Self {
+        let default = if default < ENTRIES.len() {
+            default
+        } else {
+            DEFAULT_ENTRY
+        };
         MenuState {
-            selected: DEFAULT_ENTRY,
+            selected: default,
+            default,
         }
     }
 
@@ -157,7 +214,7 @@ impl MenuState {
                 MenuOutcome::Redraw
             }
             Key::Enter => MenuOutcome::Choose(self.selected),
-            Key::Escape => MenuOutcome::Choose(DEFAULT_ENTRY),
+            Key::Escape => MenuOutcome::Choose(self.default),
             Key::Other => MenuOutcome::Nothing,
         }
     }
@@ -183,10 +240,14 @@ impl MenuState {
 }
 
 /// The card shown during the countdown: the first stage is lit, nothing
-/// else; the kernel splash that follows lights the second one.
-pub fn countdown_scene() -> Scene {
+/// else; the kernel splash that follows lights the second one. After a
+/// boot that never finished it says why the default is verbose.
+pub fn countdown_scene(pending: bool) -> Scene {
     let mut scene = Scene::new();
     scene.reach(Stage::Boot);
+    if pending {
+        scene.status = Some(String::from(PENDING_NOTE));
+    }
     scene
 }
 
@@ -282,6 +343,53 @@ mod tests {
     }
 
     #[test]
+    fn pending_boot_defaults_to_verbose() {
+        assert_eq!(default_entry(false), DEFAULT_ENTRY);
+        assert_eq!(default_entry(true), VERBOSE_ENTRY);
+        let verbose = ENTRIES[VERBOSE_ENTRY];
+        assert!(verbose.args.split(' ').any(|w| w == "-v"));
+        assert!(!marks_pending(&verbose));
+
+        let mut m = MenuState::with_default(default_entry(true));
+        assert_eq!(m.selected, VERBOSE_ENTRY);
+        m.on_key(Key::Down);
+        assert_eq!(m.on_key(Key::Escape), MenuOutcome::Choose(VERBOSE_ENTRY));
+        assert_eq!(MenuState::with_default(99), MenuState::new());
+    }
+
+    #[test]
+    fn only_muted_boots_are_marked() {
+        assert!(marks_pending(&ENTRIES[DEFAULT_ENTRY]));
+        for e in ENTRIES.iter().skip(1) {
+            assert!(!marks_pending(e), "{}", e.title);
+        }
+        // "-m" must be a word, not a substring of another argument.
+        let e = Entry {
+            title: "x",
+            args: "-v mode=-mx",
+            action: Action::Chain,
+        };
+        assert!(!marks_pending(&e));
+        let r = Entry {
+            title: "x",
+            args: "-m",
+            action: Action::Reboot,
+        };
+        assert!(!marks_pending(&r));
+    }
+
+    #[test]
+    fn pending_variable_names_agree() {
+        let guid = alloc::format!("{PENDING_VENDOR}");
+        assert_eq!(PENDING_EFIVAR, alloc::format!("{guid}-{PENDING_NAME}"));
+        assert!(PENDING_NAME.is_ascii());
+        // The rc.d script that clears the mark must use the same name.
+        let rc = include_str!("../../../freebsd/rc.d/jos-bootok");
+        assert!(rc.contains(PENDING_EFIVAR));
+        assert!(rc.contains("REQUIRE: FILESYSTEMS"));
+    }
+
+    #[test]
     fn countdown_keys() {
         assert_eq!(on_countdown_key(Key::Enter), Countdown::BootDefault);
         assert_eq!(on_countdown_key(Key::Escape), Countdown::OpenMenu);
@@ -290,10 +398,15 @@ mod tests {
 
     #[test]
     fn scenes() {
-        let c = countdown_scene();
+        let c = countdown_scene(false);
         assert!(c.is_lit(Stage::Boot));
         assert!(!c.is_lit(Stage::Kernel));
         assert!(c.menu.is_none());
+        assert!(c.status.is_none());
+        let p = countdown_scene(true);
+        assert_eq!(p.status.as_deref(), Some(PENDING_NOTE));
+        assert!(p.is_lit(Stage::Boot) && !p.is_lit(Stage::Kernel));
+        assert!(COUNTDOWN_MS >= 3000);
         let m = MenuState::new().scene();
         let menu = m.menu.unwrap();
         assert_eq!(menu.items.len(), ENTRIES.len());

@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# PROVIDE: jos-bootok
+# REQUIRE: FILESYSTEMS
+# BEFORE: jos-splash
+#
+# Tells jos-boot (the UEFI pre-loader) that this boot got as far as rc(8).
+# Before chain-loading a muted boot, jos-boot sets the UEFI variable below;
+# if it is still there on the next start, the kernel never reached
+# userland (typically a root mount failure behind the muted console) and
+# jos-boot defaults to "Boot verbose" instead. See docs/boot-splash.md.
+#
+# Always on (no rcvar): it only writes NVRAM when the mark is present.
+# Needs EFI runtime services (GENERIC: options EFIRT, /dev/efi); on a BIOS
+# boot or without them efivar fails quietly and nothing happens.
+
+. /etc/rc.subr
+
+name="jos_bootok"
+start_cmd="jos_bootok_start"
+stop_cmd=":"
+
+jos_bootok_var="62c99c6c-b34c-4e15-9e6c-fe06ff08543b-JuanitOSBootPending"
+
+jos_bootok_start()
+{
+	[ -x /usr/sbin/efivar ] || return 0
+	if /usr/sbin/efivar -q -p -n "${jos_bootok_var}" >/dev/null 2>&1; then
+		/usr/sbin/efivar -q -D -n "${jos_bootok_var}" >/dev/null 2>&1
+	fi
+	return 0
+}
+
+load_rc_config $name
+run_rc_command "$1"

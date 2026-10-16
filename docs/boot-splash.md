@@ -37,7 +37,7 @@ A UEFI application (`x86_64-unknown-uefi`, `uefi` crate, 67 KB). It:
 1. opens the Graphics Output Protocol, switches to the largest mode (the
    same choice `loader.efi`'s `efi-autoresizecons` makes, so there is no
    second mode switch), fills the screen black and `Blt`s the card;
-2. polls the keyboard for 1.5 s. Enter boots at once; any other key opens
+2. polls the keyboard for 3 s. Enter boots at once; any other key opens
    a menu: *Boot JuanitOS*, *Boot verbose*, *Single user*, *FreeBSD loader
    menu*, *Reboot*;
 3. chain-loads `EFI/FREEBSD/LOADER.EFI` from the partition it was loaded
@@ -58,6 +58,29 @@ skipped: `loader.efi` is chain-loaded immediately with `autoboot_delay=-1
 beastie_disable=YES` and *without* `-m`/`console=nullconsole`, so the
 loader and the kernel talk on the firmware's text console, i.e. the
 serial port. The live installer then runs in its text mode there.
+
+#### Failed-boot fallback
+
+`-m` (`RB_MUTE`) mutes kernel console *input* as well as output
+(`cn_mute` in `sys/kern/kern_cons.c`: `cngetc()` returns -1). A muted
+boot whose root mount fails therefore sits at an invisible `mountroot>`
+prompt that ignores the keyboard. To avoid that dead end:
+
+1. before chain-loading a muted entry, `jos-boot` sets the non-volatile
+   UEFI variable `JuanitOSBootPending` (vendor GUID
+   `62c99c6c-b34c-4e15-9e6c-fe06ff08543b`, runtime access);
+2. `rc.d/jos-bootok` (`REQUIRE: FILESYSTEMS`, always on) deletes it with
+   `efivar -D`, so a boot that reaches `rc(8)` leaves nothing behind. It
+   only writes NVRAM when the variable exists;
+3. if the variable is still there when `jos-boot` starts, the previous
+   quiet boot died before userland: the card says *The last boot did not
+   finish - booting verbose*, and Enter, Esc and the timeout pick *Boot
+   verbose*. `jos-boot` never clears the mark itself, so the machine keeps
+   booting verbose until a boot gets to `rc(8)`.
+
+Firmware that refuses `SetVariable` simply never gets the fallback; the
+menu's *Boot verbose* entry is always available. To force a quiet boot
+again by hand: `efivar -D -n 62c99c6c-b34c-4e15-9e6c-fe06ff08543b-JuanitOSBootPending`.
 
 ### `crates/jos-splash` — the daemon
 
@@ -168,7 +191,8 @@ redrew).
   acceptable.
 - **Silent loader failures.** With `console=nullconsole` a loader that
   cannot find a kernel waits at an invisible prompt. Use the *FreeBSD
-  loader menu* entry (no arguments) to see it.
+  loader menu* entry (no arguments) to see it. The next start of
+  `jos-boot` falls back to *Boot verbose* (see *Failed-boot fallback*).
 - **BIOS boot** (`cdboot`/`isoboot`/`gptzfsboot`, legacy machines) is the
   classic text boot. FreeBSD builds its BIOS loader `LOADER_BIOS_TEXTONLY`
   (no `vbe` command, `screen.textmode` is ignored), so the kernel only

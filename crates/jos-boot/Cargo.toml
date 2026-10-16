@@ -26,6 +26,9 @@ bench = false
 
 [dependencies]
 jos-gfx = { path = "../jos-gfx" }
+# uefi's own GUID type, used by the pure logic in lib.rs (which must not
+# link uefi: its global allocator would replace the host test allocator).
+uguid = "2.2"
 uefi = { version = "0.41", default-features = false, features = ["alloc", "global_allocator"] }
 
 [profile.dev]

@@ -24,8 +24,9 @@ use core::fmt::Write;
 use core::time::Duration;
 
 use jos_boot::{
-    countdown_scene, load_options, on_countdown_key, Action, Countdown, Key, MenuOutcome,
-    MenuState, COUNTDOWN_MS, DEFAULT_ENTRY, ENTRIES, HEADLESS_ARGS, LOADER_PATH,
+    countdown_scene, default_entry, load_options, marks_pending, on_countdown_key, Action,
+    Countdown, Key, MenuOutcome, MenuState, COUNTDOWN_MS, DEFAULT_ENTRY, ENTRIES, HEADLESS_ARGS,
+    LOADER_PATH, PENDING_NAME, PENDING_VENDOR,
 };
 use jos_gfx::scene::{card_origin, Scene, CARD_HEIGHT, CARD_WIDTH};
 use jos_gfx::Image;
@@ -36,7 +37,7 @@ use uefi::proto::device_path::build::{media, DevicePathBuilder};
 use uefi::proto::device_path::DevicePath;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::BootPolicy;
-use uefi::runtime::{self, ResetType};
+use uefi::runtime::{self, ResetType, VariableAttributes, VariableVendor};
 use uefi::{CString16, Status};
 
 const POLL: Duration = Duration::from_millis(20);
@@ -93,9 +94,10 @@ fn run() -> Result<(), String> {
         });
         return chain_load(HEADLESS_ARGS);
     }
+    let pending = boot_pending();
     let choice = {
         let mut screen = Screen::open()?;
-        choose(&mut screen)
+        choose(&mut screen, pending)
         // `screen` is dropped here: the GOP protocol must be closed before
         // another image takes the firmware over.
     };
@@ -103,32 +105,61 @@ fn run() -> Result<(), String> {
         .get(choice)
         .copied()
         .unwrap_or(ENTRIES[DEFAULT_ENTRY]);
+    if marks_pending(&entry) {
+        set_boot_pending();
+    }
     match entry.action {
         Action::Reboot => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
         Action::Chain => chain_load(entry.args),
     }
 }
 
+fn pending_name() -> Option<CString16> {
+    CString16::try_from(PENDING_NAME).ok()
+}
+
+/// Is the previous muted boot still marked as not having reached rc(8)?
+fn boot_pending() -> bool {
+    let Some(name) = pending_name() else {
+        return false;
+    };
+    let mut buf = [0u8; 8];
+    runtime::get_variable(&name, &VariableVendor(PENDING_VENDOR), &mut buf).is_ok()
+}
+
+/// Mark a muted boot as in progress. Best effort: firmware that refuses
+/// the write simply never gets the verbose fallback.
+fn set_boot_pending() {
+    let Some(name) = pending_name() else {
+        return;
+    };
+    let attrs = VariableAttributes::NON_VOLATILE
+        | VariableAttributes::BOOTSERVICE_ACCESS
+        | VariableAttributes::RUNTIME_ACCESS;
+    let _ = runtime::set_variable(&name, &VariableVendor(PENDING_VENDOR), attrs, &[1]);
+}
+
 /// Show the card, open the menu on a key, return the chosen entry.
-fn choose(screen: &mut Screen) -> usize {
-    screen.draw_full(&countdown_scene());
+fn choose(screen: &mut Screen, pending: bool) -> usize {
+    let default = default_entry(pending);
+    screen.draw_full(&countdown_scene(pending));
     let mut waited = Duration::ZERO;
     let total = Duration::from_millis(COUNTDOWN_MS);
     while waited < total {
         if let Some(key) = read_key() {
             match on_countdown_key(key) {
-                Countdown::BootDefault => return DEFAULT_ENTRY,
-                Countdown::OpenMenu => return menu(screen),
+                Countdown::BootDefault => return default,
+                Countdown::OpenMenu => return menu(screen, default),
             }
         }
         boot::stall(POLL);
         waited += POLL;
     }
-    DEFAULT_ENTRY
+    default
 }
 
-fn menu(screen: &mut Screen) -> usize {
-    let mut state = MenuState::new();
+fn menu(screen: &mut Screen, default: usize) -> usize {
+    let mut state = MenuState::with_default(default);
     screen.draw_card(&state.scene());
     loop {
         if let Some(key) = read_key() {
@@ -138,7 +169,7 @@ fn menu(screen: &mut Screen) -> usize {
                 MenuOutcome::Choose(i) => {
                     // Show the chosen boot as "in progress" before the
                     // loader blanks the screen.
-                    screen.draw_card(&countdown_scene());
+                    screen.draw_card(&countdown_scene(false));
                     return i;
                 }
             }
