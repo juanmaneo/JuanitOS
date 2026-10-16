@@ -328,10 +328,16 @@ pub const AUTO_STEPS: &[(&str, &str, u64)] = &[
         "env ASSUME_ALWAYS_YES=yes pkg bootstrap -y >/dev/null && pkg install -y rust git && cargo --version",
         90,
     ),
+    // The profile's `local_repo` (the COSMIC packages) usually lives under
+    // target/, which the tree copy leaves out: carry it over on its own.
     (
         "copy the source tree into the guest",
         "mkdir -p /root/juanitos && (cd /mnt/repo && tar --exclude ./target --exclude ./.git \
          --exclude ./work --exclude ./release/out -cf - .) | tar -C /root/juanitos -xf - && \
+         r=$(sed -n 's/^local_repo *= *\"\\(.*\\)\"/\\1/p' /root/juanitos/release/juanitos.toml) && \
+         { [ -z \"$r\" ] || [ ! -d \"/mnt/repo/$r\" ] || { mkdir -p \"/root/juanitos/$r\" && \
+         (cd \"/mnt/repo/$r\" && tar -cf - .) | tar -C \"/root/juanitos/$r\" -xf - && \
+         echo \"local package repository: $r\"; }; } && \
          ls /root/juanitos/crates",
         30,
     ),
@@ -651,6 +657,10 @@ mod tests {
         assert!(all.contains("mount -t p9fs -o trans=virtio juanitos /mnt/repo"));
         assert!(all.contains("/mnt/out/"));
         assert!(all.contains("jos-release --repo /root/juanitos all"));
+        // The local (COSMIC) repository is under the excluded target/.
+        assert!(all.contains("--exclude ./target"));
+        assert!(all.contains("s/^local_repo *= *\"\\(.*\\)\"/\\1/p"));
+        assert!(all.contains("tar -C \"/root/juanitos/$r\" -xf -"));
     }
 
     #[test]

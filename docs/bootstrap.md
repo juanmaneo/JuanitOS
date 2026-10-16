@@ -166,7 +166,10 @@ The unattended builder found three things the dry runs could not:
   extracted base has immutable files (`FsOps::remove_tree`).
 - The COSMIC packages are not in any FreeBSD repository; they are
   best-effort and the build goes on without them, or with the ones
-  `tools/dev/cosmic-build.sh` produced.
+  `tools/dev/cosmic-build.sh` produced. The unattended builder copies the
+  tree without `target/`, so it carries the profile's `local_repo` over
+  separately (otherwise an ISO built with `builder --auto` silently
+  lacked COSMIC).
 - FreeBSD's `rust` package has no `x86_64-unknown-uefi` standard library,
   so `jos-boot.efi` and `jos-firewall.efi` are built on the Linux side
   (`tools/docker-build.sh` or plain cargo with the target installed) and
