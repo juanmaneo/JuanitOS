@@ -40,6 +40,24 @@ jos_login_prestart()
 	# for each session's XDG_RUNTIME_DIR.
 	mkdir -p /var/run/user
 	chmod 755 /var/run/user
+	if ! jos_login_has_framebuffer; then
+		warn "console is in VGA text mode (BIOS boot, no KMS driver); keeping the text login on ttyv0"
+		return 1
+	fi
+}
+
+# vt(4) names its driver at boot ("VT(efifb): resolution ...", or
+# "VT(vga): text 80x25" after a BIOS boot); a KMS driver loaded later
+# logs "VT: Replacing driver "vga" with new "fb"". The greeter needs a
+# framebuffer, and without one daemon(8) would restart it forever.
+jos_login_has_framebuffer()
+{
+	local last
+	last=$(/sbin/dmesg -a 2>/dev/null | grep -E '^VT(\(|: Replacing driver)' | tail -n 1)
+	case "${last}" in
+	"VT(vga): text"*) return 1 ;;
+	esac
+	return 0
 }
 
 run_rc_command "$1"

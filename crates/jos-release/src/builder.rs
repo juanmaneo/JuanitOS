@@ -640,7 +640,10 @@ impl<'a> Builder<'a> {
             || root
                 .join(dom0::JOS_BOOT_EFI.trim_start_matches('/'))
                 .is_file();
-        for (src, dst) in dom0::esp_files(has_jos_boot) {
+        let has_ia32 = root
+            .join(dom0::LOADER_IA32_EFI.trim_start_matches('/'))
+            .is_file();
+        for (src, dst) in dom0::esp_files(has_jos_boot, has_ia32) {
             self.fs
                 .copy(&root.join(src.trim_start_matches('/')), &esp_dir.join(dst))?;
         }
@@ -662,9 +665,11 @@ impl<'a> Builder<'a> {
             ],
         )?;
 
-        let args = iso_args(p, &root, &esp_img, &iso, root.join("boot/cdboot").is_file());
+        let bios = p.bios && root.join("boot/cdboot").is_file();
+        let args = iso_args(p, &root, &esp_img, &iso, bios);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.runner.run_checked("makefs", &args)?;
+        self.make_hybrid(&root, &iso, bios)?;
 
         if !self.fs.dry_run {
             let sha = sha256_file(&iso)?;
@@ -677,6 +682,101 @@ impl<'a> Builder<'a> {
         println!("\nDone: {}", iso.display());
         Ok(())
     }
+}
+
+impl Builder<'_> {
+    /// Make the ISO bootable when written to a USB stick, as FreeBSD's
+    /// `mkisoimages.sh` does: a protective MBR plus a GPT in the ISO's
+    /// system area, with `isoboot` for BIOS and a partition pointing at
+    /// the El Torito EFI image for UEFI firmware (which only honours El
+    /// Torito on optical media).
+    fn make_hybrid(&self, root: &Path, iso: &Path, bios: bool) -> anyhow::Result<()> {
+        let pmbr = root.join(dom0::PMBR.trim_start_matches('/'));
+        if !pmbr.is_file() && !self.fs.dry_run {
+            println!("   no boot/pmbr: the ISO boots from optical media only");
+            return Ok(());
+        }
+        let iso_s = Self::s(iso);
+        let out = self
+            .runner
+            .run_checked("etdump", &["--format", "shell", &iso_s])?;
+        let (esp, capacity) = if self.fs.dry_run {
+            (etdump_efi_entry(&out.stdout).unwrap_or((0, 0)), 0)
+        } else {
+            let esp = etdump_efi_entry(&out.stdout)
+                .ok_or_else(|| anyhow::anyhow!("{iso_s}: no EFI El Torito entry"))?;
+            (esp, std::fs::metadata(iso)?.len())
+        };
+        let img = self.work.join("hybrid.img");
+        let isoboot = root.join("boot/isoboot");
+        let args = hybrid_args(
+            &pmbr,
+            (bios && isoboot.is_file()).then_some(isoboot.as_path()),
+            esp,
+            capacity,
+            &img,
+        );
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.runner.run_checked("mkimg", &args)?;
+        self.runner.run_checked(
+            "dd",
+            &[
+                &format!("if={}", Self::s(&img)),
+                &format!("of={iso_s}"),
+                "bs=32k",
+                "count=1",
+                "conv=notrunc",
+            ],
+        )?;
+        self.fs.remove_file(&img)?;
+        Ok(())
+    }
+}
+
+/// `(lba, sectors)` of the EFI boot image from `etdump --format shell`:
+/// one `et_platform=efi;et_system=i386;et_lba=20;et_sectors=4096` line
+/// per El Torito entry (LBA in 2048-byte blocks, sectors in 512 bytes).
+pub fn etdump_efi_entry(text: &str) -> Option<(u64, u64)> {
+    text.lines().find_map(|line| {
+        let field = |name: &str| {
+            line.split(';')
+                .find_map(|kv| kv.trim().strip_prefix(name)?.strip_prefix('='))
+        };
+        if field("et_platform")? != "efi" {
+            return None;
+        }
+        Some((
+            field("et_lba")?.parse().ok()?,
+            field("et_sectors")?.parse().ok()?,
+        ))
+    })
+}
+
+/// `mkimg` arguments for the hybrid boot area (see `make_hybrid`).
+pub fn hybrid_args(
+    pmbr: &Path,
+    isoboot: Option<&Path>,
+    (lba, sectors): (u64, u64),
+    capacity: u64,
+    out: &Path,
+) -> Vec<String> {
+    let mut a: Vec<String> = vec![
+        "-s".into(),
+        "gpt".into(),
+        "--capacity".into(),
+        capacity.to_string(),
+        "-b".into(),
+        unix(pmbr),
+    ];
+    if let Some(isoboot) = isoboot {
+        a.push("-p".into());
+        a.push(format!("freebsd-boot:={}", unix(isoboot)));
+    }
+    a.push("-p".into());
+    a.push(format!("efi::{}:{}", sectors * 512, lba * 2048));
+    a.push("-o".into());
+    a.push(unix(out));
+    a
 }
 
 /// What `install_source` leaves out of the copied repository: VCS data and
@@ -888,6 +988,9 @@ mod tests {
         assert!(has("pkg -c /work/rootfs bootstrap -y"));
         assert!(has("pkg -c /work/rootfs update -f"));
         assert!(has("pkg -c /work/rootfs install -y edk2-bhyve"));
+        assert!(has("etdump --format shell /work/"));
+        assert!(has("mkimg -s gpt --capacity 0 -b /work/rootfs/boot/pmbr"));
+        assert!(has("bs=32k count=1 conv=notrunc"));
         // A fresh chroot has no catalogue: update must precede install.
         let update = calls.iter().position(|c| c.contains("update -f")).unwrap();
         let install = calls
@@ -1402,6 +1505,87 @@ mod tests {
             .find(|c| c.contains("cd9660"))
             .unwrap();
         assert!(!cd.contains("cdboot"), "{cd}");
+        // No boot/pmbr either: no hybrid boot area.
+        assert!(!m.calls().iter().any(|c| c.starts_with("mkimg")));
+    }
+
+    #[test]
+    fn iso_build_makes_a_hybrid_usb_image() {
+        let s = Scratch::new("hybrid");
+        let profile = Profile::default();
+        let etdump = "et_platform=default;et_system=i386;et_lba=1044;et_sectors=4\n\
+                      et_platform=efi;et_system=i386;et_lba=20;et_sectors=16384\n";
+        let m = MockRunner::new().respond("etdump", &[], CmdOutput::ok(etdump));
+        let b = real_builder(&m, &profile, &s.0);
+        s.put("work/juanitos-dom0.txz", b"tarball");
+        s.put("work/MANIFEST", b"manifest");
+        for f in [dom0::LOADER_EFI, dom0::LOADER_IA32_EFI, dom0::PMBR] {
+            s.put(&format!("work/rootfs{f}"), b"x");
+        }
+        s.put("work/rootfs/boot/cdboot", b"x");
+        s.put("work/rootfs/boot/isoboot", b"x");
+        let iso = s.put(&format!("work/{}", profile.iso_name()), &[0u8; 4096]);
+        b.iso_build().unwrap();
+
+        assert!(s.0.join("work/efiboot").join(dom0::ESP_IA32).is_file());
+        let calls = m.calls();
+        let cd = calls.iter().position(|c| c.contains("cd9660")).unwrap();
+        assert!(calls[cd].contains("cdboot"));
+        let mkimg = calls.iter().position(|c| c.starts_with("mkimg")).unwrap();
+        let w = s.0.join("work");
+        assert_eq!(
+            calls[mkimg],
+            format!(
+                "mkimg -s gpt --capacity 4096 -b {r}/boot/pmbr -p freebsd-boot:={r}/boot/isoboot \
+                 -p efi::8388608:40960 -o {w}/hybrid.img",
+                r = unix(&w.join("rootfs")),
+                w = unix(&w)
+            )
+        );
+        assert!(cd < mkimg);
+        assert_eq!(
+            calls[mkimg + 1],
+            format!(
+                "dd if={}/hybrid.img of={} bs=32k count=1 conv=notrunc",
+                unix(&w),
+                unix(&iso)
+            )
+        );
+
+        // makefs that wrote no EFI entry is an error, not a silent CD-only ISO.
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let err = b.iso_build().unwrap_err().to_string();
+        assert!(err.contains("no EFI El Torito entry"), "{err}");
+    }
+
+    #[test]
+    fn etdump_and_mkimg_arguments() {
+        assert_eq!(
+            etdump_efi_entry("et_platform=efi;et_system=i386;et_lba=20;et_sectors=4096\n"),
+            Some((20, 4096))
+        );
+        assert_eq!(
+            etdump_efi_entry("et_platform=default;et_lba=1;et_sectors=4\n"),
+            None
+        );
+        assert_eq!(
+            etdump_efi_entry("et_platform=efi;et_lba=x;et_sectors=4\n"),
+            None
+        );
+        assert_eq!(etdump_efi_entry(""), None);
+        let uefi_only = hybrid_args(
+            Path::new("/r/boot/pmbr"),
+            None,
+            (20, 4096),
+            1 << 20,
+            Path::new("/w/h.img"),
+        )
+        .join(" ");
+        assert_eq!(
+            uefi_only,
+            "-s gpt --capacity 1048576 -b /r/boot/pmbr -p efi::2097152:40960 -o /w/h.img"
+        );
     }
 
     #[test]

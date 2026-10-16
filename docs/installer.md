@@ -38,7 +38,23 @@ installs, but no qube will start.
     loader.conf.sample, sysctl.conf.sample
     dist/juanitos-dom0.txz, dist/MANIFEST
 /usr/local/src/juanitos   this repository + vendored crates (stage 2)
-El Torito: EFI (efiboot.img: jos-boot.efi as BOOTX64.EFI + EFI/FREEBSD/LOADER.EFI) and, when present, BIOS cdboot
+El Torito: EFI (efiboot.img: jos-boot.efi as BOOTX64.EFI + EFI/FREEBSD/LOADER.EFI
+           + loader_ia32.efi as BOOTIA32.EFI) and, when present, BIOS cdboot
+System area: protective MBR + GPT (isoboot, ESP → efiboot.img) for USB sticks
+```
+
+The image is hybrid, like FreeBSD's own `mkisoimages.sh` output: after
+`makefs`, `jos-release` reads the EFI El Torito entry with `etdump` and
+writes a `mkimg` GPT into the first 32 KiB. With that, the same file
+boots as a CD or written raw to a USB stick, under UEFI
+(`BOOTX64.EFI`, or `BOOTIA32.EFI` on 32-bit EFI such as the first Intel
+Macs) and under legacy BIOS (`isoboot`, or `cdboot` from a CD). FreeBSD's
+BIOS loader is text-only, so a BIOS boot runs the text installer (same
+steps, same checks).
+
+```sh
+# on Linux, as root; /dev/sdX is the whole stick, not a partition
+dd if=JuanitOS-0.1.0-amd64.iso of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 ## The graphical installer
@@ -105,7 +121,8 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
 
 1. Host checks (see above). Fails hard unless `--ignore-doctor`.
 2. Disk selection from `kern.disks` (optical/memory disks filtered out).
-3. `gpart`: GPT with `efiboot0` (260 MiB FAT32), `swap0`, `zfs0`.
+3. `gpart`: GPT with `efiboot0` (260 MiB FAT32, p1), `gptboot0`
+   (512 KiB `freebsd-boot`, p2), `swap0`, `zfs0`.
 4. `zpool create` with `altroot=/mnt`, `compression=lz4`, `atime=off`;
    datasets as `bsdinstall zfsboot` makes them, `bootfs=zroot/ROOT/default`,
    and `zroot/juanitos/{templates,qubes}` via the same code as `jos init`.
@@ -119,7 +136,10 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
 7. ESP: `EFI/FREEBSD/LOADER.EFI` from `/boot/loader.efi`, and
    `EFI/BOOT/BOOTX64.EFI` from `/boot/jos-boot.efi` (graphical boot, see
    `docs/boot-splash.md`) or from `loader.efi` when the release has no
-   pre-loader; `efibootmgr` entry on `BOOTX64.EFI` (best effort).
+   pre-loader, plus `EFI/BOOT/BOOTIA32.EFI` from `/boot/loader_ia32.efi`;
+   `efibootmgr` entry on `BOOTX64.EFI` (best effort). BIOS:
+   `gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 2`, so the disk
+   also boots on firmware without UEFI.
 8. Root password and first user through `chroot /mnt pw ... -h 0` (the
    password goes over stdin, never argv).
 

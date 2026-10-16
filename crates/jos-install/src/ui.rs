@@ -327,7 +327,7 @@ fn disk(c: &mut Canvas, w: &Wizard) {
     title(
         c,
         "Installation disk",
-        "The whole disk is used: GPT, an EFI partition, swap and a ZFS pool.",
+        "The whole disk is used: GPT (UEFI + BIOS boot), swap and a ZFS pool.",
     );
     if w.disks.is_empty() {
         c.text(

@@ -154,6 +154,11 @@ pub enum Progress {
 }
 
 /// Installation steps, as shown to the user.
+/// The `freebsd-boot` partition holding `gptzfsboot` (bsdinstall's size)
+/// and its GPT index, right after the ESP.
+const BIOS_BOOT_SIZE: &str = "512k";
+const BIOS_BOOT_INDEX: &str = "2";
+
 pub const STEP_TITLES: [&str; 8] = [
     "Verifying the dom0 distribution",
     "Partitioning the disk",
@@ -252,7 +257,7 @@ impl<'a> Installer<'a> {
     pub fn partition(&self) -> Result<()> {
         let p = self.plan;
         let dev = p.dev();
-        self.step(&format!("Partitioning {dev} (GPT, UEFI)"));
+        self.step(&format!("Partitioning {dev} (GPT, UEFI + BIOS)"));
         // Fails when there is no partition table yet; that is fine.
         let _ = self.runner.run("gpart", &["destroy", "-F", &p.disk]);
         self.runner
@@ -262,6 +267,23 @@ impl<'a> Installer<'a> {
             "gpart",
             &[
                 "add", "-a", "4k", "-s", &esp, "-t", "efi", "-l", "efiboot0", &p.disk,
+            ],
+        )?;
+        // Index 2, after the ESP so the ESP stays p1: legacy BIOS boot
+        // (firmware without UEFI, or 32-bit EFI Macs booting via CSM).
+        self.runner.run_checked(
+            "gpart",
+            &[
+                "add",
+                "-a",
+                "4k",
+                "-s",
+                BIOS_BOOT_SIZE,
+                "-t",
+                "freebsd-boot",
+                "-l",
+                "gptboot0",
+                &p.disk,
             ],
         )?;
         if p.swap_gb > 0 {
@@ -401,7 +423,20 @@ impl<'a> Installer<'a> {
     }
 
     pub fn install_bootloader(&self) -> Result<()> {
-        self.step("Installing UEFI boot loader");
+        self.step("Installing boot loaders (UEFI and BIOS)");
+        self.runner.run_checked(
+            "gpart",
+            &[
+                "bootcode",
+                "-b",
+                dom0::PMBR,
+                "-p",
+                dom0::GPTZFSBOOT,
+                "-i",
+                BIOS_BOOT_INDEX,
+                &self.plan.disk,
+            ],
+        )?;
         let esp_s = self.target("boot/efi");
         self.runner
             .run_checked("mount", &["-t", "msdosfs", "/dev/gpt/efiboot0", &esp_s])?;
@@ -411,8 +446,11 @@ impl<'a> Installer<'a> {
         let has_jos_boot = self
             .target_path(dom0::JOS_BOOT_EFI.trim_start_matches('/'))
             .is_file();
+        let has_ia32 = self
+            .target_path(dom0::LOADER_IA32_EFI.trim_start_matches('/'))
+            .is_file();
         let result = (|| {
-            for (src, dst) in dom0::esp_files(has_jos_boot) {
+            for (src, dst) in dom0::esp_files(has_jos_boot, has_ia32) {
                 self.fs.copy(
                     &self.target_path(src.trim_start_matches('/')),
                     &self.target_path(&format!("boot/efi/{dst}")),
@@ -540,9 +578,13 @@ mod tests {
         assert_eq!(calls[2], "gpart add -a 4k -s 260M -t efi -l efiboot0 vtbd0");
         assert_eq!(
             calls[3],
+            "gpart add -a 4k -s 512k -t freebsd-boot -l gptboot0 vtbd0"
+        );
+        assert_eq!(
+            calls[4],
             "gpart add -a 1m -s 4G -t freebsd-swap -l swap0 vtbd0"
         );
-        assert_eq!(calls[4], "gpart add -a 1m -t freebsd-zfs -l zfs0 vtbd0");
+        assert_eq!(calls[5], "gpart add -a 1m -t freebsd-zfs -l zfs0 vtbd0");
         assert!(calls
             .iter()
             .any(|c| c.starts_with("zpool create -f -o altroot=/mnt")
@@ -727,7 +769,15 @@ mod tests {
         let calls = m.calls();
         assert!(calls.iter().any(|c| c.starts_with("mount -t msdosfs")));
         assert!(calls.iter().any(|c| c.starts_with("umount")));
+        assert!(calls
+            .iter()
+            .any(|c| c == "gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 2 vtbd0"));
         assert!(dir.join("boot/efi").join(dom0::ESP_DEFAULT).is_file());
+        assert!(!dir.join("boot/efi").join(dom0::ESP_IA32).exists());
+        // A base with loader_ia32.efi also boots 32-bit UEFI firmware.
+        std::fs::write(dir.join("boot/loader_ia32.efi"), b"ia32").unwrap();
+        inst.install_bootloader().unwrap();
+        assert!(dir.join("boot/efi").join(dom0::ESP_IA32).is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

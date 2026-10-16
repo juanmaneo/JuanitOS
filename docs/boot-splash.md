@@ -169,7 +169,16 @@ redrew).
 - **Silent loader failures.** With `console=nullconsole` a loader that
   cannot find a kernel waits at an invisible prompt. Use the *FreeBSD
   loader menu* entry (no arguments) to see it.
-- **BIOS boot** (CD `cdboot`, legacy machines) is the classic text boot.
+- **BIOS boot** (`cdboot`/`isoboot`/`gptzfsboot`, legacy machines) is the
+  classic text boot. FreeBSD builds its BIOS loader `LOADER_BIOS_TEXTONLY`
+  (no `vbe` command, `screen.textmode` is ignored), so the kernel only
+  gets `vt_vga` text and no framebuffer. The splash daemon, the installer
+  and the greeter therefore fall back to the text console: the installer
+  runs its text mode, and on an installed system `rc.d/jos-login` sees
+  `VT(vga): text` in the boot messages and does not start the greeter
+  (`getty` keeps `ttyv0`). 32-bit EFI (`BOOTIA32.EFI` is FreeBSD's
+  `loader_ia32.efi`) has no `jos-boot` card, but it still gets efifb when
+  the firmware provides GOP.
 - A daemon crash would leave the console in graphics mode; the panic
   path restores text mode, and `jos-splash finish --console` (what
   `service jos-splash stop` runs) can be typed blind.

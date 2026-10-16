@@ -160,16 +160,32 @@ pub const ESP_LOADER: &str = "EFI/FREEBSD/LOADER.EFI";
 /// The removable-media default path firmware boots without an entry.
 pub const ESP_DEFAULT: &str = "EFI/BOOT/BOOTX64.EFI";
 
+/// FreeBSD's loader for 32-bit UEFI firmware (it boots the amd64 kernel),
+/// shipped by the base system since 14.0.
+pub const LOADER_IA32_EFI: &str = "/boot/loader_ia32.efi";
+
+/// Removable-media path 32-bit UEFI firmware boots (early Intel Macs).
+pub const ESP_IA32: &str = "EFI/BOOT/BOOTIA32.EFI";
+
+/// Legacy BIOS boot code for a GPT disk with a ZFS root: the protective
+/// MBR and the stage that reads the pool, written by `gpart bootcode`.
+pub const PMBR: &str = "/boot/pmbr";
+pub const GPTZFSBOOT: &str = "/boot/gptzfsboot";
+
 /// Files to place on an EFI system partition: `(source in the root,
 /// destination relative to the ESP)`. With the pre-loader available it
 /// becomes the default boot file and FreeBSD's loader moves to its own
 /// directory; without it the loader is the default, as plain FreeBSD does.
-pub fn esp_files(has_jos_boot: bool) -> Vec<(&'static str, &'static str)> {
+pub fn esp_files(has_jos_boot: bool, has_ia32: bool) -> Vec<(&'static str, &'static str)> {
     let mut files = vec![(LOADER_EFI, ESP_LOADER)];
     if has_jos_boot {
         files.push((JOS_BOOT_EFI, ESP_DEFAULT));
     } else {
         files.push((LOADER_EFI, ESP_DEFAULT));
+    }
+    // jos-boot is x86_64-only: 32-bit firmware gets FreeBSD's loader.
+    if has_ia32 {
+        files.push((LOADER_IA32_EFI, ESP_IA32));
     }
     files
 }
@@ -306,6 +322,7 @@ pub fn loader_conf(flavor: Flavor, opts: &Dom0Options) -> String {
     s.push_str(&format!("splash=\"{BOOT_SPLASH_PNG}\"\n"));
     s.push_str(&format!("shutdown_splash=\"{BOOT_SPLASH_PNG}\"\n"));
     s.push_str("kern.vt.splash_cpu=\"0\"\n");
+
     s.push_str("# Passthrough devices: see /usr/local/share/juanitos/loader.conf.sample\n");
     s.push_str("#pptdevs=\"1/0/0 1/0/1\"\n");
     s
@@ -505,6 +522,7 @@ mod tests {
         );
         assert!(live.contains("splash=\"/boot/images/juanitos-splash.png\""));
         assert!(!live.contains("boot_mute"), "mute comes from jos-boot's -m");
+
         assert!(!live.contains("zfs_load"));
 
         let inst = loader_conf(
@@ -521,10 +539,11 @@ mod tests {
 
     #[test]
     fn esp_layout_prefers_the_preloader() {
-        let with = esp_files(true);
+        let with = esp_files(true, true);
         assert!(with.contains(&("/boot/loader.efi", "EFI/FREEBSD/LOADER.EFI")));
         assert!(with.contains(&("/boot/jos-boot.efi", "EFI/BOOT/BOOTX64.EFI")));
-        let without = esp_files(false);
+        assert!(with.contains(&("/boot/loader_ia32.efi", "EFI/BOOT/BOOTIA32.EFI")));
+        let without = esp_files(false, false);
         assert!(without.contains(&("/boot/loader.efi", "EFI/BOOT/BOOTX64.EFI")));
         assert!(!without.iter().any(|(src, _)| *src == JOS_BOOT_EFI));
         assert_eq!(without.len(), 2);

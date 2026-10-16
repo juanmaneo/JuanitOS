@@ -86,7 +86,10 @@ pub fn cpu_virt_check(dmesg: Option<&str>) -> Check {
             format!("could not read {DMESG_BOOT}; cannot tell whether the CPU supports bhyve"),
         );
     };
-    let line = dmesg.lines().map(str::trim).find_map(|l| {
+    // identcpu indents its feature lines; vmm.ko's own complaints
+    // (`SVM: not available.`) start in column 0 and must not match.
+    let line = dmesg.lines().find_map(|l| {
+        let l = l.strip_prefix(char::is_whitespace)?.trim_start();
         l.strip_prefix("VT-x:")
             .map(|r| ("VT-x", r))
             .or_else(|| l.strip_prefix("SVM:").map(|r| ("SVM", r)))
@@ -356,7 +359,7 @@ mod tests {
         assert_eq!(locked.status, Status::Fail);
         assert!(locked.detail.contains("disabled in the firmware"));
 
-        let none = check("CPU: Intel(R) Atom(TM)\n");
+        let none = check("CPU: Intel(R) Core(TM)2 Duo\nSVM: not available.\n");
         assert_eq!(none.status, Status::Fail);
         assert!(none.detail.contains("neither"));
 
