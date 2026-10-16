@@ -57,6 +57,21 @@ steps, same checks).
 dd if=JuanitOS-0.1.0-amd64.iso of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
+### Ventoy
+
+The ISO can also just be copied onto a [Ventoy](https://www.ventoy.net)
+stick (the data partition must be exFAT, NTFS or ext4: the file is larger
+than FAT32 allows). Ventoy recognises it as a FreeBSD image, injects its
+`geom_ventoy` module and boots the ISO's own El Torito entries, so both
+firmware paths work: UEFI (`jos-boot.efi`, graphical installer) and BIOS
+(`isoboot`, text installer). Verified with Ventoy 1.1.18 in QEMU: the live
+system mounts `/dev/iso9660/JUANITOS` on top of `ventoy/IMAGE`, and an
+install from it boots to the login screen. On the Ventoy stick the ISO
+must be a plain, fully allocated copy: a sparse file (holes punched where
+the image is zero, as `mkfs.ext4 -d` or `debugfs write` do) cannot be
+mapped and Ventoy stops with `No bootfile found for UEFI!`. Any normal
+`cp` or file-manager copy is fine.
+
 ## The graphical installer
 
 `rc.local` starts `jos-install --live` once the boot splash has finished.
@@ -121,6 +136,10 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
 
 1. Host checks (see above). Fails hard unless `--ignore-doctor`.
 2. Disk selection from `kern.disks` (optical/memory disks filtered out).
+   The disk the live system booted from is never offered: the root
+   device from `mount -p` is walked down the GEOM tree
+   (`kern.geom.conftxt`) to the disk under it, which also finds the stick
+   under Ventoy's `ventoy/IMAGE` provider.
 3. `gpart`: GPT with `efiboot0` (260 MiB FAT32, p1), `gptboot0`
    (512 KiB `freebsd-boot`, p2), `swap0`, `zfs0`.
 4. `zpool create` with `altroot=/mnt`, `compression=lz4`, `atime=off`;

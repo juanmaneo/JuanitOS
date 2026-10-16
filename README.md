@@ -85,7 +85,8 @@ learn whether the hardware can run JuanitOS before any disk is touched.
 
 ## Installing
 
-Boot the ISO: after the splash, a graphical installer takes the screen,
+Boot the ISO (`dd` it to a USB stick, or drop the file on a Ventoy
+stick): after the splash, a graphical installer takes the screen,
 the way QubesOS greets you with Anaconda. It is our own Rust program
 drawing straight on the FreeBSD console framebuffer (no X11, no Qt), laid
 out like Calamares: steps on the left, the current page on the right.

@@ -59,30 +59,27 @@ pub fn parse_root_device(mount_p: &str) -> Option<String> {
     })
 }
 
-/// GEOM provider carrying label `name` (`iso9660/JUANITOS`), from
-/// `glabel status -s` lines (`iso9660/JUANITOS  N/A  da0`).
-pub fn parse_glabel_provider(status: &str, name: &str) -> Option<String> {
-    status.lines().find_map(|line| {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        match f.as_slice() {
-            [label, _, provider] if *label == name => Some(provider.to_string()),
-            _ => None,
+/// The disk under GEOM provider `name`, from `sysctl -n kern.geom.conftxt`:
+/// `<depth> <class> <name> <mediasize> <sectorsize> ...` lines, depth
+/// first, each hanging off the nearest shallower line above it, with the
+/// disks at depth 0. This resolves whatever is stacked on the disk
+/// (partitions, labels, Ventoy's `ventoy/IMAGE` whose name says nothing
+/// about the stick it lives on), unlike guessing from the provider name.
+pub fn parse_conftxt_disk(conftxt: &str, name: &str) -> Option<String> {
+    let mut disk = None;
+    for line in conftxt.lines() {
+        let mut f = line.split_whitespace();
+        let (Some(depth), Some(_class), Some(provider)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        if depth == "0" {
+            disk = Some(provider);
         }
-    })
-}
-
-/// Whole-disk name of a provider: `da0p2` / `ada0s1a` -> `da0` / `ada0`.
-pub fn disk_of(provider: &str) -> String {
-    let trimmed = provider.trim_end_matches(|c: char| c.is_ascii_lowercase());
-    let base = trimmed.trim_end_matches(|c: char| c.is_ascii_digit());
-    for sep in ['p', 's'] {
-        if let Some(disk) = base.strip_suffix(sep) {
-            if disk.ends_with(|c: char| c.is_ascii_digit()) && base.len() < trimmed.len() {
-                return disk.to_string();
-            }
+        if provider == name {
+            return disk.map(String::from);
         }
     }
-    provider.to_string()
+    None
 }
 
 /// The disk the running system booted from (the USB stick holding the
@@ -90,16 +87,11 @@ pub fn disk_of(provider: &str) -> String {
 pub fn boot_disk(runner: &dyn Runner) -> Option<String> {
     let mounts = runner.run("mount", &["-p"]).ok().filter(|o| o.success())?;
     let root = parse_root_device(&mounts.stdout)?;
-    let provider = if root.contains('/') {
-        let labels = runner
-            .run("glabel", &["status", "-s"])
-            .ok()
-            .filter(|o| o.success())?;
-        parse_glabel_provider(&labels.stdout, &root)?
-    } else {
-        root
-    };
-    Some(disk_of(&provider))
+    let geom = runner
+        .run("sysctl", &["-n", "kern.geom.conftxt"])
+        .ok()
+        .filter(|o| o.success())?;
+    parse_conftxt_disk(&geom.stdout, &root)
 }
 
 pub fn list_disks(runner: &dyn Runner) -> Result<Vec<Disk>> {
@@ -140,31 +132,80 @@ mod tests {
         assert!(parse_kern_disks("").is_empty());
     }
 
+    /// `kern.geom.conftxt` of the live medium written to a USB stick
+    /// (`da0`), next to the install target `vtbd0`.
+    const DD_STICK: &str = "\
+0 DISK da0 8436797440 512 hd 255 sc 63
+1 LABEL diskid/DISK-1-0000:00:03.0-1 8436797440 512 i 0 o 0
+2 PART diskid/DISK-1-0000:00:03.0-1p2 8388608 512 i 2 o 40960 ty efi xs GPT xt c12a7328
+2 PART diskid/DISK-1-0000:00:03.0-1p1 12800 512 i 1 o 17408 ty freebsd-boot xs GPT xt 83bd6b9d
+1 LABEL iso9660/JUANITOS 8436797440 512 i 0 o 0
+2 PART iso9660/JUANITOSp2 8388608 512 i 2 o 40960 ty efi xs GPT xt c12a7328
+2 PART iso9660/JUANITOSp1 12800 512 i 1 o 17408 ty freebsd-boot xs GPT xt 83bd6b9d
+1 PART da0p2 8388608 512 i 2 o 40960 ty efi xs GPT xt c12a7328
+2 LABEL msdosfs/EFISYS 8388608 512 i 0 o 0
+1 PART da0p1 12800 512 i 1 o 17408 ty freebsd-boot xs GPT xt 83bd6b9d
+0 DISK cd0 0 2048 hd 0 sc 0
+0 DISK vtbd0 21474836480 512 hd 16 sc 63
+";
+
+    /// The same ISO booted through Ventoy (as seen in QEMU): the root
+    /// label sits on the `ventoy/IMAGE` provider, whose name does not
+    /// contain the stick's name.
+    const VENTOY_STICK: &str = "\
+0 DISK da0 10737418240 512 hd 255 sc 63
+1 LABEL diskid/DISK-1-0000:00:03.0-1 10737418240 512 i 0 o 0
+2 PART diskid/DISK-1-0000:00:03.0-1s2 33554432 512 i 2 o 10703863808 ty efi xs MBR xt 239
+2 PART diskid/DISK-1-0000:00:03.0-1s1 10702815232 512 i 1 o 1048576 ty ntfs xs MBR xt 7
+1 PART da0s2 33554432 512 i 2 o 10703863808 ty efi xs MBR xt 239
+2 LABEL msdosfs/VTOYEFI 33554432 512 i 0 o 0
+1 PART da0s1 10702815232 512 i 1 o 1048576 ty ntfs xs MBR xt 7
+2 LABEL ext2fs/Ventoy 10702815232 512 i 0 o 0
+1 VENTOY ventoy/IMAGE 8436797440 512
+2 LABEL iso9660/JUANITOS 8436797440 512 i 0 o 0
+3 PART iso9660/JUANITOSp2 8388608 512 i 2 o 40960 ty efi xs GPT xt c12a7328
+3 PART iso9660/JUANITOSp1 12800 512 i 1 o 17408 ty freebsd-boot xs GPT xt 83bd6b9d
+2 PART ventoy/IMAGEp2 8388608 512 i 2 o 40960 ty efi xs GPT xt c12a7328
+3 LABEL msdosfs/EFISYS 8388608 512 i 0 o 0
+2 PART ventoy/IMAGEp1 12800 512 i 1 o 17408 ty freebsd-boot xs GPT xt 83bd6b9d
+0 DISK cd0 0 2048 hd 0 sc 0
+0 DISK vtbd0 21474836480 512 hd 16 sc 63
+";
+
     #[test]
     fn boot_medium_is_never_an_install_target() {
         use juanitos_core::sys::{CmdOutput, MockRunner};
-        let m = MockRunner::new()
-            .respond("sysctl", &[], CmdOutput::ok("vtbd0 da0 cd0\n"))
-            .respond(
-                "mount",
-                &["-p"],
-                CmdOutput::ok(
-                    "/dev/iso9660/JUANITOS\t/\tcd9660\tro\t1 1\n\
-                     tmpfs\t/tmp\ttmpfs\trw\t0 0\n",
-                ),
-            )
-            .respond(
-                "glabel",
-                &[],
-                CmdOutput::ok("msdosfs/EFISYS  N/A  da0p2\niso9660/JUANITOS  N/A  da0\n"),
-            );
-        assert_eq!(boot_disk(&m).as_deref(), Some("da0"));
-        let names: Vec<String> = list_disks(&m)
-            .unwrap()
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
-        assert_eq!(names, vec!["vtbd0"]);
+        let live = |conftxt: &str| {
+            MockRunner::new()
+                .respond(
+                    "sysctl",
+                    &["-n", "kern.disks"],
+                    CmdOutput::ok("vtbd0 da0 cd0\n"),
+                )
+                .respond(
+                    "sysctl",
+                    &["-n", "kern.geom.conftxt"],
+                    CmdOutput::ok(conftxt),
+                )
+                .respond(
+                    "mount",
+                    &["-p"],
+                    CmdOutput::ok(
+                        "/dev/iso9660/JUANITOS\t/\tcd9660\tro\t1 1\n\
+                         tmpfs\t/tmp\ttmpfs\trw\t0 0\n",
+                    ),
+                )
+        };
+        for conftxt in [DD_STICK, VENTOY_STICK] {
+            let m = live(conftxt);
+            assert_eq!(boot_disk(&m).as_deref(), Some("da0"));
+            let names: Vec<String> = list_disks(&m)
+                .unwrap()
+                .into_iter()
+                .map(|d| d.name)
+                .collect();
+            assert_eq!(names, vec!["vtbd0"]);
+        }
 
         // Booted from a CD: nothing to hide among the disks.
         let cd = MockRunner::new()
@@ -173,37 +214,81 @@ mod tests {
                 &[],
                 CmdOutput::ok("/dev/iso9660/JUANITOS / cd9660 ro 1 1\n"),
             )
-            .respond("glabel", &[], CmdOutput::ok("iso9660/JUANITOS  N/A  cd0\n"));
+            .respond(
+                "sysctl",
+                &[],
+                CmdOutput::ok(
+                    "0 DISK cd0 8436797440 2048 hd 0 sc 0\n\
+                     1 LABEL iso9660/JUANITOS 8436797440 2048 i 0 o 0\n\
+                     0 DISK ada0 500107862016 512 hd 16 sc 63\n",
+                ),
+            );
         assert_eq!(boot_disk(&cd).as_deref(), Some("cd0"));
         // An installed system on a plain partition; no labels at all.
-        let disk =
-            MockRunner::new().respond("mount", &[], CmdOutput::ok("/dev/ada0p2 / ufs rw 1 1\n"));
+        let disk = MockRunner::new()
+            .respond("mount", &[], CmdOutput::ok("/dev/ada0p2 / ufs rw 1 1\n"))
+            .respond(
+                "sysctl",
+                &[],
+                CmdOutput::ok(
+                    "0 DISK ada0 500107862016 512 hd 16 sc 63\n\
+                     1 PART ada0p2 499000000000 512 i 2 o 1048576 ty freebsd-ufs xs GPT xt x\n\
+                     1 PART ada0p1 1048576 512 i 1 o 20480 ty efi xs GPT xt x\n",
+                ),
+            );
         assert_eq!(boot_disk(&disk).as_deref(), Some("ada0"));
-        let unlabelled = MockRunner::new()
+        // A root GEOM does not know (a ZFS dataset), a failing sysctl, a
+        // failing mount: no disk is hidden rather than the wrong one.
+        let zfs = MockRunner::new()
             .respond(
                 "mount",
                 &[],
-                CmdOutput::ok("/dev/iso9660/X / cd9660 ro 1 1\n"),
+                CmdOutput::ok("zroot/ROOT/default / zfs rw 1 1\n"),
             )
-            .respond("glabel", &[], CmdOutput::failed(1, ""));
-        assert_eq!(boot_disk(&unlabelled), None);
+            .respond("sysctl", &[], CmdOutput::ok(DD_STICK));
+        assert_eq!(boot_disk(&zfs), None);
+        let no_geom = MockRunner::new()
+            .respond("mount", &[], CmdOutput::ok("/dev/ada0p2 / ufs rw 1 1\n"))
+            .respond("sysctl", &[], CmdOutput::failed(1, ""));
+        assert_eq!(boot_disk(&no_geom), None);
         assert_eq!(
             boot_disk(&MockRunner::new().respond("mount", &[], CmdOutput::failed(1, ""))),
             None
         );
         assert_eq!(parse_root_device("tmpfs /tmp tmpfs rw 0 0\n"), None);
-        assert_eq!(parse_glabel_provider("broken line\n", "broken"), None);
     }
 
     #[test]
-    fn whole_disk_names() {
-        assert_eq!(disk_of("da0"), "da0");
-        assert_eq!(disk_of("da0p2"), "da0");
-        assert_eq!(disk_of("nda10p13"), "nda10");
-        assert_eq!(disk_of("ada0s1a"), "ada0");
-        assert_eq!(disk_of("ada0s1"), "ada0");
-        assert_eq!(disk_of("cd0"), "cd0");
-        assert_eq!(disk_of("vtbd1"), "vtbd1");
+    fn conftxt_resolves_providers_to_their_disk() {
+        assert_eq!(parse_conftxt_disk(DD_STICK, "da0").as_deref(), Some("da0"));
+        assert_eq!(
+            parse_conftxt_disk(DD_STICK, "da0p2").as_deref(),
+            Some("da0")
+        );
+        assert_eq!(
+            parse_conftxt_disk(DD_STICK, "msdosfs/EFISYS").as_deref(),
+            Some("da0")
+        );
+        assert_eq!(
+            parse_conftxt_disk(DD_STICK, "vtbd0").as_deref(),
+            Some("vtbd0")
+        );
+        assert_eq!(
+            parse_conftxt_disk(VENTOY_STICK, "ventoy/IMAGE").as_deref(),
+            Some("da0")
+        );
+        assert_eq!(
+            parse_conftxt_disk(VENTOY_STICK, "iso9660/JUANITOSp2").as_deref(),
+            Some("da0")
+        );
+        assert_eq!(parse_conftxt_disk(VENTOY_STICK, "nda0"), None);
+        assert_eq!(parse_conftxt_disk("", "da0"), None);
+        // Lines too short to be a provider are skipped; a provider listed
+        // before any disk (never happens) resolves to nothing.
+        assert_eq!(
+            parse_conftxt_disk("garbage\n1 LABEL x/y 1 512\n0 DISK da0 1 512\n", "x/y"),
+            None
+        );
     }
 
     #[test]
