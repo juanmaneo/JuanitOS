@@ -148,18 +148,30 @@ fn has_target(target: &str) -> bool {
 }
 
 fn ci(ctx: &Ctx) -> anyhow::Result<()> {
+    println!("🔍 Running format check...");
     fmt(ctx, false)?;
+
+    println!("🔍 Running clippy linting...");
     lint(ctx)?;
+
+    println!("🔍 Running tests and coverage...");
     // The coverage run is the test run (once, instrumented).
     coverage(ctx, false, false)?;
+
+    println!("🔍 Testing jos-boot library...");
     let boot = ctx.root.join("crates/jos-boot");
     cargo(ctx, &boot, &["test", "--lib", "--target", host_target()])?;
+
     if has_target(UEFI) {
+        println!("🔍 Building UEFI crates...");
         for dir in UEFI_CRATES {
             cargo(ctx, &ctx.root.join(dir), &["build", "--release"])?;
         }
+    } else {
+        println!("⚠️  Skipping UEFI builds (target not installed)");
     }
-    println!("\nxtask ci: all good");
+
+    println!("\n✅ xtask ci: all good");
     Ok(())
 }
 

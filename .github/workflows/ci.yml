@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_HTTP_TIMEOUT: 300
+  RUST_BACKTRACE: 1
 
 jobs:
   ci:
