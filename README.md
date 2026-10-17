@@ -1,6 +1,6 @@
 # JuanitOS
 
-FreeBSD + bhyve like QubesOS
+A FreeBSD distribution with bhyve aiming at beeing like QubesOS for FreeBSD
 
 Inspired by TrueNAS Core, Hellfire and HardenedBSD
 
