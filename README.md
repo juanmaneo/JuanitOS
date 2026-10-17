@@ -336,8 +336,8 @@ second per command, 2 MB of output included, and `jos copy` and
 `jos-copy` ride on it. The channel's second port is the qube's doorbell:
 `jos-copy` rings it and `jos serve` answers at once instead of on its
 next poll (0.4 s end to end with the poll set to 60 s; both templates
-updated). The test suite reaches 95% line coverage, gated per crate in
-CI.
+updated). The test suite reaches 96.7% line coverage, gated per crate
+in CI (see `coverage.toml` for the per-crate floors).
 
 Stage 2 is done too: the stage-1 ISO was installed headless (`qemu -vga
 none`, text installer on the serial port) and the installed JuanitOS
