@@ -5,6 +5,7 @@ version = "0.1.0"
 edition = "2021"
 license = "BSD-3-Clause"
 repository = "https://github.com/juanmaneo/JuanitOS"
+authors = ["The JuanitOS authors - see AUTHORS"]
 
 # Standalone workspace: this crate builds for x86_64-unknown-uefi (see
 # .cargo/config.toml) and must not be pulled into the host workspace. The

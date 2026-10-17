@@ -22,6 +22,7 @@ version = "0.1.0"
 edition = "2021"
 license = "BSD-3-Clause"
 repository = "https://github.com/juanmaneo/JuanitOS"
+authors = ["The JuanitOS authors - see AUTHORS"]
 
 [workspace.dependencies]
 anyhow = "1"
