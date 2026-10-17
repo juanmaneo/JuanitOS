@@ -93,6 +93,51 @@ with a blank virtio target disk, `key`/`type`/`shot` drive the installer
 through the QEMU monitor. The Disk page must list the target disk only,
 never the stick.
 
+### Intel Macs
+
+Macs before the T2 chip (2006–2017) boot EFI 1.x firmware with Apple
+extensions and no Secure Boot. What works and what does not:
+
+- **Write the ISO with `dd`, then hold Option (Alt) at the chime.** The
+  Apple boot picker shows the stick's ESP as "EFI Boot". rEFInd also
+  lists a `dd`-written stick, since it is a plain GPT disk with a FAT ESP.
+  Macs from late 2007 on (MacBookPro3,1 and later, everything that runs
+  Yosemite) have 64-bit EFI and start `BOOTX64.EFI` (`jos-boot`). The
+  earliest models have 32-bit EFI and start `BOOTIA32.EFI` (FreeBSD's
+  `loader_ia32.efi`, text boot).
+- **Prefer `dd` over Ventoy on a Mac.** Ventoy's `BOOTX64.EFI` is a
+  Secure Boot shim. On a machine without Secure Boot it prints a line such
+  as `Not a Secure Boot Platform 14` and continues; we see the same line
+  on OVMF, where the boot goes on normally. That line is harmless on a
+  Mac too. What breaks is the next step: Ventoy's GRUB and its disk
+  emulation on Apple's old firmware. This is why other ISOs, Debian's
+  included, fail through Ventoy on the same Mac while they boot when
+  written directly. rEFInd may also not list a Ventoy stick in its
+  default MBR layout. Reinstalling Ventoy with a GPT layout
+  (`Ventoy2Disk.sh -i -g`) may help; we have not verified this.
+- **Console mode.** Apple firmware starts applications with its console
+  in graphics mode, which hides all text output. `jos-boot` switches the
+  `EFI_CONSOLE_CONTROL_PROTOCOL` to graphics mode before drawing the card.
+  It switches to text mode before chain-loading the verbose, single-user
+  and loader-menu entries, so their output shows (the same quirk rEFInd,
+  GRUB and OpenCore handle). FreeBSD's own `loader.efi` does not do this.
+  Booted directly on a Mac, it can show a black screen while it works.
+- **Qubes need EPT.** bhyve on Intel requires EPT and unrestricted guest
+  (Nehalem, 2008, and later). A Core 2 Duo has VT-x without either, and
+  its chipset has no VT-d. On such a Mac, the live ISO tests the boot
+  chain, the installer and the dom0 desktop, but no qube can start.
+  The installer's Hardware page (`jos doctor`) reports it as a failed
+  check ("VT-x lacks EPT and unrestricted guest, which bhyve requires"),
+  and installing anyway is still allowed.
+
+Apple's own `boot.efi` is closed source, and the open parts of Darwin
+(XNU, the old `BootX`) carry nothing that a third-party EFI loader
+needs. The public knowledge of Apple EFI quirks lives in rEFInd, GRUB and
+OpenCore. Of those quirks, only console control matters for JuanitOS.
+The others are Apple's "set OS" protocol, which keeps the integrated GPU
+visible on 2011+ dual-GPU MacBook Pros, and HFS+ boot volumes, which a
+FAT ESP does not need. Neither applies to Core 2–era machines.
+
 ## The graphical installer
 
 `rc.local` starts `jos-install --live` once the boot splash has finished.

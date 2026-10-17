@@ -24,23 +24,59 @@ use core::fmt::Write;
 use core::time::Duration;
 
 use jos_boot::{
-    countdown_scene, default_entry, load_options, marks_pending, on_countdown_key, Action,
-    Countdown, Key, MenuOutcome, MenuState, COUNTDOWN_MS, DEFAULT_ENTRY, ENTRIES, HEADLESS_ARGS,
-    LOADER_PATH, PENDING_NAME, PENDING_VENDOR,
+    console_mode_for, countdown_scene, default_entry, load_options, marks_pending,
+    on_countdown_key, Action, ConsoleMode, Countdown, Key, MenuOutcome, MenuState, COUNTDOWN_MS,
+    DEFAULT_ENTRY, ENTRIES, HEADLESS_ARGS, LOADER_PATH, PENDING_NAME, PENDING_VENDOR,
 };
 use jos_gfx::scene::{card_origin, Scene, CARD_HEIGHT, CARD_WIDTH};
 use jos_gfx::Image;
-use uefi::boot::{self, LoadImageSource};
+use uefi::boot::{self, LoadImageSource, OpenProtocolAttributes, OpenProtocolParams};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, PixelFormat};
 use uefi::proto::console::text::{Key as UefiKey, ScanCode};
 use uefi::proto::device_path::build::{media, DevicePathBuilder};
 use uefi::proto::device_path::DevicePath;
 use uefi::proto::loaded_image::LoadedImage;
-use uefi::proto::BootPolicy;
+use uefi::proto::{unsafe_protocol, BootPolicy};
 use uefi::runtime::{self, ResetType, VariableAttributes, VariableVendor};
 use uefi::{CString16, Status};
 
 const POLL: Duration = Duration::from_millis(20);
+
+/// `EFI_CONSOLE_CONTROL_PROTOCOL` (see [`jos_boot::CONSOLE_CONTROL_GUID`]).
+#[repr(C)]
+#[unsafe_protocol("f42f7782-012e-4c12-9956-49f94304f721")]
+struct ConsoleControl {
+    get_mode: unsafe extern "efiapi" fn(*mut Self, *mut u32, *mut u8, *mut u8) -> Status,
+    set_mode: unsafe extern "efiapi" fn(*mut Self, u32) -> Status,
+    lock_std_in: unsafe extern "efiapi" fn(*mut Self, *const u16) -> Status,
+}
+
+/// Switch Apple-style firmware between its text and graphics console.
+/// A no-op where the protocol does not exist (everything but Intel Macs
+/// and some EFI 1.x boards).
+fn set_console_mode(mode: ConsoleMode) {
+    let Ok(handle) = boot::get_handle_for_protocol::<ConsoleControl>() else {
+        return;
+    };
+    // SAFETY: GetProtocol does not take ownership; the console driver keeps
+    // working, and the interface is only used while `cc` is alive.
+    let cc = unsafe {
+        boot::open_protocol::<ConsoleControl>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    };
+    if let Ok(mut cc) = cc {
+        let this: *mut ConsoleControl = &mut *cc;
+        // SAFETY: `this` is the live interface the firmware installed, and
+        // SetMode only reads its arguments.
+        let _ = unsafe { ((*this).set_mode)(this, mode.raw()) };
+    }
+}
 const ERROR_PAUSE: Duration = Duration::from_secs(8);
 
 #[uefi::entry]
@@ -89,6 +125,9 @@ fn run() -> Result<(), String> {
     if boot::get_handle_for_protocol::<GraphicsOutput>().is_err() {
         // Headless machine: nothing to draw on, so do not loop on a
         // "no graphics output" reset; boot the loader on the text console.
+        // (Also the UGA-only early Intel Macs, whose loader output needs
+        // the text console.)
+        set_console_mode(console_mode_for(HEADLESS_ARGS));
         uefi::system::with_stdout(|out| {
             let _ = writeln!(out, "jos-boot: no graphics output, booting {LOADER_PATH}");
         });
@@ -96,6 +135,7 @@ fn run() -> Result<(), String> {
     }
     let pending = boot_pending();
     let choice = {
+        set_console_mode(ConsoleMode::Graphics);
         let mut screen = Screen::open()?;
         choose(&mut screen, pending)
         // `screen` is dropped here: the GOP protocol must be closed before
@@ -110,7 +150,10 @@ fn run() -> Result<(), String> {
     }
     match entry.action {
         Action::Reboot => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
-        Action::Chain => chain_load(entry.args),
+        Action::Chain => {
+            set_console_mode(console_mode_for(entry.args));
+            chain_load(entry.args)
+        }
     }
 }
 
@@ -253,9 +296,14 @@ fn chain_load(args: &str) -> Result<(), String> {
 /// Show an error: on the graphics screen (what the user sees) and on the
 /// firmware text console (serial, logs).
 fn report(msg: &str) {
+    // The card is what the user sees; without a screen, make the text
+    // console visible instead (Apple firmware hides it in graphics mode).
+    set_console_mode(ConsoleMode::Graphics);
     if let Ok(mut screen) = Screen::open() {
         let card = jos_gfx::scene::render_message_card("BOOT FAILED", &error_lines(msg));
         screen.draw_full_image(&card);
+    } else {
+        set_console_mode(ConsoleMode::Text);
     }
     uefi::system::with_stdout(|out| {
         let _ = out.clear();
@@ -377,6 +425,7 @@ impl Screen {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    set_console_mode(ConsoleMode::Text);
     uefi::system::with_stdout(|out| {
         let _ = writeln!(out, "jos-boot panic: {info}");
     });

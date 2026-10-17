@@ -137,6 +137,44 @@ pub fn marks_pending(entry: &Entry) -> bool {
 /// console — the firmware's text console, which is the serial port there.
 pub const HEADLESS_ARGS: &str = "autoboot_delay=-1 beastie_disable=YES";
 
+/// `EFI_CONSOLE_CONTROL_PROTOCOL`, from the EFI 1.x / EDK I era. Intel
+/// Macs' firmware still implements it and starts applications in its
+/// *graphics* mode, where everything written to `ConOut` is swallowed:
+/// a text console stays invisible until someone selects text mode. rEFInd,
+/// GRUB and OpenCore all switch it; FreeBSD's `loader.efi` does not, so
+/// `jos-boot` sets the mode its child needs before chain-loading. Other
+/// firmware does not install the protocol and the calls are skipped.
+pub const CONSOLE_CONTROL_GUID: Guid = guid!("f42f7782-012e-4c12-9956-49f94304f721");
+
+/// `EFI_CONSOLE_CONTROL_SCREEN_MODE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleMode {
+    Text,
+    Graphics,
+}
+
+impl ConsoleMode {
+    /// The protocol's value for this mode.
+    pub fn raw(self) -> u32 {
+        match self {
+            ConsoleMode::Text => 0,
+            ConsoleMode::Graphics => 1,
+        }
+    }
+}
+
+/// The console mode `loader.efi` should start in with `args`: graphics
+/// for the quiet boot (nothing is printed and the card stays up until the
+/// kernel splash), text for everything that talks to the user on the
+/// firmware console (verbose, single user, the loader menu, headless).
+pub fn console_mode_for(args: &str) -> ConsoleMode {
+    if args.split(' ').any(|w| w == "console=nullconsole") {
+        ConsoleMode::Graphics
+    } else {
+        ConsoleMode::Text
+    }
+}
+
 /// Keys the pre-loader reacts to, already decoded from UEFI input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -297,6 +335,22 @@ mod tests {
         }
         // The loader splits on spaces and does not understand quotes.
         assert!(!e.args.contains('"'));
+    }
+
+    #[test]
+    fn console_mode_follows_what_the_loader_prints() {
+        assert_eq!(
+            alloc::format!("{CONSOLE_CONTROL_GUID}"),
+            "f42f7782-012e-4c12-9956-49f94304f721"
+        );
+        assert_eq!(ConsoleMode::Text.raw(), 0);
+        assert_eq!(ConsoleMode::Graphics.raw(), 1);
+        assert_eq!(console_mode_for(ENTRIES[0].args), ConsoleMode::Graphics);
+        for e in &ENTRIES[1..4] {
+            assert_eq!(console_mode_for(e.args), ConsoleMode::Text, "{}", e.title);
+        }
+        assert_eq!(console_mode_for(HEADLESS_ARGS), ConsoleMode::Text);
+        assert_eq!(console_mode_for(""), ConsoleMode::Text);
     }
 
     #[test]

@@ -59,6 +59,16 @@ beastie_disable=YES` and *without* `-m`/`console=nullconsole`, so the
 loader and the kernel talk on the firmware's text console, i.e. the
 serial port. The live installer then runs in its text mode there.
 
+On Intel Macs (and other EFI 1.x firmware with
+`EFI_CONSOLE_CONTROL_PROTOCOL`) the console must be in graphics mode for
+drawing. It must be in text mode for anything that prints. `jos-boot`
+selects graphics before it draws the card. Before chain-loading, it
+selects the mode the entry needs (`console_mode_for` in `src/lib.rs`):
+graphics for the quiet boot, text for the verbose, single-user, loader-menu
+and headless boots. Error paths use text whenever no card can be drawn.
+Where the protocol does not exist (all current firmware, OVMF), these
+calls do nothing. See `docs/installer.md`, "Intel Macs".
+
 #### Failed-boot fallback
 
 `-m` (`RB_MUTE`) mutes kernel console *input* as well as output
