@@ -1011,6 +1011,13 @@ fn serve_answers_guest_requests_by_policy() {
 
     // Malformed requests are answered too, so the guest does not wait.
     req("web", "5", "exec rm -rf /\n");
+    let listed = ok(&["requests"]);
+    assert!(
+        listed
+            .lines()
+            .any(|l| l.starts_with("web") && l.contains(" 5 ") && l.contains("invalid: ")),
+        "{listed}"
+    );
     let served = ok(&["serve", "--once"]);
     assert!(served.contains("web 5: failed"), "{served}");
     assert!(reply("web", "5").unwrap().starts_with("error: "));
@@ -1265,4 +1272,288 @@ fn setup_creates_the_system_qubes_and_resumes() {
     assert!(again.contains("- sys-net exists"), "{again}");
     assert!(again.contains("- no gpu qube (--no-gpu)"));
     assert!(again.contains("nothing to do"));
+}
+
+/// A stand-in FreeBSD host: shell scripts named after the host tools, in
+/// a directory meant to be the whole `PATH` (nothing of the development
+/// machine is ever run). Returns the directory.
+#[cfg(unix)]
+fn fake_host(e: &Env, tools: &[(&str, &str)]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = e.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for (name, body) in tools {
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// `pciconf -l -v` of a laptop: Intel iGPU for the dom0, an NVIDIA card
+/// (GPU and audio) reserved at install time, the wired NIC on em0.
+#[cfg(unix)]
+const PCICONF: &str = r#"printf '%s\n' \
+  'vgapci0@pci0:0:2:0:  class=0x030000 rev=0x00 hdr=0x00 vendor=0x8086 device=0x7d55' \
+  "    vendor     = 'Intel Corporation'" \
+  "    device     = 'Arc Graphics'" \
+  'ppt0@pci0:1:0:0:  class=0x030000 rev=0xa1 hdr=0x00 vendor=0x10de device=0x28b8' \
+  "    vendor     = 'NVIDIA Corporation'" \
+  "    device     = 'RTX 500 Ada Generation Laptop GPU'" \
+  'ppt1@pci0:1:0:1:  class=0x040300 rev=0xa1 hdr=0x00 vendor=0x10de device=0x22be' \
+  'em0@pci0:5:0:0:  class=0x020000 rev=0x10 hdr=0x00 vendor=0x8086 device=0x15bc' \
+  "    vendor     = 'Intel Corporation'" \
+  "    device     = 'Ethernet Connection I219-LM'""#;
+
+/// The read-only queries of `jos doctor` and `jos setup` answered like a
+/// FreeBSD host ready for passthrough; in a dry run nothing else runs.
+#[cfg(unix)]
+#[test]
+fn a_ready_host_passes_the_doctor_and_setup_reserves_its_cards() {
+    let e = Env::new("host");
+    let bin = fake_host(
+        &e,
+        &[
+            ("kldstat", "exit 0"),
+            (
+                "sysctl",
+                r#"case "$1" in
+  hw.vmm.iommu.enable) echo 'hw.vmm.iommu.enable: 1' ;;
+  hw.model) echo 'hw.model: Intel(R) Core(TM) Ultra 7 165H' ;;
+  *) exit 1 ;;
+esac"#,
+            ),
+            ("pciconf", PCICONF),
+            (
+                "route",
+                "printf '%s\\n' '   route to: default' '  interface: em0'",
+            ),
+            (
+                "sysrc",
+                r#"case "$*" in *' -n '*) echo '1/0/0 1/0/1' ;; *) exit 1 ;; esac"#,
+            ),
+            ("zpool", "echo zroot"),
+        ],
+    );
+    let run_dir = e.dir.join("run");
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(&cfg, format!("run_dir = {:?}\n", run_dir.to_string_lossy())).unwrap();
+    let jos = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_jos"))
+            .arg("--dry-run")
+            .arg("--config")
+            .arg(&cfg)
+            .args(args)
+            .env("JOS_CONFIG_DIR", &e.dir)
+            .env("PATH", &bin)
+            .output()
+            .unwrap()
+    };
+    let ok = |args: &[&str]| {
+        let out = jos(args);
+        assert!(out.status.success(), "jos {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let doctor = ok(&["doctor"]);
+    assert!(doctor.contains("hw.vmm.iommu.enable=1"), "{doctor}");
+    assert!(doctor.contains("pool zroot online"), "{doctor}");
+    assert!(doctor.contains("1/0/0 1/0/1"), "{doctor}");
+
+    let all = ok(&["pci", "list"]);
+    assert!(all.starts_with("ADDR"), "{all}");
+    assert!(
+        all.contains("1/0/0    ppt0       10de:28b8 030000   NVIDIA Corporation RTX 500"),
+        "{all}"
+    );
+    assert!(all.contains("5/0/0    em0"), "{all}");
+    let gpus = ok(&["pci", "list", "--gpus"]);
+    assert!(gpus.contains("0/2/0") && gpus.contains("1/0/0"), "{gpus}");
+    assert!(!gpus.contains("em0") && !gpus.contains("1/0/1"), "{gpus}");
+    let ready = ok(&["pci", "list", "--ready"]);
+    assert!(
+        ready.contains("1/0/1") && !ready.contains("vgapci0"),
+        "{ready}"
+    );
+
+    // The uplink comes from the default route, the NIC behind it goes to
+    // sys-net, the reserved NVIDIA card to gpu; the NIC is reserved last.
+    let out = ok(&["setup"]);
+    assert!(
+        out.contains(" 1. install template fbsd15-net (downloading through em0)"),
+        "{out}"
+    );
+    assert!(out.contains("install template debian-13-dev"), "{out}");
+    assert!(out.contains("created sys-net") && out.contains("created gpu"));
+    assert!(
+        out.contains("+ sysrc -f /boot/loader.conf 'pptdevs=1/0/0 1/0/1 5/0/0'"),
+        "{out}"
+    );
+    assert!(out.contains("wrote pptdevs=\"1/0/0 1/0/1 5/0/0\" to /boot/loader.conf"));
+    assert!(out.contains("reboot to hand the reserved devices"), "{out}");
+    let net = std::fs::read_to_string(e.qube_file("sys-net")).unwrap();
+    assert!(net.contains("5/0/0") && !net.contains("uplink"), "{net}");
+    let gpu = std::fs::read_to_string(e.qube_file("gpu")).unwrap();
+    assert!(gpu.contains("1/0/0") && gpu.contains("1/0/1"), "{gpu}");
+
+    // A supervisor between two boots: the qube is "booting" and cannot
+    // be started twice. A host interface shows as the qube's uplink.
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("sys-net.pid"), "4242\n").unwrap();
+    let out = jos(&["start", "sys-net"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("sys-net already has a supervisor (pid 4242)"),
+        "{err}"
+    );
+    ok(&[
+        "create", "lab", "--kind", "net", "--os", "freebsd", "--uplink", "em0",
+    ]);
+    let ls = ok(&["ls"]);
+    let line = |name: &str| {
+        ls.lines()
+            .find(|l| l.starts_with(&format!("{name} ")))
+            .unwrap()
+            .to_string()
+    };
+    assert!(line("sys-net").contains("booting"), "{ls}");
+    assert!(line("gpu").contains("stopped"), "{ls}");
+    assert!(line("lab").contains("uplink:em0"), "{ls}");
+}
+
+/// Without `--dry-run`: the commands really run, against the stand-in
+/// host tools (bhyve powers the guest off at once).
+#[cfg(unix)]
+#[test]
+fn real_runs_against_a_stand_in_host() {
+    let e = Env::new("real");
+    let bin = fake_host(
+        &e,
+        &[
+            ("zfs", "exit 0"),
+            ("kill", "exit 0"),
+            ("ifconfig", "exit 0"),
+            ("bhyvectl", "exit 0"),
+            ("bhyve", "exit 1"),
+            ("mkdir", "exit 0"),
+            ("rm", "exit 0"),
+            ("chmod", "exit 0"),
+            ("tee", "while read -r _; do :; done"),
+            ("cu", "exit 1"),
+        ],
+    );
+    e.ok(&["init"]);
+    e.ok(&["create", "fbsd15", "--kind", "template", "--os", "freebsd"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&["create", "web", "--kind", "app", "--os", "linux"]);
+    e.ok(&[
+        "create",
+        "sys-net",
+        "--kind",
+        "net",
+        "--os",
+        "freebsd",
+        "--autostart",
+    ]);
+    let dir = |name: &str| {
+        let d = e.dir.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    };
+    let (run_dir, consoles) = (dir("run"), dir("consoles"));
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "config_dir = {:?}\nrun_dir = {:?}\nconsole_dir = {:?}\nshare_dir = {:?}\n\
+             cache_dir = {:?}\n",
+            e.dir.to_string_lossy(),
+            run_dir.to_string_lossy(),
+            consoles.to_string_lossy(),
+            dir("share").to_string_lossy(),
+            dir("cache").to_string_lossy(),
+        ),
+    )
+    .unwrap();
+    // The qube definitions come from config_dir: no JOS_CONFIG_DIR.
+    let jos = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_jos"))
+            .arg("--config")
+            .arg(&cfg)
+            .args(args)
+            .env_remove("JOS_CONFIG_DIR")
+            .env("PATH", &bin)
+            .output()
+            .unwrap()
+    };
+    let stderr = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
+
+    let ls = jos(&["ls"]);
+    assert!(
+        String::from_utf8_lossy(&ls.stdout).contains("work "),
+        "{ls:?}"
+    );
+
+    // A detached supervisor, logging next to its pidfile.
+    let out = jos(&["start", "work"]);
+    assert!(out.status.success(), "{out:?}");
+    let started = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        started.contains("started work (supervisor pid "),
+        "{started}"
+    );
+    let log = run_dir.join("work.log");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut text = String::new();
+    while !text.contains("finished") && !text.contains("failed") {
+        assert!(std::time::Instant::now() < deadline, "{text}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        text = std::fs::read_to_string(&log).unwrap_or_default();
+    }
+    assert!(text.contains("[jos supervise work] boot #1"), "{text}");
+    assert!(
+        text.contains("finished after 1 boot(s): poweroff"),
+        "{text}"
+    );
+
+    // autostart reports the qubes it could not start.
+    std::fs::write(run_dir.join("sys-net.pid"), "4242\n").unwrap();
+    let out = jos(&["autostart"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("error starting sys-net"), "{out:?}");
+    assert!(stderr(&out).contains("1 qube(s) failed to start"));
+
+    let out = jos(&["console", "work"]);
+    assert!(stderr(&out).contains("console exited with"), "{out:?}");
+
+    let out = jos(&["template", "run", "fbsd15"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout)
+        .contains("fbsd15: poweroff; `jos template snapshot fbsd15 <snap>`"));
+
+    // No pciconf: only a dry run plans without the PCI devices.
+    let out = jos(&["setup", "--uplink", "em0"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(!e.qube_file("sys-firewall").exists());
+
+    // A console device that is not a terminal.
+    std::fs::write(consoles.join("nmdm-work.1B"), "").unwrap();
+    let out = jos(&["run", "work", "--console", "true"]);
+    assert!(stderr(&out).contains("raw mode"), "{out:?}");
+
+    // An agent socket whose other end hangs up after the ping.
+    let listener = std::os::unix::net::UnixListener::bind(run_dir.join("web.agent")).unwrap();
+    let peer = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let (stream, _) = listener.accept().unwrap();
+        let mut ping = String::new();
+        std::io::BufReader::new(stream)
+            .read_line(&mut ping)
+            .unwrap();
+        ping
+    });
+    let out = jos(&["run", "web", "true"]);
+    assert!(peer.join().unwrap().contains("PING"));
+    assert!(stderr(&out).contains("the agent channel closed"), "{out:?}");
 }
