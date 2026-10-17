@@ -81,7 +81,10 @@ built by `jos-release` from `freebsd/geom_ventoy` against the release's
 since 1.0.62 skips the injection and writes the disk map into that file
 (see `crates/jos-release/src/ventoy.rs` for the layout constraints). On
 any other medium the module finds no Ventoy disk and does nothing. The
-installed system does not ship it.
+installed system does not ship it. Verified with `tools/dev/ventoy-rig.sh`
+and `VENTOY_VERSION=1.1.05`, a Ventoy without FreeBSD 15 support: the
+live ISO reaches the installer under both UEFI and BIOS, with root on
+`ventoy/IMAGE`.
 
 `tools/dev/ventoy-rig.sh` rebuilds that test on a Linux host: `make ISO`
 writes a Ventoy stick image (the layout `Ventoy2Disk.sh` produces, the ISO
