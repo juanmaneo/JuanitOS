@@ -1,0 +1,19 @@
+# JuanitOS authors
+
+"Juanito and the JuanitOS contributors" (LICENSE) and "the JuanitOS
+authors" (file headers) refer to the people listed here.
+
+## Author and maintainer
+
+Juanito - Juan Manuel CABA GONZALEZ-NICOLAS <contact@juan.email>
+
+## Contributors
+
+Add yourself here (name and e-mail) in the change that brings your first
+contribution.
+
+## Third-party code
+
+Code vendored from other projects keeps its own copyright notices and is
+not covered by this list; see THIRD_PARTY.md (e.g. freebsd/geom_ventoy:
+longpanda, Pawel Jakub Dawidek).

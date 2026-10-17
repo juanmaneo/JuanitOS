@@ -379,3 +379,5 @@ FreeBSD's ecosystem and compatible with every project it draws on.
 BSD-2-Clause), the Rust dependencies' licenses, the projects that
 inspired the design (ideas only, no code taken), and what publishing a
 built ISO requires (sources for the GPL-3.0 COSMIC packages it ships).
+`AUTHORS` names the copyright holders: Juanito (Juan Manuel CABA
+GONZALEZ-NICOLAS) and the contributors.

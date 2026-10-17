@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2026 The JuanitOS authors
+ * Copyright (c) 2026, Juanito and the JuanitOS contributors (see AUTHORS)
  *
  * jos_bootwatch: a muted boot that cannot mount its root shows why.
  *
