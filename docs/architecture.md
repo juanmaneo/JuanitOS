@@ -89,6 +89,36 @@ directory `jos-copy` uses to ask dom0 for a transfer, answered by
 
 Interface names are truncated to FreeBSD's 15-character limit.
 
+## First boot: `jos setup`
+
+The installer leaves a dom0 with no qubes. `jos setup`
+(`crates/juanitos-core/src/setup.rs`) creates the system qubes, the
+way the QubesOS firstboot does after Anaconda:
+
+1. The templates the system qubes clone from (`fbsd15-net`, plus
+   `debian-13-dev` for `gpu`) are built over the dom0's own uplink (the
+   interface of its default route, or `--uplink`), since no NetVM exists
+   yet.
+2. `sys-net` gets the network card behind that uplink (or `--nic B/S/F`,
+   or one already bound to `ppt`) passed through. Without IOMMU it is
+   bridged to the uplink instead.
+3. `sys-firewall` is the Rust unikernel when
+   `/usr/local/share/juanitos/jos-firewall.img` is installed, else a
+   FreeBSD qube cloned from `fbsd15-net`. Both start at boot.
+4. `gpu` gets the NVIDIA card the installer reserved, with every
+   function of its slot. Without such a card there is no `gpu` qube.
+5. Last, the system qubes' devices the dom0 still drives are added to
+   `pptdevs` in `/boot/loader.conf`. The dom0 keeps its network card
+   until the reboot that hands it to `sys-net`.
+
+The plan is a pure function of the host (PCI devices, uplink, IOMMU,
+`pptdevs`) and of the qubes already defined: whatever exists is skipped,
+so `jos setup` resumes after a failure and is harmless once done.
+`--dry-run` prints the plan and the host commands. A dom0 whose only
+network card was reserved at install time has nothing to download
+through, so the templates have to come from local images
+(`jos template install --image --checksums`) before `jos setup`.
+
 ## VM lifecycle
 
 `jos start <name>` spawns a detached `jos supervise <name>` (own process

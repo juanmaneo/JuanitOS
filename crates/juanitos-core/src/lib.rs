@@ -19,6 +19,7 @@ pub mod net;
 pub mod pci;
 pub mod release;
 pub mod requests;
+pub mod setup;
 pub mod share;
 pub mod supervisor;
 pub mod sys;

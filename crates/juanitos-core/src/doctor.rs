@@ -51,6 +51,20 @@ pub fn parse_sysctl_value(text: &str) -> String {
     }
 }
 
+/// Value of `hw.vmm.iommu.enable`, `None` when the sysctl is missing (vmm
+/// not loaded).
+pub fn iommu_setting(runner: &dyn Runner) -> Option<String> {
+    match runner.run("sysctl", &["hw.vmm.iommu.enable"]) {
+        Ok(out) if out.success() => Some(parse_sysctl_value(&out.stdout)),
+        _ => None,
+    }
+}
+
+/// True when PCI passthrough can work: `hw.vmm.iommu.enable=1`.
+pub fn iommu_enabled(runner: &dyn Runner) -> bool {
+    iommu_setting(runner).as_deref() == Some("1")
+}
+
 /// True when `sysctl hw.model` names an AMD processor.
 pub fn is_amd_cpu(runner: &dyn Runner) -> bool {
     match runner.run("sysctl", &["hw.model"]) {
@@ -184,20 +198,16 @@ pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
     }
 
     // IOMMU
-    match runner.run("sysctl", &["hw.vmm.iommu.enable"]) {
-        Ok(out) if out.success() => {
-            let v = parse_sysctl_value(&out.stdout);
-            if v == "1" {
-                checks.push(Check::new("iommu", Status::Ok, "hw.vmm.iommu.enable=1"));
-            } else {
-                checks.push(Check::new(
-                    "iommu",
-                    Status::Fail,
-                    format!("hw.vmm.iommu.enable={v}; set hw.vmm.iommu.enable=1 in /boot/loader.conf (needed for PCI passthrough)"),
-                ));
-            }
+    match iommu_setting(runner) {
+        Some(v) if v == "1" => {
+            checks.push(Check::new("iommu", Status::Ok, "hw.vmm.iommu.enable=1"));
         }
-        _ => checks.push(Check::new(
+        Some(v) => checks.push(Check::new(
+            "iommu",
+            Status::Fail,
+            format!("hw.vmm.iommu.enable={v}; set hw.vmm.iommu.enable=1 in /boot/loader.conf (needed for PCI passthrough)"),
+        )),
+        None => checks.push(Check::new(
             "iommu",
             Status::Fail,
             "sysctl hw.vmm.iommu.enable unavailable (vmm not loaded?)",

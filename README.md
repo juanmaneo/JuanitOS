@@ -103,6 +103,16 @@ like `bsdinstall zfsboot`. Serial consoles get the same steps as text
 prompts, and `jos-install --non-interactive --disk nda0 ...` installs
 unattended. Details and all screens: `docs/installer.md`.
 
+After the first boot, `jos setup` does what the QubesOS firstboot does:
+it builds the `fbsd15-net` template (downloading through the dom0's own
+network card), creates `sys-net` with that card passed through (bridged
+to it on a machine without IOMMU), `sys-firewall` (the Rust unikernel)
+and, when an NVIDIA card was reserved, the CUDA `gpu` qube from
+`debian-13-dev`. The network card is reserved last (`pptdevs`), so the
+dom0 keeps it until the reboot that hands it to `sys-net`. `jos setup`
+skips what exists, so it can be run again after a failure; `--nic`,
+`--uplink`, `--no-gpu` and `--dry-run` adjust or preview it.
+
 Once installed, `jos-release all` works on JuanitOS itself (sources and
 vendored crates are in `/usr/local/src/juanitos`), which is how the
 bootstrap closes: stage 1 on FreeBSD, stage 2 on JuanitOS.
@@ -115,9 +125,10 @@ cargo install --path crates/jos          # or cargo build --release
 
 # load vmm/nmdm/if_bridge and enable IOMMU: see freebsd/loader.conf.sample
 jos doctor
-jos init
+jos setup                                # fbsd15-net, sys-net, sys-firewall, gpu (below, by hand)
 
-# Templates from the distributions' cloud images (see "Guest templates")
+# The same by hand: templates from the distributions' cloud images (see "Guest templates")
+jos init
 jos template install fbsd15-net           # FreeBSD 15.1 as sys-net (dnsmasq + pf NAT)
 jos template install fbsd15-dev           # FreeBSD 15.1 + Podman
 jos template install debian-13-dev        # Debian 13 + Docker
@@ -275,7 +286,7 @@ v0.1 scaffold targeting FreeBSD 15.1-RELEASE: configuration, storage
 provisioning, bhyve command generation, networking plumbing, per-qube
 supervisor (restart on reboot, pidfiles and logs under
 `/var/run/juanitos`), host checks, release builder, the graphical
-installer, guest templates from the distributions' images (Debian 13 +
+installer (with its passthrough page), the first-boot `jos setup`, guest templates from the distributions' images (Debian 13 +
 Docker, FreeBSD 15 + Podman, Redox), the COSMIC desktop built from
 source for the dom0 (packaged, with a login screen), `jos run` through a virtio-console
 agent channel (serial console as the fallback), the per-qube virtio-9p
@@ -369,8 +380,10 @@ Not yet done: passthrough on real hardware (the nested run above proves
 the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
 Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
 but has not been booted), a display for Redox qubes (until `pci_types`
-is fixed upstream), and a COSMIC session on real hardware (the packages
-install; the desktop has not been seen running yet).
+is fixed upstream), a COSMIC session on real hardware (the packages
+install; the desktop has not been seen running yet), and a `jos setup`
+run on a real dom0 (it chains commands verified there one by one, but
+as a whole it is only verified with `--dry-run` and unit tests).
 
 ## License
 

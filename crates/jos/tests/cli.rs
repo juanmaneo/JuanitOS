@@ -1220,3 +1220,49 @@ fn copy_moves_files_through_the_share_for_real() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no such file or directory on dom0"));
 }
+
+#[test]
+fn setup_creates_the_system_qubes_and_resumes() {
+    let e = Env::new("setup");
+    // A dev box has no FreeBSD default route to download through.
+    let err = e.err(&["setup"]);
+    assert!(err.contains("--uplink IFACE"), "{err}");
+    assert!(e
+        .err(&["setup", "--uplink", "em0", "--firewall-image", "/no/fw.img"])
+        .contains("no such firewall image"));
+
+    let img = e.dir.join("fw.img");
+    std::fs::write(&img, b"esp").unwrap();
+    let out = e.ok(&[
+        "setup",
+        "--uplink",
+        "em0",
+        "--firewall-image",
+        img.to_str().unwrap(),
+    ]);
+    assert!(out.contains("initialized datasets"), "{out}");
+    assert!(
+        out.contains(" 1. install template fbsd15-net (downloading through em0)"),
+        "{out}"
+    );
+    assert!(out.contains(
+        " 2. create sys-net (net qube, freebsd, from fbsd15-net, bridged to em0, autostart)"
+    ));
+    assert!(out.contains(" 3. create sys-firewall (firewall qube, unikernel, booting "));
+    assert!(out.contains("- no gpu qube: no NVIDIA card is reserved"));
+    assert!(out.contains("created sys-net") && out.contains("created sys-firewall"));
+    assert!(out.contains("ready: `jos autostart`"));
+    for q in ["fbsd15-net", "sys-net", "sys-firewall"] {
+        assert!(e.qube_file(q).is_file(), "{q}");
+    }
+    let net = std::fs::read_to_string(e.qube_file("sys-net")).unwrap();
+    assert!(net.contains("uplink = \"em0\"") && net.contains("autostart = true"));
+    let fw = std::fs::read_to_string(e.qube_file("sys-firewall")).unwrap();
+    assert!(fw.contains("netvm = \"sys-net\"") && fw.contains("os = \"unikernel\""));
+
+    // Again, without any uplink: everything is there.
+    let again = e.ok(&["setup", "--no-gpu"]);
+    assert!(again.contains("- sys-net exists"), "{again}");
+    assert!(again.contains("- no gpu qube (--no-gpu)"));
+    assert!(again.contains("nothing to do"));
+}

@@ -121,6 +121,9 @@ jos create sys-firewall --kind firewall --os unikernel --netvm sys-net --autosta
     --kernel /usr/local/share/juanitos/jos-firewall.img
 ```
 
+`jos setup` runs these steps (plus the `gpu` qube) on first boot; see
+`docs/architecture.md`.
+
 Verified on bhyve (dom0 under nested KVM, `--uplink vtnet0` instead of
 `--pci`): `sys-net` boots with `vtnet0` on DHCP and `vtnet1` at
 `10.138.0.1`, pf's NAT rule loaded and dnsmasq listening; the Rust

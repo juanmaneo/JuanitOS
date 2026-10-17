@@ -156,6 +156,8 @@ fn is_query(program: &str, args: &[&str]) -> bool {
         "zfs" | "zpool" => matches!(args.first(), Some(&"list") | Some(&"get")),
         "kldstat" | "sysctl" | "pciconf" => true,
         "ifconfig" => args.len() == 1,
+        "route" => args.contains(&"get"),
+        "sysrc" => args.contains(&"-n"),
         _ => false,
     }
 }
@@ -347,5 +349,15 @@ mod tests {
         assert!(!is_query("ifconfig", &["tap-work", "destroy"]));
         assert!(is_query("kldstat", &[]));
         assert!(!is_query("bhyve", &["vm"]));
+        assert!(is_query("route", &["-n", "get", "default"]));
+        assert!(!is_query("route", &["add", "default", "10.0.0.1"]));
+        assert!(is_query(
+            "sysrc",
+            &["-f", "/boot/loader.conf", "-n", "pptdevs"]
+        ));
+        assert!(!is_query(
+            "sysrc",
+            &["-f", "/boot/loader.conf", "pptdevs=1/0/0"]
+        ));
     }
 }

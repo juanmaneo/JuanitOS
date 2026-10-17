@@ -8,11 +8,13 @@ use clap::{Args, Parser, Subcommand};
 use juanitos_core::bhyve::{self, Vm};
 use juanitos_core::config::load_global_config;
 use juanitos_core::doctor::{self, Status};
+use juanitos_core::dom0;
 use juanitos_core::events::Events;
 use juanitos_core::firewall::{self, Action, Rule};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::pci::{self, PciAddr};
 use juanitos_core::requests::{self, Broker, Disposition, Found, Policy, Verdict};
+use juanitos_core::setup;
 use juanitos_core::share::{self, Share};
 use juanitos_core::supervisor::{self, Supervisor};
 use juanitos_core::zfs::Storage;
@@ -145,6 +147,32 @@ enum Cmd {
     },
     /// Start every qube marked `autostart` (used by the rc script).
     Autostart,
+    /// First boot: build the templates and create sys-net, sys-firewall
+    /// and the gpu qube. Skips what exists, so it can be run again.
+    Setup(SetupArgs),
+}
+
+#[derive(Args)]
+struct SetupArgs {
+    /// Network card passed through to sys-net (default: the one behind
+    /// the dom0's default route).
+    #[arg(long, value_name = "B/S/F", value_parser = parse_pci)]
+    nic: Option<PciAddr>,
+    /// Interface the templates are downloaded through, and that sys-net
+    /// is bridged to without IOMMU (default: the default route's).
+    #[arg(long, value_name = "IFACE")]
+    uplink: Option<String>,
+    /// Do not create the gpu qube.
+    #[arg(long)]
+    no_gpu: bool,
+    #[arg(long, default_value_t = setup::GPU_CPUS)]
+    gpu_cpus: u32,
+    #[arg(long, default_value_t = setup::GPU_MEMORY_MB)]
+    gpu_memory_mb: u64,
+    /// Unikernel image for sys-firewall (default: the installed one, if
+    /// any; else sys-firewall is a FreeBSD qube).
+    #[arg(long, value_name = "PATH")]
+    firewall_image: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -597,22 +625,9 @@ impl App {
     }
 
     fn create(&self, a: CreateArgs) -> Result<()> {
-        Qube::validate_name(&a.name)?;
-        if self.store.exists(&a.name) {
-            bail!(juanitos_core::Error::QubeExists(a.name));
-        }
         let mut q = Qube::new(&a.name, a.kind, a.os);
         q.template = a.template;
         q.kernel = a.kernel;
-        match (q.is_unikernel(), &q.kernel, &q.template) {
-            (true, None, _) => bail!("--os unikernel requires --kernel <image>"),
-            (true, _, Some(_)) => bail!("unikernel qubes cannot be cloned from a template"),
-            (false, Some(_), _) => bail!("--kernel is only valid with --os unikernel"),
-            _ => {}
-        }
-        if a.kind == QubeKind::Template && q.is_unikernel() {
-            bail!("unikernel qubes cannot be templates");
-        }
         if let Some(c) = a.cpus {
             q.cpus = c;
         }
@@ -622,12 +637,7 @@ impl App {
         if let Some(d) = a.disk_gb {
             q.disk_gb = d;
         }
-        q.netvm = match a.netvm.as_deref() {
-            // Kept explicitly: an absent netvm means the default one.
-            Some(n) => Some(n.to_string()),
-            None if a.kind == QubeKind::Net => None,
-            None => self.cfg.default_netvm.clone(),
-        };
+        q.netvm = a.netvm;
         q.pci_passthrough = a.pci;
         q.uplink = a.uplink;
         q.autostart = a.autostart;
@@ -637,8 +647,32 @@ impl App {
         if let Some(p) = a.firewall_policy {
             q.firewall_policy = p;
         }
+        q.ip = a.ip;
+        self.create_qube(q)
+    }
+
+    /// Check a new qube definition, give it its address, provision its disk
+    /// and save it (`jos create`, `jos setup`).
+    fn create_qube(&self, mut q: Qube) -> Result<()> {
+        Qube::validate_name(&q.name)?;
+        if self.store.exists(&q.name) {
+            bail!(juanitos_core::Error::QubeExists(q.name));
+        }
+        match (q.is_unikernel(), &q.kernel, &q.template) {
+            (true, None, _) => bail!("--os unikernel requires --kernel <image>"),
+            (true, _, Some(_)) => bail!("unikernel qubes cannot be cloned from a template"),
+            (false, Some(_), _) => bail!("--kernel is only valid with --os unikernel"),
+            _ => {}
+        }
+        if q.is_template() && q.is_unikernel() {
+            bail!("unikernel qubes cannot be templates");
+        }
+        // Kept explicitly: an absent netvm means the default one.
+        if q.netvm.is_none() && q.kind != QubeKind::Net {
+            q.netvm = self.cfg.default_netvm.clone();
+        }
         let existing = self.store.list()?;
-        if let Some(ip) = a.ip {
+        if let Some(ip) = q.ip {
             if !firewall::CLIENT_NET.contains(ip) {
                 bail!(
                     "{ip} is outside the client network {}",
@@ -648,7 +682,6 @@ impl App {
             if let Some(o) = existing.iter().find(|o| o.ip == Some(ip)) {
                 bail!("{ip} is already used by {}", o.name);
             }
-            q.ip = Some(ip);
         }
         firewall::assign_address(&mut q, &existing, self.cfg.default_netvm.as_deref())?;
 
@@ -1024,6 +1057,79 @@ impl App {
         Ok(())
     }
 
+    fn setup(&self, a: SetupArgs) -> Result<()> {
+        self.init()?;
+        let runner = self.runner.as_ref();
+        let devices = match pci::list_devices(runner) {
+            Ok(d) => d,
+            Err(e) if self.dry_run => {
+                eprintln!("warning: planning without PCI devices ({e})");
+                Vec::new()
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let host = setup::Host {
+            devices,
+            uplink: setup::default_route_iface(runner),
+            iommu: doctor::iommu_enabled(runner),
+            pptdevs: setup::loader_pptdevs(runner)?,
+        };
+        let firewall_image = match a.firewall_image {
+            Some(p) if p.is_file() => Some(p.display().to_string()),
+            Some(p) => bail!("{}: no such firewall image", p.display()),
+            None => std::path::Path::new(dom0::FIREWALL_IMAGE)
+                .is_file()
+                .then(|| dom0::FIREWALL_IMAGE.to_string()),
+        };
+        let opts = setup::SetupOptions {
+            uplink: a.uplink,
+            nic: a.nic,
+            gpu: !a.no_gpu,
+            gpu_cpus: a.gpu_cpus,
+            gpu_memory_mb: a.gpu_memory_mb,
+            firewall_image,
+        };
+        let plan = setup::plan(&host, &self.store.list()?, &opts)?;
+        for note in &plan.notes {
+            println!("- {note}");
+        }
+        if plan.steps.is_empty() {
+            println!("nothing to do");
+        }
+        for (i, step) in plan.steps.iter().enumerate() {
+            println!("{:>2}. {step}", i + 1);
+        }
+        for step in plan.steps {
+            match step {
+                setup::Step::InstallTemplate { recipe, uplink } => self.template_install(
+                    recipe,
+                    &juanitos_core::template::InstallOptions {
+                        uplink: Some(uplink),
+                        ..Default::default()
+                    },
+                )?,
+                setup::Step::Create(q) => self.create_qube(*q)?,
+                setup::Step::ReservePci(addrs) => {
+                    setup::reserve(runner, &addrs)?;
+                    println!(
+                        "wrote {} to {}",
+                        pci::pptdevs_line(&addrs),
+                        setup::LOADER_CONF
+                    );
+                }
+            }
+        }
+        if plan.reboot {
+            println!(
+                "reboot to hand the reserved devices to their qubes; sys-net and \
+                 sys-firewall start at boot"
+            );
+        } else {
+            println!("ready: `jos autostart` starts sys-net and sys-firewall (done at boot)");
+        }
+        Ok(())
+    }
+
     fn template_run(&self, name: &str, seed: Option<&str>) -> Result<()> {
         let q = self.store.get(name)?;
         if !q.is_template() {
@@ -1328,5 +1434,6 @@ fn main() -> Result<()> {
         Cmd::Requests { cmd } => app.requests(cmd),
         Cmd::Serve { once, interval } => app.serve(once, interval),
         Cmd::Autostart => app.autostart(),
+        Cmd::Setup(a) => app.setup(a),
     }
 }

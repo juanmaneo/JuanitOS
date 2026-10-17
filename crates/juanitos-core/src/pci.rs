@@ -131,7 +131,8 @@ impl PciDevice {
         }
     }
 
-    fn same_slot(&self, other: &PciDevice) -> bool {
+    /// Same bus and slot: functions of one card (a GPU and its audio).
+    pub fn same_slot(&self, other: &PciDevice) -> bool {
         self.addr.bus == other.addr.bus && self.addr.slot == other.addr.slot
     }
 }
