@@ -13,15 +13,18 @@ env:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    # Pinned: the coverage floors depend on which host tools the image has.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # rust-toolchain.toml selects the toolchain, its components and the
       # UEFI/FreeBSD targets; `rustup show` installs them.
       - run: rustup show && rustup component add llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
-      # OVMF lets the jos-release QEMU tests run instead of being skipped.
-      - run: sudo apt-get update && sudo apt-get install -y ovmf
+      # Host tools some tests need; without them they skip and coverage
+      # drops below the floors. OVMF: jos-release QEMU tests; mtools:
+      # writing into a disk image's ESP (jos-release disk.rs).
+      - run: sudo apt-get update && sudo apt-get install -y ovmf mtools
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -29,7 +32,7 @@ jobs:
             crates/jos-boot
             crates/jos-firewall
       - run: cargo xtask ci
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: lcov
