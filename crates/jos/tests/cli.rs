@@ -593,6 +593,9 @@ fn unknown_qubes_and_host_only_commands() {
     if !out.status.success() {
         assert!(String::from_utf8_lossy(&out.stderr).contains("some checks failed"));
     }
+    let nowhere = e.dir.join("missing").join("report.txt");
+    let err = e.err(&["doctor", "--report", nowhere.to_str().unwrap()]);
+    assert!(err.contains("writing the report to"), "{err}");
     // A broken --config file is an error (a missing one means defaults).
     let bad = e.dir.join("bad.toml");
     std::fs::write(&bad, "pool = [").unwrap();
@@ -1359,6 +1362,24 @@ esac"#,
     assert!(doctor.contains("hw.vmm.iommu.enable=1"), "{doctor}");
     assert!(doctor.contains("pool zroot online"), "{doctor}");
     assert!(doctor.contains("1/0/0 1/0/1"), "{doctor}");
+
+    // The report holds the checks and the host's answers; the tools this
+    // stand-in host lacks are named in it rather than ending it.
+    let path = e.dir.join("report.txt");
+    let out = ok(&["doctor", "--report", path.to_str().unwrap()]);
+    assert!(out.contains("report written to"), "{out}");
+    let report = std::fs::read_to_string(&path).unwrap();
+    assert!(report.contains("[OK  ] zpool"), "{report}");
+    assert!(
+        report.contains("==== pciconf -lv ====\nvgapci0@pci0:0:2:0:"),
+        "{report}"
+    );
+    assert!(report.contains("RTX 500 Ada Generation"), "{report}");
+    assert!(
+        report.contains("==== uname -a ====\n(exit code"),
+        "{report}"
+    );
+    assert!(report.contains("running uname"), "{report}");
 
     let all = ok(&["pci", "list"]);
     assert!(all.starts_with("ADDR"), "{all}");

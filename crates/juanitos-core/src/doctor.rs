@@ -31,6 +31,19 @@ pub struct Check {
     pub detail: String,
 }
 
+/// One line of the `jos doctor` table: `[FAIL] name  detail`.
+impl std::fmt::Display for Check {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{:<4}] {:<40} {}",
+            self.status.as_str(),
+            self.name,
+            self.detail
+        )
+    }
+}
+
 impl Check {
     fn new(name: &str, status: Status, detail: impl Into<String>) -> Self {
         Check {

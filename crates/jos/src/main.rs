@@ -46,7 +46,13 @@ enum Cmd {
     /// Create the ZFS datasets and config directory.
     Init,
     /// Check host readiness (kernel modules, IOMMU, ZFS, firmware, ppt).
-    Doctor,
+    Doctor {
+        /// Also write a hardware report (the checks, CPU, IOMMU, PCI
+        /// devices, loader variables, disks, boot messages) to FILE for
+        /// diagnosing the machine elsewhere; serial numbers are removed.
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
+    },
     /// List qubes.
     Ls,
     /// Define a new qube and provision its disk.
@@ -564,12 +570,22 @@ impl App {
         Ok(())
     }
 
-    fn doctor(&self) -> Result<()> {
+    fn doctor(&self, report: Option<&std::path::Path>) -> Result<()> {
         let checks = doctor::run_checks(self.runner.as_ref(), &self.cfg);
         let mut failed = false;
         for c in &checks {
-            println!("[{:<4}] {:<40} {}", c.status.as_str(), c.name, c.detail);
+            println!("{c}");
             failed |= c.status == Status::Fail;
+        }
+        // Written before the verdict: a failing machine is the one whose
+        // report is needed.
+        if let Some(path) = report {
+            let text = juanitos_core::report::build(self.runner.as_ref(), &checks, &|p| {
+                std::fs::read_to_string(p).ok()
+            });
+            std::fs::write(path, text)
+                .with_context(|| format!("writing the report to {}", path.display()))?;
+            println!("report written to {}", path.display());
         }
         if failed {
             bail!("some checks failed");
@@ -1344,7 +1360,7 @@ fn main() -> Result<()> {
     let app = App::new(&cli)?;
     match cli.cmd {
         Cmd::Init => app.init(),
-        Cmd::Doctor => app.doctor(),
+        Cmd::Doctor { report } => app.doctor(report.as_deref()),
         Cmd::Ls => app.ls(),
         Cmd::Create(a) => app.create(a),
         Cmd::Remove { name, force } => app.remove(&name, force),

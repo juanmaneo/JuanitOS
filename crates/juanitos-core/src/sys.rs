@@ -175,7 +175,11 @@ fn lock_log(m: &Mutex<Vec<String>>) -> MutexGuard<'_, Vec<String>> {
 fn is_query(program: &str, args: &[&str]) -> bool {
     match program {
         "zfs" | "zpool" => matches!(args.first(), Some(&"list") | Some(&"get")),
-        "kldstat" | "sysctl" | "pciconf" => true,
+        "kldstat" | "sysctl" | "pciconf" | "uname" | "freebsd-version" => true,
+        // `kenv name=value` sets and `kenv -u name` unsets a variable.
+        "kenv" => !args.iter().any(|a| *a == "-u" || a.contains('=')),
+        "gpart" => args.first() == Some(&"show"),
+        "mount" => args == ["-p"],
         "ifconfig" => args.len() == 1,
         "route" => args.contains(&"get"),
         "sysrc" => args.contains(&"-n"),
@@ -402,5 +406,15 @@ mod tests {
             "sysrc",
             &["-f", "/boot/loader.conf", "pptdevs=1/0/0"]
         ));
+        assert!(is_query("uname", &["-a"]));
+        assert!(is_query("freebsd-version", &["-kru"]));
+        assert!(is_query("kenv", &[]));
+        assert!(is_query("kenv", &["-q", "smbios.system.product"]));
+        assert!(!is_query("kenv", &["hw.dmar.enable=1"]));
+        assert!(!is_query("kenv", &["-u", "hw.dmar.enable"]));
+        assert!(is_query("gpart", &["show"]));
+        assert!(!is_query("gpart", &["destroy", "-F", "nda0"]));
+        assert!(is_query("mount", &["-p"]));
+        assert!(!is_query("mount", &["-t", "msdosfs", "/dev/da1s1", "/mnt"]));
     }
 }

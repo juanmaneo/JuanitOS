@@ -18,6 +18,7 @@ pub mod fsops;
 pub mod net;
 pub mod pci;
 pub mod release;
+pub mod report;
 pub mod requests;
 pub mod setup;
 pub mod share;

@@ -38,6 +38,7 @@ See `docs/` for details:
 - `docs/boot-splash.md` — the graphical boot: pre-loader, kernel splash, daemon
 - `docs/relibc-cosmic.md` — where Relibc and COSMIC fit (host vs. guest)
 - `docs/security.md` — what is borrowed from QubesOS, CLIP OS and HardenedBSD
+- `docs/hardware-testing.md` — first boot on a new machine and `jos doctor --report`
 
 ## Repository layout
 
@@ -101,7 +102,9 @@ tick "erase the disk" here) → **Install** (progress) → **Finish**
 (reboot). The whole disk becomes GPT + EFI + swap + a ZFS pool laid out
 like `bsdinstall zfsboot`. Serial consoles get the same steps as text
 prompts, and `jos-install --non-interactive --disk nda0 ...` installs
-unattended. Details and all screens: `docs/installer.md`.
+unattended. Details and all screens: `docs/installer.md`. Trying it on a
+new machine: `docs/hardware-testing.md` (what each boot icon means, and
+`jos doctor --report FILE` to bring back what the hardware looks like).
 
 After the first boot, `jos setup` does what the QubesOS firstboot does:
 it builds the `fbsd15-net` template (downloading through the dom0's own
@@ -376,7 +379,8 @@ HPET and bhyve asserts. It is a Redox/`pci_types` bug; the reproducer,
 the trace and the upstream report are in `tools/dev/redox-fbuf/`
 (`docs/templates.md`).
 
-Not yet done: passthrough on real hardware (the nested run above proves
+Not yet done (`docs/hardware-testing.md` is the checklist for the
+hardware runs): passthrough on real hardware (the nested run above proves
 the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
 Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
 but has not been booted), a display for Redox qubes (until `pci_types`
