@@ -1534,7 +1534,7 @@ fn real_runs_against_a_stand_in_host() {
 
     // No pciconf: only a dry run plans without the PCI devices.
     let out = jos(&["setup", "--uplink", "em0"]);
-    assert!(!out.status.success(), "{out:?}");
+    assert!(stderr(&out).contains("running pciconf: "), "{out:?}");
     assert!(!e.qube_file("sys-firewall").exists());
 
     // A console device that is not a terminal.

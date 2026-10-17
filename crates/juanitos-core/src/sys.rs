@@ -96,10 +96,25 @@ fn convert(out: std::process::Output) -> CmdOutput {
     }
 }
 
+/// Name the program in an I/O error from starting, feeding or waiting on
+/// it (a missing tool otherwise reads "No such file or directory"). The
+/// kind is kept: callers fall back on `NotFound`.
+fn io_error(program: &str) -> impl FnOnce(std::io::Error) -> Error + '_ {
+    move |e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("running {program}: {e}"),
+        ))
+    }
+}
+
 impl Runner for RealRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput> {
         Ok(convert(
-            std::process::Command::new(program).args(args).output()?,
+            std::process::Command::new(program)
+                .args(args)
+                .output()
+                .map_err(io_error(program))?,
         ))
     }
 
@@ -111,7 +126,8 @@ impl Runner for RealRunner {
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .output()?,
+                .output()
+                .map_err(io_error(program))?,
         ))
     }
 
@@ -123,11 +139,16 @@ impl Runner for RealRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(io_error(program))?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(input.as_bytes())?;
+            stdin
+                .write_all(input.as_bytes())
+                .map_err(io_error(program))?;
         }
-        Ok(convert(child.wait_with_output()?))
+        Ok(convert(
+            child.wait_with_output().map_err(io_error(program))?,
+        ))
     }
 }
 
@@ -327,6 +348,28 @@ mod tests {
         assert!(MockRunner::new()
             .run_inheriting_stdin("stty", &["-echo"])
             .is_ok());
+    }
+
+    #[test]
+    fn missing_programs_are_named_and_stay_not_found() {
+        let r = RealRunner;
+        let errors = [
+            r.run("jos-no-such-tool", &[]),
+            r.run_inheriting_stdin("jos-no-such-tool", &[]),
+            r.run_with_input("jos-no-such-tool", &[], "x"),
+        ];
+        for e in errors {
+            match e {
+                Err(Error::Io(e)) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+                    assert!(
+                        e.to_string().starts_with("running jos-no-such-tool: "),
+                        "{e}"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]
