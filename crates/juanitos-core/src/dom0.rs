@@ -130,6 +130,26 @@ pub const SELFHOST_PACKAGES: &[&str] = &["rust", "git"];
 /// checks for it by module name instead.
 pub const KERNEL_MODULES: &[&str] = &["vmm", "nmdm", "if_bridge"];
 
+/// Built from `freebsd/jos_bootwatch` by `jos-release` and installed in
+/// `/boot/modules`: a quiet (`-m`) boot that cannot mount its root shows
+/// the kernel messages and a usable `mountroot>` prompt instead of
+/// leaving the splash up forever.
+pub const BOOTWATCH_MODULE: &str = "jos_bootwatch";
+
+/// The loader snippet that loads [`BOOTWATCH_MODULE`]: a separate file in
+/// `/boot/loader.conf.d`, shipped only with the module (the generated
+/// `loader.conf` does not know whether it was built).
+pub fn bootwatch_loader_conf() -> (String, String) {
+    (
+        format!("/boot/loader.conf.d/{BOOTWATCH_MODULE}.conf"),
+        format!(
+            "# Show why a quiet boot stopped before mounting its root \
+             (see /usr/local/src/juanitos/freebsd/{BOOTWATCH_MODULE})\n\
+             {BOOTWATCH_MODULE}_load=\"YES\"\n"
+        ),
+    )
+}
+
 /// The `rc.d` script that autostarts qubes, installed as
 /// `/usr/local/etc/rc.d/jos`.
 pub const RC_D_JOS: &str = include_str!("../../../freebsd/rc.d/jos");
@@ -511,6 +531,16 @@ mod tests {
             .contains("FreeBSD-ports: { url: \"pkg+https://pkg.FreeBSD.org/${ABI}/latest\" }"));
         assert!(latest.contains("kmods_latest_${VERSION_MINOR}"));
         assert!(freebsd_repo_conf("quarterly").contains("/quarterly\" }"));
+    }
+
+    #[test]
+    fn bootwatch_snippet_loads_the_module() {
+        let (path, conf) = bootwatch_loader_conf();
+        assert_eq!(path, "/boot/loader.conf.d/jos_bootwatch.conf");
+        assert!(conf.contains("\njos_bootwatch_load=\"YES\"\n"), "{conf}");
+        let src = include_str!("../../../freebsd/jos_bootwatch/jos_bootwatch.c");
+        assert!(src.contains("\"\\nmountroot> \""));
+        assert!(src.contains(&format!("DECLARE_MODULE({BOOTWATCH_MODULE},")));
     }
 
     #[test]

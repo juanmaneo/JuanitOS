@@ -22,7 +22,7 @@ use crate::ventoy;
 /// FreeBSD source set, fetched only to build kernel modules.
 pub const SRC_SET: &str = "src.txz";
 /// Ventoy's GEOM class, shipped on the live ISO.
-pub const VENTOY_KO: &str = "geom_ventoy.ko";
+pub const VENTOY_MODULE: &str = "geom_ventoy";
 
 pub struct Builder<'a> {
     pub runner: &'a dyn Runner,
@@ -452,6 +452,12 @@ impl<'a> Builder<'a> {
             }
         }
         self.install_splash()?;
+        if let Err(e) = self.bootwatch_module() {
+            println!(
+                "   warning: jos_bootwatch.ko not built ({e:#}); a quiet boot that \
+                 cannot mount its root stays on the splash"
+            );
+        }
 
         // Base has no /etc/fstab; the installer and the ISO step write
         // their own, but an empty one keeps rc quiet in between.
@@ -736,38 +742,69 @@ impl Builder<'_> {
         Ok(sys)
     }
 
-    /// Build `freebsd/geom_ventoy` against the release's kernel sources
-    /// and put it in the live root (see [`ventoy`]). `Ok(false)` when
-    /// there is nothing to build (no vendored source).
-    fn ventoy_module(&self) -> anyhow::Result<bool> {
-        let vendored = self.repo.join("freebsd/geom_ventoy");
+    /// Build the kernel module `freebsd/<name>` (a `bsd.kmod.mk` Makefile)
+    /// against the release's kernel sources, in a copy under the work
+    /// directory. `None` when the source is not in the tree; the module's
+    /// bytes otherwise (empty with `--dry-run`).
+    fn build_kmod(&self, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let vendored = self.repo.join("freebsd").join(name);
         if !vendored.join("Makefile").is_file() {
-            return Ok(false);
+            return Ok(None);
         }
-        self.step("Building geom_ventoy.ko (boot from any Ventoy version)");
+        self.step(&format!("Building {name}.ko"));
         let sys = self.kernel_sources()?;
-        let build = self.work.join("geom_ventoy");
+        let build = self.work.join(name);
         self.fs.remove_tree(&build)?;
         self.fs.copy_tree(&vendored, &build, &[])?;
         self.runner.run_checked(
             "make",
             &["-C", &Self::s(&build), &format!("SYSDIR={}", Self::s(&sys))],
         )?;
-        let ko = build.join(VENTOY_KO);
-        let dst = self.rootfs().join("boot/kernel").join(VENTOY_KO);
         if self.fs.dry_run {
-            self.fs.copy(&ko, &dst)?;
-        } else {
-            let mut bytes = std::fs::read(&ko)?;
+            return Ok(Some(Vec::new()));
+        }
+        Ok(Some(std::fs::read(build.join(format!("{name}.ko")))?))
+    }
+
+    /// Install a module into the root's `dir` and refresh its
+    /// `linker.hints` (best effort: the loader also finds a module by
+    /// file name).
+    fn install_kmod(&self, dir: &str, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
+        let dir = self.rootfs().join(dir);
+        self.fs
+            .write_bytes(&dir.join(format!("{name}.ko")), bytes)?;
+        let _ = self.runner.run("kldxref", &[&Self::s(&dir)]);
+        Ok(())
+    }
+
+    /// `geom_ventoy.ko` in the live root (see [`ventoy`]). `Ok(false)` when
+    /// there is nothing to build (no vendored source).
+    fn ventoy_module(&self) -> anyhow::Result<bool> {
+        let Some(mut bytes) = self.build_kmod(VENTOY_MODULE)? else {
+            return Ok(false);
+        };
+        if !self.fs.dry_run {
             let at = ventoy::patch_module(&mut bytes)?;
             println!("   Ventoy disk map at file offset {at:#x}");
-            self.fs.write_bytes(&dst, &bytes)?;
         }
-        // linker.hints; the loader also finds the module by file name.
-        let _ = self
-            .runner
-            .run("kldxref", &[&Self::s(&self.rootfs().join("boot/kernel"))]);
+        self.install_kmod("boot/kernel", VENTOY_MODULE, &bytes)?;
         Ok(true)
+    }
+
+    /// `jos_bootwatch.ko` (see `freebsd/jos_bootwatch`): a muted boot that
+    /// cannot mount its root shows the kernel messages instead of an
+    /// endless splash. Shipped in the dom0 (live and installed) with its
+    /// own `loader.conf.d` file, so the loader never names a module that
+    /// was not built.
+    fn bootwatch_module(&self) -> anyhow::Result<()> {
+        let Some(bytes) = self.build_kmod(dom0::BOOTWATCH_MODULE)? else {
+            return Ok(());
+        };
+        self.install_kmod("boot/modules", dom0::BOOTWATCH_MODULE, &bytes)?;
+        let (path, content) = dom0::bootwatch_loader_conf();
+        self.fs
+            .write(&self.rootfs().join(path.trim_start_matches('/')), &content)?;
+        Ok(())
     }
 
     /// Make the ISO bootable when written to a USB stick, as FreeBSD's
@@ -1459,6 +1496,53 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("run `jos-release bins`"), "{err}");
         assert!(!s.0.join("work/rootfs").exists(), "nothing written");
+    }
+
+    #[test]
+    fn the_dom0_ships_the_boot_watch_when_it_builds() {
+        let s = Scratch::new("bootwatch");
+        let profile = Profile {
+            source: Source {
+                include: false,
+                vendor: false,
+            },
+            ..Profile::default()
+        };
+        for bin in dom0::BINARIES {
+            s.put(&format!("bins/{bin}"), b"elf");
+        }
+        s.put(
+            "repo/freebsd/jos_bootwatch/Makefile",
+            b"KMOD=jos_bootwatch\n",
+        );
+        s.put("root/usr/src/sys/conf/kmod.mk", b"");
+        // `make` is mocked: the module it would build.
+        s.put("repo/freebsd/jos_bootwatch/jos_bootwatch.ko", b"\x7fELF");
+        let root = s.0.join("work/rootfs");
+        let (conf_path, conf) = dom0::bootwatch_loader_conf();
+        let conf_path = root.join(conf_path.trim_start_matches('/'));
+
+        let m = MockRunner::new();
+        real_builder(&m, &profile, &s.0).install_juanitos().unwrap();
+        assert_eq!(
+            std::fs::read(root.join("boot/modules/jos_bootwatch.ko")).unwrap(),
+            b"\x7fELF"
+        );
+        assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), conf);
+        let calls = m.calls();
+        assert!(calls.contains(&format!(
+            "make -C {} SYSDIR={}",
+            unix(&s.0.join("work/jos_bootwatch")),
+            unix(&s.0.join("root/usr/src/sys"))
+        )));
+        assert!(calls.contains(&format!("kldxref {}", unix(&root.join("boot/modules")))));
+
+        // A failed build costs the module and its loader line, not the dom0.
+        std::fs::remove_dir_all(&root).unwrap();
+        let m = MockRunner::new().respond("make", &[], CmdOutput::failed(2, "cc: error"));
+        real_builder(&m, &profile, &s.0).install_juanitos().unwrap();
+        assert!(!conf_path.exists());
+        assert!(!root.join("boot/modules/jos_bootwatch.ko").exists());
     }
 
     #[test]

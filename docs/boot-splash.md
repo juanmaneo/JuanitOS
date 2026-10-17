@@ -82,6 +82,39 @@ Firmware that refuses `SetVariable` simply never gets the fallback; the
 menu's *Boot verbose* entry is always available. To force a quiet boot
 again by hand: `efivar -D -n 62c99c6c-b34c-4e15-9e6c-fe06ff08543b-JuanitOSBootPending`.
 
+#### Root mount failures on screen: `jos_bootwatch.ko`
+
+The fallback needs a reboot. The most common way for a quiet boot to die
+is a root that cannot be mounted (error 19 from an old Ventoy, a missing
+storage driver). That case is reported in place by a small kernel module,
+`freebsd/jos_bootwatch`. `jos-release` builds it against the release's
+`src.txz` and installs it in `/boot/modules` with
+`/boot/loader.conf.d/jos_bootwatch.conf`, on the live ISO and the
+installed dom0.
+
+On a muted boot, the module checks the end of the kernel message buffer
+once a second until root is mounted. When the kernel sits at
+`mountroot>`, it does three things:
+
+- unmutes the console;
+- replays the last 3 KiB of kernel messages, including the failed mount
+  and its error number;
+- adds a JuanitOS note (for Ventoy: update to 1.1.08+ or write the ISO
+  with `dd`).
+
+The first console read drops the splash. The `mountroot>` prompt then
+works: `?` lists the disks, and an empty line panics and restarts after
+15 s. The restart then goes through the verbose fallback above.
+
+Verified on FreeBSD 15.1 under QEMU/OVMF with `boot_mute=YES` and a
+bogus `vfs.root.mountfrom`:
+
+1. the card splash showed while the mount waited;
+2. the screen then switched to the messages ending in *Mounting from
+   cd9660:/dev/iso9660/NOPE failed with error 19*, the note and a live
+   prompt;
+3. typing a valid root booted normally.
+
 ### `crates/jos-splash` — the daemon
 
 `rc.d/jos-splash` starts it right after `FILESYSTEMS`. It opens
@@ -190,7 +223,8 @@ redrew).
   the project reuses FreeBSD binaries unchanged, and the gap is considered
   acceptable.
 - **Silent loader failures.** With `console=nullconsole` a loader that
-  cannot find a kernel waits at an invisible prompt. Use the *FreeBSD
+  cannot find a kernel waits at an invisible prompt (unlike the kernel's
+  root mount, the loader has no module hook to reveal it). Use the *FreeBSD
   loader menu* entry (no arguments) to see it. The next start of
   `jos-boot` falls back to *Boot verbose* (see *Failed-boot fallback*).
 - **BIOS boot** (`cdboot`/`isoboot`/`gptzfsboot`, legacy machines) is the
