@@ -78,8 +78,24 @@ enum Cmd {
         #[arg(long)]
         max_restarts: Option<u32>,
     },
-    /// Power off a qube (its supervisor then exits on its own).
-    Stop { name: String },
+    /// Power off a qube (its supervisor then exits on its own): FreeBSD
+    /// and Linux guests are asked to shut down through their agent and
+    /// forced off if they have not within the timeout; other guests, and
+    /// guests whose agent does not answer, are forced off at once.
+    Stop {
+        #[arg(required_unless_present = "all")]
+        name: Option<String>,
+        /// Every running qube, leaves first (app qubes, then firewalls,
+        /// then sys-net), as at host shutdown.
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+        /// Force the guest off without asking it first.
+        #[arg(long)]
+        force: bool,
+        /// Seconds a guest gets to power off once asked.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
     /// Forcefully destroy a qube's VM, its supervisor and tap interfaces.
     Kill { name: String },
     /// Attach to a qube's serial console.
@@ -606,7 +622,7 @@ impl App {
         for q in qubes {
             let state = if q.is_template() {
                 "-"
-            } else if bhyve::is_running(&q.name) {
+            } else if bhyve::is_running(&self.cfg, &q.name) {
                 "running"
             } else if supervisor::read_pid(&self.cfg, &q.name).is_some() {
                 // Supervisor alive (or stale pidfile) but no VM: between boots.
@@ -804,7 +820,7 @@ impl App {
 
     fn remove(&self, name: &str, force: bool) -> Result<()> {
         let q = self.store.get(name)?;
-        if bhyve::is_running(name) {
+        if bhyve::is_running(&self.cfg, name) {
             if !force {
                 bail!("{name} is running; stop it first or use --force");
             }
@@ -894,10 +910,7 @@ impl App {
             let sock = self.cfg.agent_socket(&q.name);
             let id = juanitos_core::agent::new_id();
             if self.dry_run {
-                println!(
-                    "+ ask the agent on {sock}: {}",
-                    juanitos_core::agent::request(&id, user, command).trim_end()
-                );
+                print_agent_request(&sock, &id, user, command);
                 return Ok(None);
             }
             let agent = juanitos_core::agent::Agent::new(self.runner.as_ref(), &self.cfg);
@@ -938,7 +951,7 @@ impl App {
     }
 
     fn check_not_running(&self, name: &str) -> Result<()> {
-        if bhyve::is_running(name) {
+        if bhyve::is_running(&self.cfg, name) {
             bail!("{name} is already running");
         }
         if let Some(pid) = supervisor::read_pid(&self.cfg, name) {
@@ -1027,6 +1040,90 @@ impl App {
             bail!("{failures} qube(s) failed to start");
         }
         Ok(())
+    }
+
+    /// Power `qubes` off together: ask each guest that can be asked, force
+    /// the others, then give the asked ones `timeout` before forcing them.
+    fn stop(&self, qubes: &[Qube], force: bool, timeout: std::time::Duration) -> Result<()> {
+        let mut asked = Vec::new();
+        for q in qubes {
+            if !force && self.ask_poweroff(q) {
+                asked.push(q.name.clone());
+            } else {
+                self.vm().stop(&q.name)?;
+            }
+        }
+        if asked.is_empty() {
+            return Ok(());
+        }
+        if self.dry_run {
+            println!(
+                "+ wait up to {}s for {} to power off, then force the rest off",
+                timeout.as_secs(),
+                asked.join(", ")
+            );
+            return Ok(());
+        }
+        for name in self.vm().await_poweroff(&asked, timeout)? {
+            eprintln!(
+                "{name}: still running after {}s; forced off",
+                timeout.as_secs()
+            );
+        }
+        Ok(())
+    }
+
+    /// Stop every running qube, tier by tier (see `bhyve::shutdown_tiers`).
+    fn stop_all(&self, force: bool, timeout: std::time::Duration) -> Result<()> {
+        let qubes = self.store.list()?;
+        let mut stopped = 0;
+        for tier in bhyve::shutdown_tiers(&qubes, self.cfg.default_netvm.as_deref()) {
+            let running: Vec<Qube> = tier
+                .into_iter()
+                .filter(|q| bhyve::is_running(&self.cfg, &q.name))
+                .cloned()
+                .collect();
+            self.stop(&running, force, timeout)?;
+            stopped += running.len();
+        }
+        if stopped == 0 {
+            println!("no qube is running");
+        }
+        Ok(())
+    }
+
+    /// Ask the guest, through its agent, to power off. False when it could
+    /// not be asked (no agent, or one that does not answer or refuses):
+    /// the caller forces it off instead.
+    fn ask_poweroff(&self, q: &Qube) -> bool {
+        let Some(command) = q.os.poweroff_command() else {
+            return false;
+        };
+        let sock = self.cfg.agent_socket(&q.name);
+        let id = juanitos_core::agent::new_id();
+        if self.dry_run {
+            print_agent_request(&sock, &id, "root", command);
+            return true;
+        }
+        let agent = juanitos_core::agent::Agent::new(self.runner.as_ref(), &self.cfg);
+        if !agent.available(q) {
+            return false;
+        }
+        let refusal = match agent_session(&sock, &id, "root", command, POWEROFF_ANSWER) {
+            Err(e) => format!("{e:#}"),
+            Ok(None) => "no agent answered".to_string(),
+            Ok(Some(Ok(outcome))) if outcome.status != Some(0) => format!(
+                "`{command}` failed ({}): {}",
+                outcome
+                    .status
+                    .map_or("no exit status".to_string(), |s| format!("exit {s}")),
+                outcome.output.trim_end()
+            ),
+            // Done, or the guest went down before it could say so.
+            Ok(Some(_)) => return true,
+        };
+        eprintln!("{}: {refusal}; forcing it off", q.name);
+        false
     }
 
     fn pci_list(&self, gpus: bool, ready: bool) -> Result<()> {
@@ -1200,10 +1297,20 @@ fn finish(name: &str, outcome: juanitos_core::console::Outcome) -> Result<()> {
     }
 }
 
-/// `jos run` through the agent channel: connect to the socket bhyve
-/// listens on, ping, then run. `None` when nothing answers the ping (no
-/// daemon in the guest).
-#[cfg(unix)]
+/// What a dry run prints instead of sending a request to an agent.
+fn print_agent_request(sock: &str, id: &str, user: &str, command: &str) {
+    println!(
+        "+ ask the agent on {sock}: {}",
+        juanitos_core::agent::request(id, user, command).trim_end()
+    );
+}
+
+/// How long a guest asked to power off gets to acknowledge it (it may go
+/// down before it does; `jos stop --timeout` is the wait for the VM).
+const POWEROFF_ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `jos run` through the agent channel. `None` when nothing answers the
+/// ping (no daemon in the guest).
 fn agent_run(
     sock: &str,
     id: &str,
@@ -1211,6 +1318,21 @@ fn agent_run(
     command: &str,
     timeout: std::time::Duration,
 ) -> Result<Option<juanitos_core::console::Outcome>> {
+    Ok(agent_session(sock, id, user, command, timeout)?.transpose()?)
+}
+
+/// Connect to the socket bhyve listens on, ping, then run `command`.
+/// `Err` when the channel cannot be reached, `None` when nothing answers
+/// the ping, `Some(Err)` when the request went out but no answer came
+/// back (the channel closed, or the timeout).
+#[cfg(unix)]
+fn agent_session(
+    sock: &str,
+    id: &str,
+    user: &str,
+    command: &str,
+    timeout: std::time::Duration,
+) -> Result<Option<std::io::Result<juanitos_core::console::Outcome>>> {
     use std::io::Read;
     let mut stream = std::os::unix::net::UnixStream::connect(sock)
         .with_context(|| format!("connecting to {sock} (is the qube running?)"))?;
@@ -1238,18 +1360,18 @@ fn agent_run(
         command,
         timeout,
         &poll,
-    )?))
+    )))
 }
 
 #[cfg(not(unix))]
-fn agent_run(
+fn agent_session(
     _sock: &str,
     _id: &str,
     _user: &str,
     _command: &str,
     _timeout: std::time::Duration,
-) -> Result<Option<juanitos_core::console::Outcome>> {
-    bail!("jos run needs a FreeBSD host (UNIX socket to bhyve)")
+) -> Result<Option<std::io::Result<juanitos_core::console::Outcome>>> {
+    bail!("the agent channel needs a FreeBSD host (UNIX socket to bhyve)")
 }
 
 fn parse_login(s: &str) -> juanitos_core::console::Login {
@@ -1366,10 +1488,17 @@ fn main() -> Result<()> {
         Cmd::Remove { name, force } => app.remove(&name, force),
         Cmd::Start { name, foreground } => app.start(&name, foreground),
         Cmd::Supervise { name, max_restarts } => app.supervise(&name, max_restarts),
-        Cmd::Stop { name } => {
-            app.store.get(&name)?;
-            app.vm().stop(&name)?;
-            Ok(())
+        Cmd::Stop {
+            name,
+            all,
+            force,
+            timeout,
+        } => {
+            let timeout = std::time::Duration::from_secs(timeout);
+            match name {
+                Some(name) if !all => app.stop(&[app.store.get(&name)?], force, timeout),
+                _ => app.stop_all(force, timeout),
+            }
         }
         Cmd::Kill { name } => {
             app.store.get(&name)?;

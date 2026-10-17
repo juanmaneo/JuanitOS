@@ -17,6 +17,7 @@
 //! | 31   | lpc (com1 console, bootrom)                                 |
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::config::{GlobalConfig, Qube};
 use crate::error::{Error, Result};
@@ -257,8 +258,42 @@ pub fn build_console_command(cfg: &GlobalConfig, name: &str) -> BhyveCommand {
 }
 
 /// A VM is running when its vmm device node exists.
-pub fn is_running(name: &str) -> bool {
-    Path::new("/dev/vmm").join(name).exists()
+pub fn is_running(cfg: &GlobalConfig, name: &str) -> bool {
+    Path::new(&cfg.vmm_dir).join(name).exists()
+}
+
+/// How often [`Vm::await_poweroff`] looks for the VMs.
+pub const POWEROFF_POLL: Duration = Duration::from_millis(250);
+
+/// The order in which to shut `qubes` down: tiers, each to be stopped
+/// (together) before the next, so that a qube goes before the NetVM it
+/// depends on (app qubes, then firewalls, then `sys-net`). Within a tier
+/// the qubes keep their order.
+pub fn shutdown_tiers<'a>(qubes: &'a [Qube], default_netvm: Option<&str>) -> Vec<Vec<&'a Qube>> {
+    let find = |name: &str| qubes.iter().find(|q| q.name == name);
+    // Hops from a qube to the end of its NetVM chain; a loop ends it.
+    let depth = |q: &'a Qube| {
+        let mut seen = vec![q.name.as_str()];
+        let mut cur = q;
+        while let Some(up) = cur.resolve_netvm(default_netvm).and_then(find) {
+            if seen.contains(&up.name.as_str()) {
+                break;
+            }
+            seen.push(&up.name);
+            cur = up;
+        }
+        seen.len() - 1
+    };
+    let mut ranked: Vec<(usize, &Qube)> = qubes.iter().map(|q| (depth(q), q)).collect();
+    ranked.sort_by_key(|(d, _)| std::cmp::Reverse(*d));
+    let mut tiers: Vec<(usize, Vec<&Qube>)> = Vec::new();
+    for (d, q) in ranked {
+        match tiers.last_mut() {
+            Some((td, tier)) if *td == d => tier.push(q),
+            _ => tiers.push((d, vec![q])),
+        }
+    }
+    tiers.into_iter().map(|(_, tier)| tier).collect()
 }
 
 /// VM lifecycle operations.
@@ -419,12 +454,45 @@ impl<'a> Vm<'a> {
         result
     }
 
-    /// Request an ACPI-style shutdown by forcing poweroff (bhyve does not
-    /// expose a soft ACPI button via bhyvectl; guests should be stopped from
-    /// inside when possible).
+    /// Force the guest off (bhyve has no `bhyvectl` verb for an ACPI power
+    /// button): what `jos stop` does when the guest cannot be asked to
+    /// shut down from inside, or does not within the timeout.
     pub fn stop(&self, name: &str) -> Result<()> {
         build_poweroff_command(name).run_checked(self.runner)?;
         Ok(())
+    }
+
+    /// Wait up to `timeout` for the VMs `names` to go away (their guests
+    /// were asked to power off), then force off those still running.
+    /// Returns the ones that had to be forced.
+    pub fn await_poweroff(&self, names: &[String], timeout: Duration) -> Result<Vec<String>> {
+        let deadline = Instant::now() + timeout;
+        let running = || -> Vec<String> {
+            names
+                .iter()
+                .filter(|n| is_running(self.cfg, n))
+                .cloned()
+                .collect()
+        };
+        let mut left = running();
+        while !left.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(POWEROFF_POLL);
+            left = running();
+        }
+        let mut failure = None;
+        for name in &left {
+            // A guest that powered off since the last look makes bhyvectl
+            // fail: not an error.
+            if let Err(e) = self.stop(name) {
+                if is_running(self.cfg, name) {
+                    failure.get_or_insert(e);
+                }
+            }
+        }
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(left),
+        }
     }
 
     /// Hard stop: poweroff, destroy the VM and tear down its taps.
@@ -813,5 +881,105 @@ mod tests {
             .maintenance_command(&t, Some("/s.iso"))
             .unwrap();
         assert!(cmd.to_shell().contains("29,ahci,cd:/s.iso"));
+    }
+
+    /// A config whose vmm directory is a plain one the test fills.
+    fn vmm_cfg(tag: &str) -> (GlobalConfig, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("jos-vmm-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = GlobalConfig {
+            vmm_dir: dir.to_string_lossy().into_owned(),
+            ..GlobalConfig::default()
+        };
+        (cfg, dir)
+    }
+
+    #[test]
+    fn await_poweroff_forces_only_the_stragglers() {
+        use crate::sys::{CmdOutput, MockRunner};
+        let (cfg, dir) = vmm_cfg("await");
+        let names = vec!["work".to_string(), "web".to_string()];
+        std::fs::write(dir.join("work"), "").unwrap();
+        assert!(is_running(&cfg, "work"));
+        assert!(!is_running(&cfg, "web"));
+
+        // Gone already: nothing forced.
+        let m = MockRunner::new();
+        let vm = Vm::new(&m, &cfg);
+        assert!(vm
+            .await_poweroff(&names[1..], Duration::ZERO)
+            .unwrap()
+            .is_empty());
+        assert!(m.calls().is_empty());
+
+        // Still there at the deadline: forced off.
+        assert_eq!(vm.await_poweroff(&names, Duration::ZERO).unwrap(), ["work"]);
+        assert_eq!(m.calls(), ["bhyvectl --force-poweroff --vm=work"]);
+
+        // Powers off while we wait: nothing forced.
+        let m = MockRunner::new();
+        let vm = Vm::new(&m, &cfg);
+        let node = dir.join("work");
+        let guest = std::thread::spawn(move || {
+            std::thread::sleep(POWEROFF_POLL);
+            std::fs::remove_file(node).unwrap();
+        });
+        let forced = vm.await_poweroff(&names, Duration::from_secs(30)).unwrap();
+        guest.join().unwrap();
+        assert!(forced.is_empty());
+        assert!(m.calls().is_empty());
+
+        // bhyvectl fails on a VM that is still there: reported.
+        std::fs::write(dir.join("work"), "").unwrap();
+        let m = MockRunner::new().respond("bhyvectl", &[], CmdOutput::failed(1, "busy"));
+        let err = Vm::new(&m, &cfg)
+            .await_poweroff(&names, Duration::ZERO)
+            .unwrap_err();
+        assert!(matches!(err, Error::Command { .. }), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shutdown_goes_from_the_leaves_to_sys_net() {
+        let net = Qube::new("sys-net", QubeKind::Net, OsType::Freebsd);
+        let mut fw = Qube::new("sys-firewall", QubeKind::Firewall, OsType::Unikernel);
+        fw.netvm = Some("sys-net".into());
+        let work = Qube::new("work", QubeKind::App, OsType::Freebsd);
+        let mut offline = Qube::new("vault", QubeKind::App, OsType::Linux);
+        offline.netvm = Some(crate::config::NO_NETVM.into());
+        let mut lost = Qube::new("lost", QubeKind::App, OsType::Linux);
+        lost.netvm = Some("ghost".into());
+        let mut gpu = Qube::new("gpu", QubeKind::Gpu, OsType::Linux);
+        gpu.netvm = Some("sys-net".into());
+        let qubes = vec![net, fw, work, offline, lost, gpu];
+        let names = |tiers: Vec<Vec<&Qube>>| -> Vec<Vec<String>> {
+            tiers
+                .into_iter()
+                .map(|t| t.into_iter().map(|q| q.name.clone()).collect())
+                .collect()
+        };
+        assert_eq!(
+            names(shutdown_tiers(&qubes, Some("sys-firewall"))),
+            [
+                vec!["work"],
+                vec!["sys-firewall", "gpu"],
+                vec!["sys-net", "vault", "lost"],
+            ]
+        );
+
+        // A firewall left on the default NetVM (itself) and a loop end
+        // their chains instead of hanging.
+        let mut a = Qube::new("a", QubeKind::Firewall, OsType::Freebsd);
+        a.netvm = Some("b".into());
+        let mut b = Qube::new("b", QubeKind::Firewall, OsType::Freebsd);
+        b.netvm = Some("a".into());
+        let fw = Qube::new("sys-firewall", QubeKind::Firewall, OsType::Freebsd);
+        let looped = vec![a, b, fw];
+        assert_eq!(
+            names(shutdown_tiers(&looped, Some("sys-firewall"))),
+            [vec!["a", "b"], vec!["sys-firewall"]]
+        );
+        assert!(shutdown_tiers(&[], None).is_empty());
     }
 }

@@ -212,7 +212,22 @@ fn start_supervise_stop_kill_console_in_dry_run() {
     // The unikernel firewall gets its config disk written before boot.
     let fw = e.ok(&["start", "sys-firewall"]);
     assert!(fw.contains("sys-firewall:"), "{fw}");
-    e.ok(&["stop", "work"]);
+    // Agent guests are asked first; the others, or --force, forced off.
+    let stop = e.ok(&["stop", "work"]);
+    assert!(stop.contains("work.agent: RUN "), "{stop}");
+    assert!(stop.contains(" root shutdown -p now"), "{stop}");
+    assert!(stop.contains("wait up to 60s for work"), "{stop}");
+    assert!(!stop.contains("bhyvectl"), "{stop}");
+    let stop = e.ok(&["stop", "gpu", "--timeout", "5"]);
+    assert!(stop.contains(" root poweroff"), "{stop}");
+    assert!(stop.contains("wait up to 5s for gpu"), "{stop}");
+    let stop = e.ok(&["stop", "work", "--force"]);
+    assert_eq!(stop.trim(), "+ bhyvectl --force-poweroff --vm=work");
+    let stop = e.ok(&["stop", "sys-firewall"]);
+    assert_eq!(stop.trim(), "+ bhyvectl --force-poweroff --vm=sys-firewall");
+    assert!(e.err(&["stop"]).contains("<NAME>"));
+    assert!(e.err(&["stop", "work", "--all"]).contains("cannot be used"));
+    assert!(e.err(&["stop", "ghost"]).contains("ghost"));
     e.ok(&["kill", "work"]);
     let console = e.ok(&["console", "work"]);
     assert!(console.contains("+ cu"), "{console}");
@@ -909,6 +924,170 @@ fn run_talks_to_the_agent_socket() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "via console\n");
     assert!(String::from_utf8_lossy(&out.stderr).contains("no agent answered"));
+}
+
+/// `jos stop` for real: the guest is asked through its agent, given the
+/// timeout, forced off when it does not go or cannot be asked; `--all`
+/// goes from the app qubes to sys-net. A VM is a node in a stand-in vmm
+/// directory, which the stand-in `bhyvectl` (logging its arguments) and
+/// the fake guests remove when they power off.
+#[cfg(unix)]
+#[test]
+fn stop_asks_the_agent_then_forces_the_guest_off() {
+    let e = Env::new("stop");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&["create", "web", "--kind", "app", "--os", "linux"]);
+    e.ok(&["create", "sys-net", "--kind", "net", "--os", "freebsd"]);
+    e.ok(&[
+        "create",
+        "sys-firewall",
+        "--kind",
+        "firewall",
+        "--os",
+        "freebsd",
+        "--netvm",
+        "sys-net",
+    ]);
+    let dir = |name: &str| {
+        let d = e.dir.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    };
+    let (run_dir, vmm) = (dir("run"), dir("vmm"));
+    let log = e.dir.join("bhyvectl.log");
+    let bin = fake_host(
+        &e,
+        &[(
+            "bhyvectl",
+            &format!(
+                "echo \"$*\" >> {log:?}\n/bin/rm -f {vmm:?}/\"${{2#--vm=}}\"",
+                log = log.to_string_lossy(),
+                vmm = vmm.to_string_lossy()
+            ),
+        )],
+    );
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "run_dir = {:?}\nvmm_dir = {:?}\n",
+            run_dir.to_string_lossy(),
+            vmm.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let jos = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_jos"))
+            .arg("--config")
+            .arg(&cfg)
+            .args(args)
+            .env("JOS_CONFIG_DIR", &e.dir)
+            .env("PATH", &bin)
+            .output()
+            .unwrap()
+    };
+    let boot = |name: &str| std::fs::write(vmm.join(name), "").unwrap();
+    let forced = || {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(&log);
+        text
+    };
+    let agent = |name: &str| {
+        let sock = run_dir.join(format!("{name}.agent"));
+        let _ = std::fs::remove_file(&sock);
+        std::os::unix::net::UnixListener::bind(&sock).unwrap()
+    };
+    let stderr = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
+
+    // The guest shuts down when asked: nothing forced.
+    boot("work");
+    let node = vmm.join("work");
+    let guest = fake_agent(agent("work"), true, "", move |cmd| {
+        assert_eq!(cmd, "shutdown -p now");
+        std::fs::remove_file(node).unwrap();
+        0
+    });
+    let out = jos(&["stop", "work"]);
+    assert!(guest.join().unwrap().contains(" root shutdown -p now\n"));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(forced(), "");
+
+    // It accepts but is still there at the deadline: forced off.
+    boot("web");
+    let guest = fake_agent(agent("web"), true, "", |cmd| {
+        assert_eq!(cmd, "poweroff");
+        0
+    });
+    let out = jos(&["stop", "web", "--timeout", "1"]);
+    guest.join().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(stderr(&out).contains("web: still running after 1s; forced off"));
+    assert_eq!(forced(), "--force-poweroff --vm=web\n");
+    assert!(!vmm.join("web").exists());
+
+    // It refuses: forced off at once.
+    boot("web");
+    let guest = fake_agent(agent("web"), true, "permission denied", |_| 1);
+    let out = jos(&["stop", "web"]);
+    guest.join().unwrap();
+    assert!(
+        stderr(&out).contains("`poweroff` failed (exit 1): permission denied; forcing it off"),
+        "{out:?}"
+    );
+    assert_eq!(forced(), "--force-poweroff --vm=web\n");
+
+    // No daemon behind the channel: forced off.
+    boot("web");
+    let guest = fake_agent(agent("web"), false, "", |_| 0);
+    let out = jos(&["stop", "web"]);
+    guest.join().unwrap();
+    assert!(stderr(&out).contains("web: no agent answered; forcing it off"));
+    assert_eq!(forced(), "--force-poweroff --vm=web\n");
+
+    // The guest goes down before it can answer: as good as a yes.
+    boot("work");
+    let listener = agent("work");
+    let node = vmm.join("work");
+    let guest = std::thread::spawn(move || {
+        use std::io::{BufRead, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let id = line.trim().strip_prefix("PING ").unwrap().to_string();
+        stream.write_all(format!("PONG {id}\n").as_bytes()).unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        std::fs::remove_file(node).unwrap();
+        line
+    });
+    let out = jos(&["stop", "work"]);
+    assert!(guest.join().unwrap().ends_with(" root shutdown -p now\n"));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(forced(), "");
+
+    // --force does not ask.
+    boot("work");
+    let out = jos(&["stop", "work", "--force"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(forced(), "--force-poweroff --vm=work\n");
+
+    // Everything, leaves first; the stale sockets have no listener, so
+    // each guest is forced off as soon as its turn comes.
+    for q in ["sys-net", "sys-firewall", "work"] {
+        boot(q);
+    }
+    let out = jos(&["stop", "--all"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        forced(),
+        "--force-poweroff --vm=work\n--force-poweroff --vm=sys-firewall\n\
+         --force-poweroff --vm=sys-net\n"
+    );
+    let out = jos(&["stop", "--all"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no qube is running"));
+    assert_eq!(forced(), "");
 }
 
 /// `jos policy`, `jos requests` and `jos serve --once` for real against a

@@ -146,8 +146,16 @@ and loops:
    → finish, `3` triple fault → finish (reported), anything else → error.
 5. When the loop ends, taps and the pidfile are removed.
 
-`jos stop` sends `bhyvectl --force-poweroff`, which the supervisor observes
-as a poweroff and exits on its own. `jos kill` additionally destroys the VM,
+`jos stop` asks a FreeBSD or Linux guest to shut down through its agent
+(`shutdown -p now` or `poweroff`, as root), waits up to `--timeout`
+seconds (60) for the VM to go, then falls back to
+`bhyvectl --force-poweroff`; guests without an agent (unikernel, Redox),
+or whose agent does not answer, and `jos stop --force`, are forced off at
+once (bhyve has no `bhyvectl` verb for an ACPI power button). Either way
+the supervisor observes a poweroff and exits on its own. `jos stop --all`
+stops every running qube in tiers, each before the NetVM it depends on:
+app qubes, then firewalls, then `sys-net`, the qubes of a tier together.
+`jos kill` additionally destroys the VM,
 sends `SIGTERM` to a still-living supervisor and tears down the taps.
 `jos ls` reports `running` (vmm device present), `booting` (supervisor pid
 but no VM yet) or `stopped`. `jos start --foreground` / `jos supervise`
@@ -155,11 +163,10 @@ run the loop in the current terminal, which is also what `--dry-run` does.
 
 The rc script (`freebsd/rc.d/jos`) calls `jos autostart`, which starts one
 supervisor per `autostart = true` qube and returns immediately; on
-shutdown it kills every qube with a pidfile, then anything left in
-`/dev/vmm`.
-
-Not yet done: a graceful ACPI power button (bhyve has no `bhyvectl` verb for
-it; guests should be shut down from inside or via a future agent).
+shutdown it runs `jos stop --all --timeout 20` (`jos_stop_timeout`; three
+tiers of 20 seconds leave room within rc's default `rcshutdown_timeout`
+of 90, unless agents hang without answering), then kills every
+qube with a pidfile and anything left in `/dev/vmm`.
 
 ## Trust boundaries
 

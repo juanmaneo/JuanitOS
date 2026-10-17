@@ -120,6 +120,16 @@ impl OsType {
         matches!(self, OsType::Freebsd | OsType::Linux)
     }
 
+    /// What `jos stop` asks the agent to run (as root) to power the guest
+    /// off cleanly; `None` for guests without an agent.
+    pub fn poweroff_command(&self) -> Option<&'static str> {
+        match self {
+            OsType::Freebsd => Some("shutdown -p now"),
+            OsType::Linux => Some("poweroff"),
+            OsType::Redox | OsType::Unikernel => None,
+        }
+    }
+
     /// How `jos run` frames a command for the guest's shell.
     pub fn console_dialect(&self) -> crate::console::Dialect {
         match self {
@@ -363,6 +373,9 @@ fn default_console_dir() -> String {
 fn default_share_dir() -> String {
     "/var/db/juanitos/share".into()
 }
+fn default_vmm_dir() -> String {
+    "/dev/vmm".into()
+}
 
 /// Host-wide settings, normally loaded from `/usr/local/etc/juanitos/jos.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,6 +403,10 @@ pub struct GlobalConfig {
     /// [`crate::share`]).
     #[serde(default = "default_share_dir")]
     pub share_dir: String,
+    /// Where `vmm(4)` lists the running VMs, one node per VM (`/dev/vmm`;
+    /// tests point it at a plain directory).
+    #[serde(default = "default_vmm_dir")]
+    pub vmm_dir: String,
 }
 
 impl Default for GlobalConfig {
@@ -404,6 +421,7 @@ impl Default for GlobalConfig {
             default_netvm: default_netvm(),
             console_dir: default_console_dir(),
             share_dir: default_share_dir(),
+            vmm_dir: default_vmm_dir(),
         }
     }
 }
@@ -603,6 +621,20 @@ mod tests {
         assert!(text.contains("os = \"linux\""));
         let back = Qube::from_toml(&text).unwrap();
         assert_eq!(back, q);
+    }
+
+    #[test]
+    fn only_agent_guests_are_asked_to_power_off() {
+        for os in [
+            OsType::Freebsd,
+            OsType::Linux,
+            OsType::Redox,
+            OsType::Unikernel,
+        ] {
+            assert_eq!(os.poweroff_command().is_some(), os.has_agent(), "{os}");
+        }
+        assert_eq!(OsType::Freebsd.poweroff_command(), Some("shutdown -p now"));
+        assert_eq!(OsType::Linux.poweroff_command(), Some("poweroff"));
     }
 
     #[test]

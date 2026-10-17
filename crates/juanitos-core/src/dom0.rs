@@ -659,6 +659,9 @@ mod tests {
         // The request broker runs with the qubes.
         assert!(rc.1.contains("daemon -f -p \"${serve_pidfile}\""));
         assert!(rc.1.contains("serve\n"));
+        // Shutdown asks the guests first, before killing what is left.
+        let ask = rc.1.find("stop --all --timeout").unwrap();
+        assert!(ask < rc.1.find("kill \"${vm}\"").unwrap());
         assert_eq!(
             live_fstab("JUANITOS"),
             "/dev/iso9660/JUANITOS / cd9660 ro 0 0\n"
