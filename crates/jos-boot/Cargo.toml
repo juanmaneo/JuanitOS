@@ -3,7 +3,7 @@ name = "jos-boot"
 description = "JuanitOS graphical pre-loader: a UEFI application that shows the boot card, offers a small menu and chain-loads FreeBSD's loader.efi"
 version = "0.1.0"
 edition = "2021"
-license = "BSD-2-Clause"
+license = "BSD-3-Clause"
 repository = "https://github.com/juanmaneo/JuanitOS"
 
 # Standalone workspace: this crate builds for x86_64-unknown-uefi (see

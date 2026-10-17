@@ -370,3 +370,12 @@ Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
 but has not been booted), a display for Redox qubes (until `pci_types`
 is fixed upstream), and a COSMIC session on real hardware (the packages
 install; the desktop has not been seen running yet).
+
+## License
+
+JuanitOS is under the BSD 3-Clause license (`LICENSE`), like much of
+FreeBSD's ecosystem and compatible with every project it draws on.
+`THIRD_PARTY.md` lists the vendored code (`freebsd/geom_ventoy`,
+BSD-2-Clause), the Rust dependencies' licenses, the projects that
+inspired the design (ideas only, no code taken), and what publishing a
+built ISO requires (sources for the GPL-3.0 COSMIC packages it ships).

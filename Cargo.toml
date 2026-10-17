@@ -20,7 +20,7 @@ exclude = ["crates/jos-firewall", "crates/jos-boot"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "BSD-2-Clause"
+license = "BSD-3-Clause"
 repository = "https://github.com/juanmaneo/JuanitOS"
 
 [workspace.dependencies]

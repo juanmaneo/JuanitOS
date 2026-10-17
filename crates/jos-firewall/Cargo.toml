@@ -3,7 +3,7 @@ name = "jos-firewall"
 description = "JuanitOS sys-firewall unikernel: a UEFI application running the jos-fwnet engine"
 version = "0.1.0"
 edition = "2021"
-license = "BSD-2-Clause"
+license = "BSD-3-Clause"
 repository = "https://github.com/juanmaneo/JuanitOS"
 
 # Standalone workspace: this crate only builds for x86_64-unknown-uefi
