@@ -149,8 +149,8 @@ installer is seamless.
 The flow borrows from the two installers QubesOS users know:
 
 - **Calamares**: a sidebar of steps walked in order (Welcome, Hardware,
-  Disk, System, Users, Summary, Install, Finish), with Back/Next at the
-  bottom and Next disabled until the page is valid;
+  Disk, System, Passthrough, Users, Summary, Install, Finish), with
+  Back/Next at the bottom and Next disabled until the page is valid;
 - **Anaconda**: nothing is written to disk before the Summary page, where
   the erase has to be confirmed explicitly; the hardware check comes first,
   so you learn whether the machine can run qubes before choosing a disk.
@@ -159,13 +159,25 @@ The flow borrows from the two installers QubesOS users know:
 |---|---|
 | ![welcome](images/installer-1-welcome.png) | ![hardware](images/installer-2-hardware.png) |
 | ![disk](images/installer-3-disk.png) | ![system](images/installer-4-system.png) |
-| ![users](images/installer-5-users.png) | ![summary](images/installer-6-summary.png) |
-| ![install](images/installer-7-install.png) | ![finish](images/installer-8-finish.png) |
+| ![passthrough](images/installer-5-passthrough.png) | ![users](images/installer-6-users.png) |
+| ![summary](images/installer-7-summary.png) | ![install](images/installer-8-install.png) |
+| ![finish](images/installer-9-finish.png) | |
+
+The **Passthrough** page lists the GPUs, the NICs (Wi-Fi included) and
+the other functions of each GPU's slot (its HDMI audio), as `pciconf`
+reports them. Ticked devices end up in `pptdevs` in the new system's
+`/boot/loader.conf`, so `ppt(4)` claims them at boot and the dom0 never
+drives them. The default selection is the devices already bound to `ppt`
+plus, when another GPU is left for the dom0's display, the NVIDIA GPU
+and its slot siblings (for the `gpu` qube, see `docs/gpu-passthrough.md`).
+Reserving every GPU is allowed but flagged: the dom0 then has no display
+of its own. NICs are never ticked by default: until `sys-net` exists the
+dom0 needs one to download templates.
 
 Keyboard only (the live medium has no pointer driver in the console):
 `Tab`/`Shift-Tab` or `Up`/`Down` move between fields, `Up`/`Down` pick a
-disk in the list, `Enter`/`Space` press buttons and tick boxes, `Esc`
-goes back. Fields filter what they accept (digits for the swap size,
+disk or a device in a list, `Space` ticks a device, `Enter`/`Space` press
+buttons and tick boxes, `Esc` goes back. Fields filter what they accept (digits for the swap size,
 host-name and user-name characters), passwords are masked.
 
 The installation runs on a background thread and reports each step, so
@@ -195,7 +207,8 @@ install is:
 
 ```sh
 jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
-    --root-password '...' --user juan --user-password '...'
+    --root-password '...' --user juan --user-password '...' \
+    --pci 1/0/0 --pci 1/0/1     # or --no-pci; default: as on the Passthrough page
 ```
 
 ## What it does
@@ -214,7 +227,7 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
 5. `tar -xpf juanitos-dom0.txz -C /mnt --unlink` after verifying the sha256.
 6. `rc.conf` (`zfs_enable`, `jos_enable`, `seatd`, `dbus`, `jos_login`;
    `kld_list` gains the `drm-kmod` driver for the GPU `pciconf` reports),
-   `loader.conf`, `fstab` (swap + ESP at `/boot/efi`), `zpool.cache`,
+   `loader.conf` (with `pptdevs` for the reserved devices), `fstab` (swap + ESP at `/boot/efi`), `zpool.cache`,
    `jos.toml`. The login screen (`jos-greet` on `ttyv8`, see
    `docs/relibc-cosmic.md`) needs no `/etc/ttys` change: that terminal
    has no getty.

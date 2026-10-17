@@ -253,6 +253,9 @@ pub struct Dom0Options {
     /// [`gpu_kernel_module`]); `None` leaves the console on `vt(4)`'s
     /// framebuffer, which the compositor cannot use.
     pub gpu_module: Option<String>,
+    /// Devices reserved for passthrough (`pptdevs`); empty leaves the
+    /// commented sample line.
+    pub pptdevs: Vec<crate::pci::PciAddr>,
 }
 
 impl Default for Dom0Options {
@@ -262,6 +265,7 @@ impl Default for Dom0Options {
             gui: true,
             serial_console: true,
             gpu_module: None,
+            pptdevs: Vec::new(),
         }
     }
 }
@@ -348,7 +352,13 @@ pub fn loader_conf(flavor: Flavor, opts: &Dom0Options) -> String {
     s.push_str("kern.vt.splash_cpu=\"0\"\n");
 
     s.push_str("# Passthrough devices: see /usr/local/share/juanitos/loader.conf.sample\n");
-    s.push_str("#pptdevs=\"1/0/0 1/0/1\"\n");
+    if opts.pptdevs.is_empty() {
+        s.push_str("#pptdevs=\"1/0/0 1/0/1\"\n");
+    } else {
+        s.push_str("# Reserved for qubes at install time; the dom0 never drives them\n");
+        s.push_str(&crate::pci::pptdevs_line(&opts.pptdevs));
+        s.push('\n');
+    }
     s
 }
 
@@ -440,6 +450,7 @@ mod tests {
             gui: true,
             serial_console: false,
             gpu_module: None,
+            pptdevs: Vec::new(),
         };
         let s = rc_conf(Flavor::Installed, &opts);
         assert!(s.contains("hostname=\"box\""));
@@ -570,6 +581,20 @@ mod tests {
         assert!(inst.contains("zfs_load=\"YES\""));
         assert!(!inst.contains("hw.uart.console"));
         assert!(!inst.contains("boot_multicons"));
+        assert!(inst.contains("\n#pptdevs=\"1/0/0 1/0/1\"\n"));
+
+        let ppt = loader_conf(
+            Flavor::Installed,
+            &Dom0Options {
+                pptdevs: vec![
+                    crate::pci::PciAddr::new(1, 0, 0),
+                    crate::pci::PciAddr::new(1, 0, 1),
+                ],
+                ..Default::default()
+            },
+        );
+        assert!(ppt.ends_with("\npptdevs=\"1/0/0 1/0/1\"\n"), "{ppt}");
+        assert!(!ppt.contains("#pptdevs"));
     }
 
     #[test]

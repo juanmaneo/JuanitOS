@@ -177,7 +177,7 @@ mod tests {
     }
 
     // Welcome -> ... -> Summary, ticking the confirmation, then Install.
-    const TO_INSTALL: &[u8] = b"\r\r\r\t\t\t\t\rsecret\rsecret\r\t\t\t\t\r \t\t\r";
+    const TO_INSTALL: &[u8] = b"\r\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\r \t\t\r";
 
     #[test]
     fn full_install_then_reboot() {
@@ -192,6 +192,7 @@ mod tests {
             },
             w.checks.clone(),
             w.disks.clone(),
+            w.devices.clone(),
         );
         let out = run(&mut d, &mut w, &m, true, "report", opts()).unwrap();
         assert_eq!(out, Outcome::Reboot);

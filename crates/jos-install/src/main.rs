@@ -27,6 +27,7 @@ use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
 
 use juanitos_core::doctor::{self, Check};
+use juanitos_core::pci::{self, PciAddr, PciDevice};
 use juanitos_core::sys::{DryRunner, RealRunner, Runner};
 
 use crate::disks::{list_disks, Disk};
@@ -104,6 +105,16 @@ struct Cli {
     #[arg(long)]
     user_password: Option<String>,
 
+    /// Reserve this PCI device for passthrough (`pptdevs`); repeatable.
+    /// Default: the NVIDIA GPU (and its audio) when another GPU drives the
+    /// dom0, plus devices already bound to ppt.
+    #[arg(long = "pci", value_name = "B/S/F", value_parser = parse_pci)]
+    pci: Vec<PciAddr>,
+
+    /// Reserve no PCI device.
+    #[arg(long, conflicts_with = "pci")]
+    no_pci: bool,
+
     /// Proceed even when the host checks report failures.
     #[arg(long)]
     ignore_doctor: bool,
@@ -115,6 +126,20 @@ struct Cli {
     /// Mount point for the new pool during installation.
     #[arg(long, default_value = "/mnt")]
     target: String,
+}
+
+fn parse_pci(s: &str) -> Result<PciAddr, String> {
+    s.parse().map_err(|e: juanitos_core::Error| e.to_string())
+}
+
+/// What the live medium found on this machine.
+struct Detected {
+    checks: Vec<Check>,
+    /// `checks` rendered for the console and the install report.
+    report: String,
+    disks: Vec<Disk>,
+    /// Passthrough candidates (`pci::passthrough_candidates`).
+    devices: Vec<PciDevice>,
 }
 
 fn main() {
@@ -156,6 +181,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     };
     let checks = doctor::run_host_checks(runner, &cfg);
     let report = render_checks(&checks);
+    let pci_devices = pci_devices(runner);
 
     // 2. Defaults for the plan, from the flags.
     let user = match (cli.user.clone(), cli.user_password.clone()) {
@@ -171,7 +197,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         swap_gb: cli.swap_gb,
         gui: !cli.no_gui,
         serial_console: !cli.no_serial,
-        gpu_module: detect_gpu_module(runner),
+        gpu_module: gpu_module_from(&pci_devices),
+        pptdevs: passthrough_from(&cli, &pci_devices),
         root_password: cli.root_password.clone(),
         user,
         dist_dir: cli.dist.clone(),
@@ -186,10 +213,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             plan.dist_dir
         );
     }
-    let disks = list_disks(runner).context("listing disks")?;
+    let hw = Detected {
+        checks,
+        report,
+        disks: list_disks(runner).context("listing disks")?,
+        devices: pci::passthrough_candidates(&pci_devices),
+    };
 
     if interactive && wants_gui(cli.ui, cli.dry_run)? {
-        match run_graphical(&cli, runner, plan.clone(), &checks, &disks, &report) {
+        match run_graphical(&cli, runner, plan.clone(), &hw) {
             Ok(()) => return Ok(()),
             Err(e) if cli.ui == Ui::Auto => {
                 eprintln!("jos-install: graphical installer unavailable ({e:#}); using text mode");
@@ -200,18 +232,32 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     let stdin = std::io::stdin();
     let mut prompter = Prompter::new(stdin.lock(), std::io::stdout(), runner);
-    text_install(&cli, runner, plan, &checks, &disks, &report, &mut prompter)
+    text_install(&cli, runner, plan, &hw, &mut prompter)
+}
+
+/// Every PCI device; none where `pciconf` is missing (a development host).
+fn pci_devices(runner: &dyn Runner) -> Vec<PciDevice> {
+    pci::list_devices(runner).unwrap_or_default()
+}
+
+/// Devices to reserve: `--no-pci`, else `--pci`, else the default proposal.
+fn passthrough_from(cli: &Cli, devices: &[PciDevice]) -> Vec<PciAddr> {
+    if cli.no_pci {
+        return Vec::new();
+    }
+    if cli.pci.is_empty() {
+        return pci::default_passthrough(devices);
+    }
+    let mut addrs = cli.pci.clone();
+    addrs.sort();
+    addrs.dedup();
+    addrs
 }
 
 /// The KMS driver for the dom0's display: the first GPU `pciconf` lists
 /// that `drm-kmod` has a driver for. A GPU meant for passthrough (the
 /// NVIDIA card of the `gpu` qube) has none, so it is skipped.
-fn detect_gpu_module(runner: &dyn Runner) -> Option<String> {
-    let devices = juanitos_core::pci::list_devices(runner).ok()?;
-    gpu_module_from(&devices)
-}
-
-fn gpu_module_from(devices: &[juanitos_core::pci::PciDevice]) -> Option<String> {
+fn gpu_module_from(devices: &[PciDevice]) -> Option<String> {
     devices
         .iter()
         .filter(|d| d.is_gpu())
@@ -238,20 +284,23 @@ fn run_graphical(
     cli: &Cli,
     runner: &dyn Runner,
     plan: InstallPlan,
-    checks: &[Check],
-    disks: &[Disk],
-    report: &str,
+    hw: &Detected,
 ) -> anyhow::Result<()> {
     use jos_fb::Display;
 
     let mut display = jos_fb::vt::VtDisplay::open(cli.vt)?;
-    let mut wizard = wizard::Wizard::new(plan, checks.to_vec(), disks.to_vec());
+    let mut wizard = wizard::Wizard::new(
+        plan,
+        hw.checks.clone(),
+        hw.disks.clone(),
+        hw.devices.clone(),
+    );
     let outcome = gui::run(
         &mut display,
         &mut wizard,
         runner,
         cli.dry_run,
-        report,
+        &hw.report,
         gui::LoopOptions::default(),
     );
     display.restore_console()?;
@@ -274,9 +323,7 @@ fn run_graphical(
     _cli: &Cli,
     _runner: &dyn Runner,
     _plan: InstallPlan,
-    _checks: &[Check],
-    _disks: &[Disk],
-    _report: &str,
+    _hw: &Detected,
 ) -> anyhow::Result<()> {
     bail!("no framebuffer console on this host")
 }
@@ -287,14 +334,13 @@ fn text_install<R: std::io::BufRead, W: std::io::Write>(
     cli: &Cli,
     runner: &dyn Runner,
     mut plan: InstallPlan,
-    checks: &[Check],
-    disks: &[Disk],
-    report: &str,
+    hw: &Detected,
     p: &mut Prompter<'_, R, W>,
 ) -> anyhow::Result<()> {
     let interactive = !cli.non_interactive;
-    p.say(report)?;
-    if !doctor::all_passed(checks) {
+    let disks = &hw.disks;
+    p.say(&hw.report)?;
+    if !doctor::all_passed(&hw.checks) {
         p.say(
             "Some checks FAILED: this machine (or its firmware settings) cannot run\n\
              JuanitOS qubes as-is. Typical fixes: enable VT-x/AMD-V and VT-d/AMD-Vi\n\
@@ -337,6 +383,9 @@ fn text_install<R: std::io::BufRead, W: std::io::Write>(
             .parse()
             .context("swap size must be a number")?;
         plan.gui = p.ask_yes_no("Start the COSMIC desktop at boot?", plan.gui)?;
+        if !hw.devices.is_empty() {
+            plan.pptdevs = p.choose_devices(&hw.devices, &plan.pptdevs)?;
+        }
         if plan.root_password.is_none() {
             plan.root_password = Some(p.password("Root password")?);
         }
@@ -362,7 +411,7 @@ fn text_install<R: std::io::BufRead, W: std::io::Write>(
     }
 
     // 3. Install.
-    Installer::new(runner, cli.dry_run, &plan).run(report)?;
+    Installer::new(runner, cli.dry_run, &plan).run(&hw.report)?;
 
     if cli.live && interactive && p.ask_yes_no("Reboot now?", true)? {
         runner.run("shutdown", &["-r", "now"])?;
@@ -431,19 +480,43 @@ mod tests {
         }
     }
 
+    fn hw(checks: Vec<Check>, devices: Vec<PciDevice>) -> Detected {
+        Detected {
+            checks,
+            report: "REPORT\n".into(),
+            disks: disks(),
+            devices,
+        }
+    }
+
+    fn text_with(
+        c: &Cli,
+        m: &MockRunner,
+        plan: InstallPlan,
+        hw: &Detected,
+        input: &str,
+    ) -> (anyhow::Result<()>, String) {
+        let mut out = Vec::new();
+        let r = {
+            let mut p = Prompter::new(input.as_bytes(), &mut out, m);
+            text_install(c, m, plan, hw, &mut p)
+        };
+        (r, String::from_utf8_lossy(&out).into_owned())
+    }
+
     fn text(
         c: &Cli,
         m: &MockRunner,
         checks: &[Check],
         input: &str,
     ) -> (anyhow::Result<()>, String) {
-        let mut out = Vec::new();
-        let r = {
-            let mut p = Prompter::new(input.as_bytes(), &mut out, m);
-            text_install(c, m, plan_for(c), checks, &disks(), "REPORT\n", &mut p)
-        };
-        (r, String::from_utf8_lossy(&out).into_owned())
+        text_with(c, m, plan_for(c), &hw(checks.to_vec(), vec![]), input)
     }
+
+    const PCICONF: &str = "vgapci0@pci0:1:0:0:\tclass=0x030000 rev=0xa1 hdr=0x00 vendor=0x10de device=0x1b80 subvendor=0x1458 subdevice=0x3702\n\
+                           hdac0@pci0:1:0:1:\tclass=0x040300 rev=0xa1 hdr=0x00 vendor=0x10de device=0x10f0 subvendor=0x1458 subdevice=0x3702\n\
+                           vgapci1@pci0:6:0:0:\tclass=0x030000 rev=0xc8 hdr=0x00 vendor=0x1002 device=0x1638 subvendor=0x1d05 subdevice=0x1127\n\
+                           igb0@pci0:5:0:0:\tclass=0x020000 rev=0x03 hdr=0x00 vendor=0x8086 device=0x1533 subvendor=0x8086 subdevice=0x0000\n";
 
     #[test]
     fn render_checks_table() {
@@ -455,20 +528,55 @@ mod tests {
     #[test]
     fn gpu_detection_picks_the_first_kms_capable_card() {
         use juanitos_core::sys::CmdOutput;
-        let pciconf = "vgapci0@pci0:1:0:0:\tclass=0x030000 rev=0xa1 hdr=0x00 vendor=0x10de device=0x1b80 subvendor=0x1458 subdevice=0x3702\n\
-                       vgapci1@pci0:6:0:0:\tclass=0x030000 rev=0xc8 hdr=0x00 vendor=0x1002 device=0x1638 subvendor=0x1d05 subdevice=0x1127\n\
-                       igb0@pci0:5:0:0:\tclass=0x020000 rev=0x03 hdr=0x00 vendor=0x8086 device=0x1533 subvendor=0x8086 subdevice=0x0000\n";
-        let devices = juanitos_core::pci::parse_pciconf(pciconf);
+        let m = MockRunner::new().respond("pciconf", &["-l", "-v"], CmdOutput::ok(PCICONF));
+        let devices = pci_devices(&m);
+        assert_eq!(devices.len(), 4);
         // The NVIDIA card (for the gpu qube) is skipped, the AMD one drives the console.
         assert_eq!(gpu_module_from(&devices).as_deref(), Some("amdgpu"));
         assert_eq!(gpu_module_from(&devices[..1]), None);
         assert_eq!(gpu_module_from(&[]), None);
-
-        let m = MockRunner::new().respond("pciconf", &["-l", "-v"], CmdOutput::ok(pciconf));
-        assert_eq!(detect_gpu_module(&m).as_deref(), Some("amdgpu"));
-        // No pciconf (a development host): no module, no error.
+        // No pciconf (a development host): no device, no error.
         let m = MockRunner::new().respond("pciconf", &["-l", "-v"], CmdOutput::failed(1, ""));
-        assert_eq!(detect_gpu_module(&m), None);
+        assert!(pci_devices(&m).is_empty());
+    }
+
+    #[test]
+    fn passthrough_flags() {
+        let devices = pci::parse_pciconf(PCICONF);
+        let nvidia = [PciAddr::new(1, 0, 0), PciAddr::new(1, 0, 1)];
+        assert_eq!(passthrough_from(&cli(&[]), &devices), nvidia);
+        assert!(passthrough_from(&cli(&["--no-pci"]), &devices).is_empty());
+        assert_eq!(
+            passthrough_from(
+                &cli(&["--pci", "5/0/0", "--pci", "0000:01:00.0", "--pci", "5:0:0"]),
+                &devices
+            ),
+            [PciAddr::new(1, 0, 0), PciAddr::new(5, 0, 0)]
+        );
+        let mut argv = vec!["jos-install", "--pci", "1/0/0", "--no-pci"];
+        assert!(Cli::try_parse_from(&argv).is_err(), "conflicting flags");
+        argv.truncate(2);
+        argv.push("nope");
+        let err = Cli::try_parse_from(&argv).unwrap_err().to_string();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn interactive_text_install_reserves_devices() {
+        let c = cli(&["--dry-run"]);
+        let m = MockRunner::new();
+        let devices = pci::passthrough_candidates(&pci::parse_pciconf(PCICONF));
+        let plan = InstallPlan {
+            pptdevs: pci::default_passthrough(&devices),
+            ..plan_for(&c)
+        };
+        // disk 1; hostname; swap; desktop; devices: the NIC only; root
+        // password twice; no user; proceed.
+        let input = "1\n\n\n\n4\npw\npw\n\ny\n";
+        let (r, out) = text_with(&c, &m, plan, &hw(checks(Status::Ok), devices), input);
+        r.unwrap();
+        assert!(out.contains("[1 2]: "), "NVIDIA proposed by default: {out}");
+        assert!(out.contains("passthru  5/0/0\n"), "{out}");
     }
 
     #[test]
@@ -572,7 +680,7 @@ mod tests {
         let input: &[u8] = b"\n\n\nsecret\nsecret\ny\n";
         let r = {
             let mut pr = Prompter::new(input, &mut out, &m);
-            text_install(&c, &m, p, &checks(Status::Ok), &disks(), "", &mut pr)
+            text_install(&c, &m, p, &hw(checks(Status::Ok), vec![]), &mut pr)
         };
         r.unwrap();
         assert!(String::from_utf8_lossy(&out).contains("Password for ana"));

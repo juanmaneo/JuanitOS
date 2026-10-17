@@ -95,7 +95,8 @@ out like Calamares: steps on the left, the current page on the right.
 
 Welcome → **Hardware** (the `jos doctor` checks: VT-x/AMD-V, IOMMU, bhyve
 modules, passthrough devices) → **Disk** → **System** (hostname, swap,
-COSMIC at boot) → **Users** → **Summary** (nothing is written before you
+COSMIC at boot) → **Passthrough** (GPUs and NICs reserved for qubes via
+`pptdevs`; the NVIDIA card is proposed for CUDA) → **Users** → **Summary** (nothing is written before you
 tick "erase the disk" here) → **Install** (progress) → **Finish**
 (reboot). The whole disk becomes GPT + EFI + swap + a ZFS pool laid out
 like `bsdinstall zfsboot`. Serial consoles get the same steps as text

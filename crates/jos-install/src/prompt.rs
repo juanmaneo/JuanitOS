@@ -4,6 +4,7 @@
 use std::io::{BufRead, Write};
 
 use anyhow::bail;
+use juanitos_core::pci::{PciAddr, PciDevice};
 use juanitos_core::sys::Runner;
 
 use crate::disks::Disk;
@@ -91,6 +92,72 @@ impl<'a, R: BufRead, W: Write> Prompter<'a, R, W> {
             }
             self.say("  no such disk\n")?;
         }
+    }
+
+    /// Tick passthrough devices by number. `current` is the default; its
+    /// addresses that are not candidates (given with `--pci`) are kept.
+    /// Returns the selection sorted.
+    pub fn choose_devices(
+        &mut self,
+        candidates: &[PciDevice],
+        current: &[PciAddr],
+    ) -> anyhow::Result<Vec<PciAddr>> {
+        self.say("PCI devices (reserved ones go to qubes; the dom0 never drives them):\n")?;
+        let mut default = Vec::new();
+        for (i, d) in candidates.iter().enumerate() {
+            let ticked = current.contains(&d.addr);
+            if ticked {
+                default.push((i + 1).to_string());
+            }
+            self.say(&format!(
+                "  {}) [{}] {:<8} {:<5} {}\n",
+                i + 1,
+                if ticked { 'x' } else { ' ' },
+                d.addr.to_string(),
+                d.kind(),
+                d.label()
+            ))?;
+        }
+        let default = if default.is_empty() {
+            "none".to_string()
+        } else {
+            default.join(" ")
+        };
+        let mut out: Vec<PciAddr> = current
+            .iter()
+            .copied()
+            .filter(|a| !candidates.iter().any(|d| d.addr == *a))
+            .collect();
+        loop {
+            let answer = self.prompt_default(
+                "Devices to reserve for passthrough (numbers, 'none')",
+                &default,
+            )?;
+            if answer.trim() == "none" {
+                break;
+            }
+            let picked: Option<Vec<PciAddr>> = answer
+                .split([' ', ','])
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    t.parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .and_then(|i| candidates.get(i))
+                        .map(|d| d.addr)
+                })
+                .collect();
+            match picked {
+                Some(p) => {
+                    out.extend(p);
+                    break;
+                }
+                None => self.say("  no such device\n")?,
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
     }
 
     /// Read a password twice with echo off (via `stty`, so no libc
@@ -189,6 +256,53 @@ mod tests {
         assert_eq!(r, "ada0");
         let (r, _, _) = with("", |p| p.choose_disk(&[]));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn devices_by_number_keeping_extras() {
+        let dev = |addr: PciAddr, vendor: u16, class: u32| PciDevice {
+            addr,
+            driver: "none0".into(),
+            vendor,
+            device: 0x1234,
+            class,
+            description: None,
+        };
+        let gpu = PciAddr::new(1, 0, 0);
+        let audio = PciAddr::new(1, 0, 1);
+        let nic = PciAddr::new(0, 20, 3);
+        let extra = PciAddr::new(7, 0, 0);
+        let devs = vec![
+            dev(nic, 0x8086, 0x028000),
+            dev(gpu, 0x10de, 0x030000),
+            dev(audio, 0x10de, 0x040300),
+        ];
+
+        // Enter keeps the default (here: the GPU and its audio).
+        let (r, out, _) = with("\n", |p| {
+            p.choose_devices(&devs, &[gpu, audio, extra]).unwrap()
+        });
+        assert_eq!(r, [gpu, audio, extra]);
+        assert!(
+            out.contains("  1) [ ] 0/20/3   NIC   vendor 0x8086 device 0x1234\n"),
+            "{out}"
+        );
+        assert!(out.contains("  2) [x] 1/0/0    GPU"));
+        assert!(out.contains("[2 3]: "));
+
+        // Invalid answers are asked again; commas and spaces both work.
+        let (r, out, _) = with("9\nx\n1, 3\n", |p| p.choose_devices(&devs, &[]).unwrap());
+        assert_eq!(r, [nic, audio]);
+        assert_eq!(out.matches("no such device").count(), 2);
+        assert!(out.contains("[none]: "));
+
+        // 'none' drops the candidates but keeps the extras.
+        let (r, _, _) = with("none\n", |p| {
+            p.choose_devices(&devs, &[gpu, extra]).unwrap()
+        });
+        assert_eq!(r, [extra]);
+        let (r, _, _) = with("\n", |p| p.choose_devices(&devs, &[]).unwrap());
+        assert!(r.is_empty());
     }
 
     #[test]

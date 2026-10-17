@@ -38,6 +38,11 @@ device. The host keeps a separate (integrated or secondary) GPU for COSMIC.
    (see `freebsd/loader.conf.sample`) and reboot. Afterwards `pciconf -l`
    shows `ppt0`, `ppt1` and `jos doctor` reports them as ready.
 
+   The installer does this for you: its **Passthrough** page (or
+   `jos-install --pci 1/0/0 --pci 1/0/1`) writes `pptdevs` into the new
+   system's `loader.conf`, and proposes the NVIDIA card and its audio
+   function by default when another GPU can drive the dom0.
+
 3. Make sure the host's `nvidia` driver is **not** loaded for that card.
    Either skip `nvidia_load` entirely or rely on `pptdevs` claiming the device
    first (it is attached before other drivers probe).

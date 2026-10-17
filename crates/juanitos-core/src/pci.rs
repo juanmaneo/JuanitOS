@@ -107,6 +107,71 @@ impl PciDevice {
     pub fn is_nic(&self) -> bool {
         (self.class >> 16) == 0x02
     }
+
+    pub fn is_nvidia(&self) -> bool {
+        self.vendor == NVIDIA_VENDOR
+    }
+
+    /// Short category for listings: `GPU`, `NIC` or `other`.
+    pub fn kind(&self) -> &'static str {
+        if self.is_gpu() {
+            "GPU"
+        } else if self.is_nic() {
+            "NIC"
+        } else {
+            "other"
+        }
+    }
+
+    /// Human-readable name: the `pciconf -v` description, or the IDs.
+    pub fn label(&self) -> String {
+        match &self.description {
+            Some(d) => d.clone(),
+            None => format!("vendor 0x{:04x} device 0x{:04x}", self.vendor, self.device),
+        }
+    }
+
+    fn same_slot(&self, other: &PciDevice) -> bool {
+        self.addr.bus == other.addr.bus && self.addr.slot == other.addr.slot
+    }
+}
+
+pub const NVIDIA_VENDOR: u16 = 0x10de;
+
+/// Devices worth offering for passthrough: GPUs, NICs (Wi-Fi included) and
+/// every other function sharing a GPU's slot (its HDMI audio, USB-C
+/// controller...), which has to follow the GPU into the same qube. Input
+/// order is kept.
+pub fn passthrough_candidates(devices: &[PciDevice]) -> Vec<PciDevice> {
+    devices
+        .iter()
+        .filter(|d| {
+            d.is_gpu() || d.is_nic() || devices.iter().any(|g| g.is_gpu() && g.same_slot(d))
+        })
+        .cloned()
+        .collect()
+}
+
+/// The reservation proposed by default: devices already bound to `ppt`, plus
+/// NVIDIA GPUs and their slot siblings (they go to the CUDA qube) as long as
+/// another GPU is left to drive the dom0's display. NICs are never reserved
+/// by default: until `sys-net` exists the dom0 needs one to fetch templates.
+pub fn default_passthrough(devices: &[PciDevice]) -> Vec<PciAddr> {
+    let other_gpu = devices.iter().any(|d| d.is_gpu() && !d.is_nvidia());
+    let mut out: Vec<PciAddr> = devices
+        .iter()
+        .filter(|d| {
+            d.is_passthrough_ready()
+                || (other_gpu
+                    && devices
+                        .iter()
+                        .any(|g| g.is_gpu() && g.is_nvidia() && g.same_slot(d)))
+        })
+        .map(|d| d.addr)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Parse `pciconf -l` or `pciconf -l -v` output.
@@ -196,8 +261,13 @@ pub fn parse_pciconf(text: &str) -> Vec<PciDevice> {
 
 /// Build the `pptdevs` line for `/boot/loader.conf`.
 pub fn pptdevs_line(addrs: &[PciAddr]) -> String {
+    format!("pptdevs=\"{}\"", addr_list(addrs))
+}
+
+/// Space-separated `B/S/F` list, the `pptdevs` syntax.
+pub fn addr_list(addrs: &[PciAddr]) -> String {
     let list: Vec<String> = addrs.iter().map(|a| a.to_string()).collect();
-    format!("pptdevs=\"{}\"", list.join(" "))
+    list.join(" ")
 }
 
 /// Query the host with `pciconf -l -v`.
@@ -309,6 +379,83 @@ ppt0@pci0:1:0:1:\tclass=0x040300 rev=0xa1 hdr=0x00 vendor=0x10de device=0x10f0 s
         );
         assert!(devs[2].is_passthrough_ready());
         assert_eq!(devs[2].class, 0x040300);
+    }
+
+    fn dev(addr: (u8, u8, u8), vendor: u16, class: u32, driver: &str) -> PciDevice {
+        PciDevice {
+            addr: PciAddr::new(addr.0, addr.1, addr.2),
+            driver: driver.to_string(),
+            vendor,
+            device: 0x1234,
+            class,
+            description: None,
+        }
+    }
+
+    /// A laptop with an Intel iGPU and an NVIDIA dGPU (plus its audio).
+    fn hybrid() -> Vec<PciDevice> {
+        vec![
+            dev((0, 0, 0), 0x8086, 0x060000, "hostb0"),
+            dev((0, 2, 0), 0x8086, 0x030000, "vgapci0"),
+            dev((0, 20, 3), 0x8086, 0x028000, "iwlwifi0"),
+            dev((0, 31, 6), 0x8086, 0x020000, "em0"),
+            dev((1, 0, 0), NVIDIA_VENDOR, 0x030000, "vgapci1"),
+            dev((1, 0, 1), NVIDIA_VENDOR, 0x040300, "hdac0"),
+            dev((2, 0, 0), 0x144d, 0x010802, "nvme0"),
+        ]
+    }
+
+    #[test]
+    fn kind_and_label() {
+        let devs = hybrid();
+        assert_eq!(devs[1].kind(), "GPU");
+        assert_eq!(devs[2].kind(), "NIC");
+        assert_eq!(devs[5].kind(), "other");
+        assert!(devs[4].is_nvidia());
+        assert!(!devs[1].is_nvidia());
+        assert_eq!(devs[4].label(), "vendor 0x10de device 0x1234");
+        let named = PciDevice {
+            description: Some("NVIDIA RTX 500 Ada".into()),
+            ..devs[4].clone()
+        };
+        assert_eq!(named.label(), "NVIDIA RTX 500 Ada");
+    }
+
+    #[test]
+    fn candidates_are_gpus_nics_and_gpu_siblings() {
+        let got: Vec<String> = passthrough_candidates(&hybrid())
+            .iter()
+            .map(|d| d.addr.to_string())
+            .collect();
+        assert_eq!(got, ["0/2/0", "0/20/3", "0/31/6", "1/0/0", "1/0/1"]);
+        assert!(passthrough_candidates(&[]).is_empty());
+    }
+
+    #[test]
+    fn default_reserves_nvidia_only_when_another_gpu_drives_the_dom0() {
+        let devs = hybrid();
+        assert_eq!(
+            default_passthrough(&devs),
+            [PciAddr::new(1, 0, 0), PciAddr::new(1, 0, 1)]
+        );
+
+        let nvidia_only: Vec<PciDevice> = devs
+            .iter()
+            .filter(|d| d.addr != PciAddr::new(0, 2, 0))
+            .cloned()
+            .collect();
+        assert!(default_passthrough(&nvidia_only).is_empty());
+
+        // Devices already bound to ppt stay reserved, without duplicates.
+        let mut bound = nvidia_only.clone();
+        bound.push(dev((5, 0, 0), 0x8086, 0x020000, "ppt0"));
+        assert_eq!(default_passthrough(&bound), [PciAddr::new(5, 0, 0)]);
+        let mut both = devs.clone();
+        both[4].driver = "ppt0".into();
+        assert_eq!(
+            default_passthrough(&both),
+            [PciAddr::new(1, 0, 0), PciAddr::new(1, 0, 1)]
+        );
     }
 
     #[test]

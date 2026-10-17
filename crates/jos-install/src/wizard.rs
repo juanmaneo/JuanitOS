@@ -11,6 +11,7 @@
 
 use jos_fb::keys::Key;
 use juanitos_core::doctor::{self, Check, Status};
+use juanitos_core::pci::{PciAddr, PciDevice};
 
 use crate::disks::Disk;
 use crate::install::{InstallPlan, Progress};
@@ -22,17 +23,19 @@ pub enum Page {
     Hardware,
     Disk,
     System,
+    Passthrough,
     Users,
     Summary,
     Install,
     Finish,
 }
 
-pub const PAGES: [Page; 8] = [
+pub const PAGES: [Page; 9] = [
     Page::Welcome,
     Page::Hardware,
     Page::Disk,
     Page::System,
+    Page::Passthrough,
     Page::Users,
     Page::Summary,
     Page::Install,
@@ -47,6 +50,7 @@ impl Page {
             Page::Hardware => "Hardware",
             Page::Disk => "Disk",
             Page::System => "System",
+            Page::Passthrough => "Passthrough",
             Page::Users => "Users",
             Page::Summary => "Summary",
             Page::Install => "Install",
@@ -76,6 +80,8 @@ impl Page {
 pub enum Widget {
     AcceptChecks,
     Disks,
+    /// The Passthrough page's device list (Space ticks a device).
+    Devices,
     Hostname,
     Swap,
     Desktop,
@@ -229,6 +235,12 @@ pub struct Wizard {
     pub checks: Vec<Check>,
     pub disks: Vec<Disk>,
     pub disk_index: usize,
+    /// Passthrough candidates (`pci::passthrough_candidates`).
+    pub devices: Vec<PciDevice>,
+    pub device_index: usize,
+    /// Devices to reserve; may hold addresses that are not candidates
+    /// (given with `--pci`), which are kept as they are.
+    pub reserved: Vec<PciAddr>,
     pub hostname: TextField,
     pub swap: TextField,
     pub desktop: bool,
@@ -249,9 +261,17 @@ pub struct Wizard {
 impl Wizard {
     /// `base` provides the defaults (pool, hostname, swap, dist directory,
     /// a preselected disk...) that the pages then edit.
-    pub fn new(base: InstallPlan, checks: Vec<Check>, disks: Vec<Disk>) -> Self {
+    pub fn new(
+        base: InstallPlan,
+        checks: Vec<Check>,
+        disks: Vec<Disk>,
+        devices: Vec<PciDevice>,
+    ) -> Self {
         let disk_index = disks.iter().position(|d| d.name == base.disk).unwrap_or(0);
         let mut w = Wizard {
+            reserved: base.pptdevs.clone(),
+            devices,
+            device_index: 0,
             page: Page::Welcome,
             focus: 0,
             hostname: TextField::new(&base.hostname),
@@ -290,6 +310,8 @@ impl Wizard {
             Page::Disk if self.disks.is_empty() => vec![Back],
             Page::Disk => vec![Disks, Back, Next],
             Page::System => vec![Hostname, Swap, Desktop, Back, Next],
+            Page::Passthrough if self.devices.is_empty() => vec![Back, Next],
+            Page::Passthrough => vec![Devices, Back, Next],
             Page::Users => vec![RootPw, RootPw2, UserName, UserPw, UserPw2, Back, Next],
             Page::Summary => vec![ConfirmErase, Back, Next],
             Page::Install => vec![],
@@ -389,6 +411,34 @@ impl Wizard {
         self.disks.get(self.disk_index)
     }
 
+    pub fn is_reserved(&self, addr: PciAddr) -> bool {
+        self.reserved.contains(&addr)
+    }
+
+    fn toggle_device(&mut self) {
+        let Some(addr) = self.devices.get(self.device_index).map(|d| d.addr) else {
+            return;
+        };
+        if self.is_reserved(addr) {
+            self.reserved.retain(|a| *a != addr);
+        } else {
+            self.reserved.push(addr);
+        }
+    }
+
+    /// Every GPU is reserved: the dom0 will have no display of its own.
+    pub fn reserves_every_gpu(&self) -> bool {
+        let mut gpus = self.devices.iter().filter(|d| d.is_gpu()).peekable();
+        gpus.peek().is_some() && gpus.all(|d| self.is_reserved(d.addr))
+    }
+
+    fn reserved_sorted(&self) -> Vec<PciAddr> {
+        let mut r = self.reserved.clone();
+        r.sort();
+        r.dedup();
+        r
+    }
+
     /// Why the current page cannot be left forward, if it cannot.
     pub fn page_error(&self) -> Option<String> {
         match self.page {
@@ -432,6 +482,7 @@ impl Wizard {
             gui: self.desktop,
             root_password: Some(self.root_pw.value.clone()),
             user,
+            pptdevs: self.reserved_sorted(),
             ..self.base.clone()
         }
     }
@@ -524,13 +575,13 @@ impl Wizard {
             Key::Esc => self.back(),
             Key::Enter => return self.activate(w),
             Key::Up | Key::Down if w == Widget::Disks => {
-                let last = self.disks.len().saturating_sub(1);
-                self.disk_index = if key == Key::Up {
-                    self.disk_index.saturating_sub(1)
-                } else {
-                    (self.disk_index + 1).min(last)
-                };
+                self.disk_index = list_step(self.disk_index, self.disks.len(), key == Key::Up);
             }
+            Key::Up | Key::Down if w == Widget::Devices => {
+                self.device_index =
+                    list_step(self.device_index, self.devices.len(), key == Key::Up);
+            }
+            Key::Char(' ') if w == Widget::Devices => self.toggle_device(),
             Key::Up => self.move_focus(false),
             Key::Down => self.move_focus(true),
             Key::Left | Key::Right if w.is_button() => self.move_focus(key == Key::Right),
@@ -637,6 +688,7 @@ impl Wizard {
                 "Desktop",
                 if p.gui { "COSMIC" } else { "console only" }.into(),
             ),
+            ("Passthrough", p.passthrough_text()),
             ("Root", "password set".into()),
             (
                 "User",
@@ -652,6 +704,15 @@ impl Wizard {
     pub fn check_counts(&self) -> (usize, usize) {
         let count = |s: Status| self.checks.iter().filter(|c| c.status == s).count();
         (count(Status::Fail), count(Status::Warn))
+    }
+}
+
+/// Move a list selection one row up or down, staying within `len` rows.
+fn list_step(index: usize, len: usize, up: bool) -> usize {
+    if up {
+        index.saturating_sub(1)
+    } else {
+        (index + 1).min(len.saturating_sub(1))
     }
 }
 
@@ -750,8 +811,29 @@ mod tests {
         ]
     }
 
+    fn device(addr: PciAddr, vendor: u16, class: u32) -> PciDevice {
+        PciDevice {
+            addr,
+            driver: "none0".into(),
+            vendor,
+            device: 0x1234,
+            class,
+            description: None,
+        }
+    }
+
+    /// Intel iGPU, NVIDIA dGPU + audio, Wi-Fi.
+    fn devices() -> Vec<PciDevice> {
+        vec![
+            device(PciAddr::new(0, 2, 0), 0x8086, 0x030000),
+            device(PciAddr::new(0, 20, 3), 0x8086, 0x028000),
+            device(PciAddr::new(1, 0, 0), 0x10de, 0x030000),
+            device(PciAddr::new(1, 0, 1), 0x10de, 0x040300),
+        ]
+    }
+
     fn wizard() -> Wizard {
-        Wizard::new(InstallPlan::default(), ok_checks(), disks())
+        Wizard::new(InstallPlan::default(), ok_checks(), disks(), devices())
     }
 
     fn typ(w: &mut Wizard, s: &str) {
@@ -772,6 +854,8 @@ mod tests {
         }
         assert_eq!(w.focused(), Some(Widget::Next));
         w.handle(Key::Enter);
+        assert_eq!(w.page, Page::Passthrough);
+        w.handle(Key::Enter); // the list or Next: on to Users
         assert_eq!(w.page, Page::Users);
         typ(w, "rootpw");
         w.handle(Key::Enter);
@@ -791,7 +875,9 @@ mod tests {
         assert_eq!(Page::Welcome.next(), Page::Hardware);
         assert_eq!(Page::Finish.next(), Page::Finish);
         assert_eq!(Page::Welcome.prev(), Page::Welcome);
-        assert_eq!(Page::Users.prev(), Page::System);
+        assert_eq!(Page::Users.prev(), Page::Passthrough);
+        assert_eq!(Page::Passthrough.prev(), Page::System);
+        assert_eq!(Page::Passthrough.label(), "Passthrough");
         for (i, p) in PAGES.iter().enumerate() {
             assert_eq!(p.index(), i);
             assert!(!p.label().is_empty());
@@ -883,7 +969,7 @@ mod tests {
 
     #[test]
     fn failed_checks_must_be_accepted() {
-        let mut w = Wizard::new(InstallPlan::default(), failed_checks(), disks());
+        let mut w = Wizard::new(InstallPlan::default(), failed_checks(), disks(), vec![]);
         assert_eq!(w.check_counts(), (1, 1));
         w.handle(Key::Enter);
         assert_eq!(w.page, Page::Hardware);
@@ -909,7 +995,7 @@ mod tests {
 
     #[test]
     fn no_disks_blocks_the_disk_page() {
-        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), vec![]);
+        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), vec![], vec![]);
         w.handle(Key::Enter);
         w.handle(Key::Enter);
         assert_eq!(w.page, Page::Disk);
@@ -926,7 +1012,7 @@ mod tests {
             disk: "nda0".into(),
             ..Default::default()
         };
-        let mut w = Wizard::new(base, ok_checks(), disks());
+        let mut w = Wizard::new(base, ok_checks(), disks(), vec![]);
         assert_eq!(w.disk_index, 1);
         w.handle(Key::Enter);
         w.handle(Key::Enter);
@@ -937,6 +1023,60 @@ mod tests {
         w.handle(Key::Up);
         assert_eq!(w.disk_index, 0);
         assert_eq!(w.selected_disk().map(|d| d.name.as_str()), Some("ada0"));
+    }
+
+    #[test]
+    fn passthrough_page_ticks_devices() {
+        let base = InstallPlan {
+            pptdevs: vec![PciAddr::new(1, 0, 0), PciAddr::new(7, 0, 0)],
+            ..Default::default()
+        };
+        let mut w = Wizard::new(base, ok_checks(), disks(), devices());
+        w.goto(Page::Passthrough);
+        assert_eq!(w.widgets(), [Widget::Devices, Widget::Back, Widget::Next]);
+        assert_eq!(w.focused(), Some(Widget::Devices));
+        assert!(w.is_reserved(PciAddr::new(1, 0, 0)));
+        assert!(!Widget::Devices.is_button() && !Widget::Devices.is_checkbox());
+
+        // Down to the NVIDIA audio, tick it; Up is clamped at the top.
+        for _ in 0..5 {
+            w.handle(Key::Down);
+        }
+        assert_eq!(w.device_index, 3, "clamped at the end");
+        w.handle(Key::Char(' '));
+        assert!(w.is_reserved(PciAddr::new(1, 0, 1)));
+        for _ in 0..5 {
+            w.handle(Key::Up);
+        }
+        assert_eq!(w.device_index, 0);
+        assert!(!w.reserves_every_gpu());
+        w.handle(Key::Char(' ')); // the iGPU too: no display left
+        assert!(w.reserves_every_gpu());
+        w.handle(Key::Char(' '));
+        assert!(!w.is_reserved(PciAddr::new(0, 2, 0)));
+
+        // Addresses that are not candidates (from --pci) are kept, sorted.
+        assert_eq!(
+            w.plan().pptdevs,
+            [
+                PciAddr::new(1, 0, 0),
+                PciAddr::new(1, 0, 1),
+                PciAddr::new(7, 0, 0)
+            ]
+        );
+
+        // Enter in the list moves on.
+        w.handle(Key::Enter);
+        assert_eq!(w.page, Page::Users);
+
+        // Without candidates the page only has its buttons.
+        let mut empty = Wizard::new(InstallPlan::default(), ok_checks(), disks(), vec![]);
+        empty.goto(Page::Passthrough);
+        assert_eq!(empty.widgets(), [Widget::Back, Widget::Next]);
+        assert!(!empty.reserves_every_gpu());
+        empty.toggle_device();
+        assert!(empty.reserved.is_empty());
+        assert!(empty.plan().pptdevs.is_empty());
     }
 
     #[test]
@@ -1067,7 +1207,7 @@ mod tests {
             gui: false,
             ..Default::default()
         };
-        let w = Wizard::new(base, ok_checks(), disks());
+        let w = Wizard::new(base, ok_checks(), disks(), vec![]);
         assert_eq!(w.hostname.value, "box");
         assert_eq!(w.swap.value, "8");
         assert_eq!(w.root_pw2.value, "r");
@@ -1087,7 +1227,13 @@ mod tests {
         assert!(get("Disk").unwrap().contains("/dev/nda0"));
         assert!(get("Layout").unwrap().contains("4 GiB swap"));
         assert_eq!(get("Desktop").unwrap(), "COSMIC");
+        assert_eq!(get("Passthrough").unwrap(), "none");
         assert!(get("User").unwrap().contains("juan"));
+        w.reserved = vec![PciAddr::new(1, 0, 1), PciAddr::new(1, 0, 0)];
+        let rows = w.summary_rows();
+        assert!(rows
+            .iter()
+            .any(|(k, v)| *k == "Passthrough" && v == "1/0/0 1/0/1"));
         w.swap = TextField::new("0");
         w.user_name = TextField::default();
         let rows = w.summary_rows();
@@ -1114,7 +1260,7 @@ mod tests {
             pool: "Bad Pool".into(),
             ..Default::default()
         };
-        let mut w = Wizard::new(base, ok_checks(), disks());
+        let mut w = Wizard::new(base, ok_checks(), disks(), vec![]);
         to_summary(&mut w);
         w.confirm_erase = true;
         w.focus = 2;

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use juanitos_core::dom0::{self, Dom0Options, Flavor};
 use juanitos_core::fsops::FsOps;
+use juanitos_core::pci::{self, PciAddr};
 use juanitos_core::release::DistManifest;
 use juanitos_core::sys::Runner;
 use juanitos_core::zfs::Storage;
@@ -28,6 +29,8 @@ pub struct InstallPlan {
     /// KMS driver for the dom0's GPU (`dom0::gpu_kernel_module`), detected
     /// on the live medium.
     pub gpu_module: Option<String>,
+    /// PCI devices reserved for qubes (`pptdevs`), sorted.
+    pub pptdevs: Vec<PciAddr>,
     pub root_password: Option<String>,
     /// `(name, password)` of the first unprivileged (wheel) user.
     pub user: Option<(String, String)>,
@@ -48,6 +51,7 @@ impl Default for InstallPlan {
             gui: true,
             serial_console: true,
             gpu_module: None,
+            pptdevs: Vec::new(),
             root_password: None,
             user: None,
             dist_dir: dom0::DIST_DIR.to_string(),
@@ -94,6 +98,16 @@ impl InstallPlan {
             gui: self.gui,
             serial_console: self.serial_console,
             gpu_module: self.gpu_module.clone(),
+            pptdevs: self.pptdevs.clone(),
+        }
+    }
+
+    /// The reserved devices as shown to the user: `1/0/0 1/0/1` or `none`.
+    pub fn passthrough_text(&self) -> String {
+        if self.pptdevs.is_empty() {
+            "none".into()
+        } else {
+            pci::addr_list(&self.pptdevs)
         }
     }
 
@@ -110,6 +124,7 @@ impl InstallPlan {
              hostname  {host}\n  \
              swap      {swap} GiB\n  \
              desktop   {gui}\n  \
+             passthru  {ppt}\n  \
              user      {user}\n  \
              dist      {dist}\n",
             dev = self.dev(),
@@ -117,6 +132,7 @@ impl InstallPlan {
             host = self.hostname,
             swap = self.swap_gb,
             gui = if self.gui { "COSMIC" } else { "console only" },
+            ppt = self.passthrough_text(),
             dist = self.dist_dir,
         )
     }
@@ -547,6 +563,7 @@ mod tests {
             root_password: Some("secret".into()),
             user: Some(("juan".into(), "pw".into())),
             dist_dir: "/nonexistent".into(),
+            pptdevs: vec![PciAddr::new(1, 0, 0), PciAddr::new(1, 0, 1)],
             ..Default::default()
         }
     }
@@ -746,6 +763,7 @@ mod tests {
         assert!(read("etc/rc.conf").contains("hostname=\"box\""));
         assert!(read("etc/rc.conf").contains("jos_login_enable=\"YES\""));
         assert!(read("boot/loader.conf").contains("zfs_load=\"YES\""));
+        assert!(read("boot/loader.conf").contains("\npptdevs=\"1/0/0 1/0/1\"\n"));
         assert!(read("etc/fstab").contains("/boot/efi"));
         // The login screen has a VT of its own: the base's ttys/gettytab
         // stay as FreeBSD ships them.
@@ -804,5 +822,11 @@ mod tests {
         assert!(s.contains("/dev/vtbd0"));
         assert!(s.contains("COSMIC"));
         assert!(s.contains("juan"));
+        assert!(s.contains("passthru  1/0/0 1/0/1\n"), "{s}");
+        let none = InstallPlan {
+            pptdevs: Vec::new(),
+            ..plan()
+        };
+        assert!(none.summary().contains("passthru  none\n"));
     }
 }

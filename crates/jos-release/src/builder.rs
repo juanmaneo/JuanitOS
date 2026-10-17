@@ -622,6 +622,9 @@ impl<'a> Builder<'a> {
             // The live medium runs the installer on the text console; the
             // KMS driver is chosen for the installed system.
             gpu_module: None,
+            // Nothing is reserved on the live medium: the installer must
+            // see every device.
+            pptdevs: Vec::new(),
         };
         self.fs
             .write(&root.join("etc/fstab"), &dom0::live_fstab(&p.label))?;

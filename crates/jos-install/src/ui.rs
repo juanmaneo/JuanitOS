@@ -147,6 +147,7 @@ pub fn render(w: &Wizard, width: u32, height: u32) -> Image {
         Page::Hardware => hardware(&mut c, w),
         Page::Disk => disk(&mut c, w),
         Page::System => system(&mut c, w),
+        Page::Passthrough => passthrough(&mut c, w),
         Page::Users => users(&mut c, w),
         Page::Summary => summary(&mut c, w),
         Page::Install => install(&mut c, w),
@@ -482,6 +483,94 @@ fn system(c: &mut Canvas, w: &Wizard) {
     );
 }
 
+/// Rows of the device list shown at once; the list scrolls past that.
+const DEVICE_ROWS: usize = 8;
+const DEVICE_PITCH: i32 = 52;
+
+fn passthrough(c: &mut Canvas, w: &Wizard) {
+    title(
+        c,
+        "Passthrough",
+        "Ticked devices go to ppt(4) for qubes: the dom0 never drives them.",
+    );
+    if w.devices.is_empty() {
+        paragraph(
+            c,
+            BODY_Y,
+            &[
+                "No graphics or network controller found.",
+                "Devices can be reserved later with pptdevs in /boot/loader.conf.",
+            ],
+        );
+        return;
+    }
+    let focused = w.focused() == Some(Widget::Devices);
+    let first = w.device_index.saturating_sub(DEVICE_ROWS - 1);
+    let mut y = BODY_Y;
+    for (i, d) in w.devices.iter().enumerate().skip(first).take(DEVICE_ROWS) {
+        let selected = i == w.device_index;
+        let border = if selected && focused {
+            THEME.accent
+        } else if selected {
+            THEME.text_muted
+        } else {
+            THEME.highlight
+        };
+        c.boxed(CONTENT_X, y, CONTENT_W, 44, border, THEME.highlight);
+        c.boxed(
+            CONTENT_X + 12,
+            y + 9,
+            26,
+            26,
+            THEME.text_muted,
+            THEME.highlight,
+        );
+        if w.is_reserved(d.addr) {
+            c.rounded(CONTENT_X + 18, y + 15, 14, 14, 3, THEME.accent);
+        }
+        let text = if selected { THEME.accent } else { THEME.text };
+        c.text(CONTENT_X + 56, y + 15, &d.addr.to_string(), 2, text);
+        c.text(CONTENT_X + 180, y + 15, d.kind(), 2, THEME.text_muted);
+        c.text_clip(
+            CONTENT_X + 260,
+            y + 15,
+            &d.label(),
+            2,
+            CONTENT_W - 276,
+            text,
+        );
+        y += DEVICE_PITCH;
+    }
+    y += 12;
+    if w.reserves_every_gpu() {
+        c.text_clip(
+            CONTENT_X,
+            y,
+            "Every GPU is reserved: the dom0 will have no display of its own.",
+            2,
+            CONTENT_W,
+            FAIL,
+        );
+    } else {
+        c.text_clip(
+            CONTENT_X,
+            y,
+            "Space: tick. NVIDIA GPU and its audio: the gpu qube (CUDA).",
+            2,
+            CONTENT_W,
+            THEME.text_muted,
+        );
+        c.text_clip(
+            CONTENT_X,
+            y + 26,
+            "Keep a NIC until sys-net exists: the dom0 fetches templates with it.",
+            2,
+            CONTENT_W,
+            THEME.text_muted,
+        );
+    }
+}
+
 fn users(c: &mut Canvas, w: &Wizard) {
     title(
         c,
@@ -691,6 +780,8 @@ pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Re
         w.handle(Key::Tab);
     }
     w.handle(Key::Enter);
+    shot(&w, "installer-5-passthrough")?;
+    w.handle(Key::Enter);
     for (text, enter) in [
         ("secret", true),
         ("secret", true),
@@ -704,14 +795,14 @@ pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Re
             w.handle(Key::Enter);
         }
     }
-    shot(&w, "installer-5-users")?;
+    shot(&w, "installer-6-users")?;
     w.handle(Key::Enter);
     for ch in "pw".chars() {
         w.handle(Key::Char(ch));
     }
     w.handle(Key::Enter);
     w.handle(Key::Char(' '));
-    shot(&w, "installer-6-summary")?;
+    shot(&w, "installer-7-summary")?;
     w.handle(Key::Tab);
     w.handle(Key::Tab);
     w.handle(Key::Enter);
@@ -722,9 +813,9 @@ pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Re
             title: (*t).to_string(),
         });
     }
-    shot(&w, "installer-7-install")?;
+    shot(&w, "installer-8-install")?;
     w.finished(Ok(()));
-    shot(&w, "installer-8-finish")?;
+    shot(&w, "installer-9-finish")?;
     Ok(written)
 }
 
@@ -732,13 +823,64 @@ pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Re
 pub fn sample_wizard() -> Wizard {
     use crate::disks::Disk;
     use juanitos_core::doctor::Check;
+    use juanitos_core::pci::{self, PciAddr, PciDevice};
     let check = |name: &str, status, detail: &str| Check {
         name: name.into(),
         status,
         detail: detail.into(),
     };
+    // A Lenovo P16s-like laptop: Intel Arc iGPU for the dom0, NVIDIA for
+    // CUDA.
+    let dev = |addr: PciAddr, vendor: u16, device: u16, class: u32, d: &str| PciDevice {
+        addr,
+        driver: "none0".into(),
+        vendor,
+        device,
+        class,
+        description: Some(d.into()),
+    };
+    let devices = vec![
+        dev(
+            PciAddr::new(0, 2, 0),
+            0x8086,
+            0x7d55,
+            0x030000,
+            "Intel Corporation Meteor Lake-P [Intel Arc Graphics]",
+        ),
+        dev(
+            PciAddr::new(0, 20, 3),
+            0x8086,
+            0x7e40,
+            0x028000,
+            "Intel Corporation Meteor Lake PCH CNVi WiFi",
+        ),
+        dev(
+            PciAddr::new(0, 31, 6),
+            0x8086,
+            0x550a,
+            0x020000,
+            "Intel Corporation Ethernet Connection (18) I219-LM",
+        ),
+        dev(
+            PciAddr::new(1, 0, 0),
+            0x10de,
+            0x28b9,
+            0x030000,
+            "NVIDIA Corporation AD107GLM [RTX 500 Ada Generation Laptop GPU]",
+        ),
+        dev(
+            PciAddr::new(1, 0, 1),
+            0x10de,
+            0x22be,
+            0x040300,
+            "NVIDIA Corporation AD107 High Definition Audio Controller",
+        ),
+    ];
     Wizard::new(
-        crate::install::InstallPlan::default(),
+        crate::install::InstallPlan {
+            pptdevs: pci::default_passthrough(&devices),
+            ..Default::default()
+        },
         vec![
             check("kernel module vmm", Status::Ok, "loaded"),
             check("kernel module nmdm", Status::Ok, "loaded"),
@@ -769,6 +911,7 @@ pub fn sample_wizard() -> Wizard {
                 description: "WDC WD20EZBX-00AYRA0".into(),
             },
         ],
+        devices,
     )
 }
 
@@ -843,8 +986,10 @@ mod tests {
         w.finished(Ok(()));
         assert!(differs(&failed, &render(&w, 1280, 800)));
         // Disk page without disks, hardware page with failures.
-        let mut empty = Wizard::new(Default::default(), vec![], vec![]);
+        let mut empty = Wizard::new(Default::default(), vec![], vec![], vec![]);
         empty.page = Page::Disk;
+        let _ = render(&empty, 1280, 800);
+        empty.page = Page::Passthrough;
         let _ = render(&empty, 1280, 800);
         let mut bad = sample_wizard();
         bad.checks[0].status = Status::Fail;
@@ -853,6 +998,30 @@ mod tests {
         let _ = render(&bad, 1280, 800);
         bad.checks.iter_mut().for_each(|c| c.status = Status::Ok);
         let _ = render(&bad, 1280, 800);
+    }
+
+    #[test]
+    fn passthrough_page_ticks_scrolls_and_warns() {
+        let mut w = sample_wizard();
+        w.page = Page::Passthrough;
+        w.focus = 0;
+        assert_eq!(w.focused(), Some(Widget::Devices));
+        let before = render(&w, 1280, 800);
+        w.handle(Key::Char(' ')); // reserve the iGPU too
+        assert!(w.reserves_every_gpu());
+        let warned = render(&w, 1280, 800);
+        assert!(differs(&before, &warned));
+        w.handle(Key::Char(' '));
+        assert!(!differs(&before, &render(&w, 1280, 800)));
+        // More devices than rows: the window follows the selection.
+        let extra = w.devices[1].clone();
+        w.devices.extend(std::iter::repeat_n(extra, 10));
+        let top = render(&w, 1280, 800);
+        for _ in 0..14 {
+            w.handle(Key::Down);
+        }
+        assert_eq!(w.device_index, 14);
+        assert!(differs(&top, &render(&w, 1280, 800)));
     }
 
     #[test]
