@@ -523,12 +523,9 @@ impl<'a> Vm<'a> {
         let mut failure = None;
         for name in &left {
             // A guest that powered off since the last look makes bhyvectl
-            // fail: not an error.
-            if let Err(e) = self.stop(name) {
-                if is_running(self.cfg, name) {
-                    failure.get_or_insert(e);
-                }
-            }
+            // fail: not an error. The first real failure is reported.
+            let real = self.stop(name).err().filter(|_| is_running(self.cfg, name));
+            failure = failure.or(real);
         }
         match failure {
             Some(e) => Err(e),
@@ -763,7 +760,13 @@ mod tests {
         assert!(GuestExit::TripleFault.is_clean());
         assert!(!GuestExit::Error(Some(4)).is_clean());
         assert_eq!(GuestExit::Error(Some(4)).to_string(), "error (exit code 4)");
+        assert_eq!(
+            GuestExit::Error(None).to_string(),
+            "error (killed by signal)"
+        );
+        assert_eq!(GuestExit::Error(None).as_str(), "error");
         assert_eq!(GuestExit::Halt.to_string(), "halt");
+        assert_eq!(GuestExit::TripleFault.to_string(), "triple fault");
     }
 
     #[test]
@@ -837,8 +840,12 @@ mod tests {
             crate::sys::CmdOutput::failed(4, "vm exit error"),
         );
         let q = Qube::new("work", QubeKind::App, OsType::Freebsd);
-        let err = Vm::new(&m, &cfg).run_once(&q).unwrap_err();
-        assert!(matches!(err, Error::Command { code: Some(4), .. }));
+        let err = Vm::new(&m, &cfg).run_once(&q).unwrap_err().to_string();
+        assert!(
+            err.starts_with("command `bhyve ")
+                && err.contains("(exit code Some(4)): vm exit error"),
+            "{err}"
+        );
         assert!(m
             .calls()
             .contains(&"bhyvectl --destroy --vm=work".to_string()));
@@ -851,6 +858,106 @@ mod tests {
         let t = Qube::new("tmpl", QubeKind::Template, OsType::Freebsd);
         assert!(Vm::new(&m, &cfg).start(&t).is_err());
         assert!(m.calls().is_empty());
+    }
+
+    #[test]
+    fn start_and_kill_tear_the_taps_down() {
+        use crate::sys::{CmdOutput, MockRunner};
+        let cfg = GlobalConfig::default();
+        let q = Qube::new("work", QubeKind::App, OsType::Freebsd);
+        let m = MockRunner::new().respond("bhyve", &[], CmdOutput::failed(1, ""));
+        assert_eq!(Vm::new(&m, &cfg).start(&q).unwrap(), GuestExit::Poweroff);
+        let calls = m.calls();
+        assert!(
+            calls.contains(&"ifconfig tap-work destroy".to_string()),
+            "{calls:?}"
+        );
+
+        let m = MockRunner::new();
+        Vm::new(&m, &cfg).kill("work").unwrap();
+        let calls = m.calls();
+        assert_eq!(
+            calls[..2],
+            [
+                "bhyvectl --force-poweroff --vm=work",
+                "bhyvectl --destroy --vm=work"
+            ]
+        );
+        assert!(
+            calls.contains(&"ifconfig tap-work destroy".to_string()),
+            "{calls:?}"
+        );
+    }
+
+    /// Every host tool a boot needs may be missing or fail; each failure
+    /// is reported before the guest runs.
+    #[test]
+    fn a_boot_fails_at_every_missing_tool() {
+        use crate::sys::MockRunner;
+        let cfg = GlobalConfig::default();
+        let app = Qube::new("work", QubeKind::App, OsType::Freebsd);
+        let mut fw = Qube::new("sys-firewall", QubeKind::Firewall, OsType::Unikernel);
+        fw.netvm = Some("sys-net".into());
+        fw.kernel = Some("/k.img".into());
+        let mut net = Qube::new("sys-net", QubeKind::Net, OsType::Freebsd);
+        net.uplink = Some("em0".into());
+        let bare = Qube::new("sys-net2", QubeKind::Net, OsType::Freebsd);
+        let tmpl = Qube::new("tpl", QubeKind::Template, OsType::Freebsd);
+        let gone = |tool: &str| MockRunner::new().missing(tool);
+        let failing = |tool: &str, q: &Qube| {
+            let m = gone(tool);
+            let vm = Vm::new(&m, &cfg);
+            let err = vm.run_once(q).unwrap_err().to_string();
+            assert!(err.contains(tool), "{}: {err}", q.name);
+            let calls = m.calls();
+            let booted = calls.iter().any(|c| c.starts_with("bhyve "));
+            assert_eq!(booted, tool == "bhyve", "{}: {calls:?}", q.name);
+        };
+        // The upstream tap, the NetVM tap, the downstream tap.
+        failing("ifconfig", &net);
+        failing("ifconfig", &app);
+        failing("ifconfig", &bare);
+        // Staging the unikernel image: the run directory, the copy.
+        failing("mkdir", &fw);
+        let m = gone("cp");
+        assert!(Vm::new(&m, &cfg).stage_kernel(&fw).is_err());
+        failing("cp", &fw);
+        // The share, the agent channel, bhyve itself.
+        failing("chmod", &app);
+        failing("rm", &app);
+        failing("bhyve", &app);
+        // A unikernel without an image never gets that far.
+        let mut bare_fw = fw.clone();
+        bare_fw.kernel = None;
+        let m = MockRunner::new();
+        let err = Vm::new(&m, &cfg)
+            .run_once(&bare_fw)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no `kernel` image"), "{err}");
+
+        // The same for a template's maintenance boot.
+        for tool in ["ifconfig", "chmod", "rm"] {
+            let m = gone(tool);
+            let vm = Vm::new(&m, &cfg);
+            let err = vm.maintenance_command(&tmpl, None).unwrap_err().to_string();
+            assert!(err.contains(tool), "{err}");
+            let err = vm.maintain(&tmpl, None).unwrap_err().to_string();
+            assert!(err.contains(tool), "{err}");
+        }
+        let m = gone("bhyve");
+        let err = Vm::new(&m, &cfg)
+            .maintain(&tmpl, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bhyve"), "{err}");
+        let mut uni = Qube::new("tpl-uni", QubeKind::Template, OsType::Unikernel);
+        uni.netvm = Some("sys-net".into());
+        let m = MockRunner::new();
+        let err = Vm::new(&m, &cfg)
+            .maintenance_command(&uni, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("no `kernel` image"), "{err}");
     }
 
     #[test]
@@ -936,12 +1043,9 @@ mod tests {
         assert_eq!(exit, GuestExit::Poweroff);
         let calls = m.calls();
         let boots: Vec<_> = calls.iter().filter(|c| c.starts_with("bhyve ")).collect();
+        let boot = boots.first().map_or("", |b| b.as_str());
         assert_eq!(boots.len(), 1);
-        assert!(
-            boots[0].ends_with("-s 29,ahci,cd:/s.iso dev"),
-            "{}",
-            boots[0]
-        );
+        assert!(boot.ends_with("-s 29,ahci,cd:/s.iso dev"), "{boot}");
         assert!(calls
             .iter()
             .any(|c| c.contains("destroy") && c.contains("tap-dev")));
@@ -956,8 +1060,11 @@ mod tests {
 
         // Crashes: reported.
         let m = MockRunner::new().respond("bhyve", &[], CmdOutput::failed(3, "fault"));
-        let err = Vm::new(&m, &cfg).maintain(&t, None).unwrap_err();
-        assert!(matches!(err, Error::Command { code: Some(3), .. }));
+        let err = Vm::new(&m, &cfg)
+            .maintain(&t, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("(exit code Some(3)): fault"), "{err}");
 
         // The command alone, for dry runs.
         let m = MockRunner::new();
@@ -1019,8 +1126,9 @@ mod tests {
         let m = MockRunner::new().respond("bhyvectl", &[], CmdOutput::failed(1, "busy"));
         let err = Vm::new(&m, &cfg)
             .await_poweroff(&names, Duration::ZERO)
-            .unwrap_err();
-        assert!(matches!(err, Error::Command { .. }), "{err}");
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bhyvectl --force-poweroff"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

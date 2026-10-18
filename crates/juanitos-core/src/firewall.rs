@@ -272,6 +272,11 @@ mod tests {
         kept.mac = Some("02:4a:00:00:00:01".into());
         assign_address(&mut kept, &[], Some("sys-firewall")).unwrap();
         assert_eq!(kept.mac.as_deref(), Some("02:4a:00:00:00:01"));
+        // So is an address.
+        let mut fixed = Qube::new("fixed", QubeKind::App, OsType::Freebsd);
+        fixed.ip = Some(Ipv4Addr::new(10, 137, 0, 9));
+        assign_address(&mut fixed, &[], Some("sys-firewall")).unwrap();
+        assert_eq!(fixed.ip, Some(Ipv4Addr::new(10, 137, 0, 9)));
 
         // Every client address taken.
         let base = u32::from(CLIENT_NET.addr);

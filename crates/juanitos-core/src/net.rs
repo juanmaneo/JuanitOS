@@ -66,61 +66,65 @@ impl<'a> Net<'a> {
             "" => "bridgeN",
             n => n,
         };
-        match self
+        let renamed = self
             .runner
-            .run_checked("ifconfig", &[created, "name", name])
-        {
+            .run_checked("ifconfig", &[created, "name", name]);
+        match renamed {
             Ok(_) => Ok(()),
-            Err(e) => {
-                self.runner.run_checked("ifconfig", &[created, "destroy"])?;
-                if self.iface_exists(name)? {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            }
+            // Lost the race: drop our bridge; fine if the winner's exists.
+            Err(e) => self
+                .runner
+                .run_checked("ifconfig", &[created, "destroy"])
+                .and_then(|_| self.iface_exists(name))
+                .and_then(|won| if won { Ok(()) } else { Err(e) }),
         }
+    }
+
+    /// `ifconfig <iface> <args...>`, output dropped.
+    fn ifconfig(&self, args: &[&str]) -> Result<()> {
+        self.runner.run_checked("ifconfig", args).map(drop)
     }
 
     /// Create (if needed) and bring up the bridge for `netvm`.
     pub fn ensure_bridge(&self, netvm: &str) -> Result<String> {
         let br = bridge_name(netvm);
-        self.create_bridge(&br)?;
-        self.runner.run_checked("ifconfig", &[&br, "up"])?;
+        self.create_bridge(&br)
+            .and_then(|()| self.ifconfig(&[&br, "up"]))?;
         Ok(br)
     }
 
     /// `addm` of a member already present fails ("File exists"): check
     /// the bridge's member list first.
     fn add_member(&self, bridge: &str, iface: &str) -> Result<()> {
-        let members = self.runner.run("ifconfig", &[bridge])?.stdout;
-        let present = members.lines().any(|l| {
-            let l = l.trim();
-            l.strip_prefix("member:")
-                .is_some_and(|rest| rest.split_whitespace().next() == Some(iface))
-        });
-        if !present {
-            self.runner
-                .run_checked("ifconfig", &[bridge, "addm", iface])?;
-        }
-        Ok(())
+        self.runner.run("ifconfig", &[bridge]).and_then(|out| {
+            let present = out.stdout.lines().any(|l| {
+                l.trim()
+                    .strip_prefix("member:")
+                    .is_some_and(|rest| rest.split_whitespace().next() == Some(iface))
+            });
+            match present {
+                true => Ok(()),
+                false => self.ifconfig(&[bridge, "addm", iface]),
+            }
+        })
     }
 
     fn attach_tap(&self, tap: &str, bridge: &str) -> Result<()> {
-        if !self.iface_exists(tap)? {
-            self.runner
-                .run_checked("ifconfig", &["tap", "create", "name", tap])?;
-        }
-        self.runner.run_checked("ifconfig", &[tap, "up"])?;
-        self.add_member(bridge, tap)
+        self.iface_exists(tap)
+            .and_then(|exists| match exists {
+                true => Ok(()),
+                false => self.ifconfig(&["tap", "create", "name", tap]),
+            })
+            .and_then(|()| self.ifconfig(&[tap, "up"]))
+            .and_then(|()| self.add_member(bridge, tap))
     }
 
     /// Create the upstream tap for `qube`, attach it to `netvm`'s bridge and
     /// return the tap name.
     pub fn create_tap(&self, qube: &str, netvm: &str) -> Result<String> {
-        let br = self.ensure_bridge(netvm)?;
         let tap = tap_name(qube);
-        self.attach_tap(&tap, &br)?;
+        self.ensure_bridge(netvm)
+            .and_then(|br| self.attach_tap(&tap, &br))?;
         Ok(tap)
     }
 
@@ -128,29 +132,29 @@ impl<'a> Net<'a> {
     /// interface `iface` (no NetVM in between) and return the tap name.
     pub fn create_uplink_tap(&self, qube: &str, iface: &str) -> Result<String> {
         let br = uplink_bridge_name(iface);
-        self.create_bridge(&br)?;
-        self.runner.run_checked("ifconfig", &[iface, "up"])?;
-        self.add_member(&br, iface)?;
-        self.runner.run_checked("ifconfig", &[&br, "up"])?;
         let tap = tap_name(qube);
-        self.attach_tap(&tap, &br)?;
+        self.create_bridge(&br)
+            .and_then(|()| self.ifconfig(&[iface, "up"]))
+            .and_then(|()| self.add_member(&br, iface))
+            .and_then(|()| self.ifconfig(&[&br, "up"]))
+            .and_then(|()| self.attach_tap(&tap, &br))?;
         Ok(tap)
     }
 
     /// Create the downstream tap for a net-providing `qube`, attached to the
     /// qube's own bridge, and return the tap name.
     pub fn create_downstream_tap(&self, qube: &str) -> Result<String> {
-        let br = self.ensure_bridge(qube)?;
         let tap = downstream_tap_name(qube);
-        self.attach_tap(&tap, &br)?;
+        self.ensure_bridge(qube)
+            .and_then(|br| self.attach_tap(&tap, &br))?;
         Ok(tap)
     }
 
     fn destroy_iface(&self, name: &str) -> Result<()> {
-        if self.iface_exists(name)? {
-            self.runner.run_checked("ifconfig", &[name, "destroy"])?;
-        }
-        Ok(())
+        self.iface_exists(name).and_then(|exists| match exists {
+            true => self.ifconfig(&[name, "destroy"]),
+            false => Ok(()),
+        })
     }
 
     /// Remove the upstream tap for `qube`; a missing tap is not an error.
@@ -160,8 +164,8 @@ impl<'a> Net<'a> {
 
     /// Remove both taps of `qube` (upstream and, if any, downstream).
     pub fn destroy_taps(&self, qube: &str) -> Result<()> {
-        self.destroy_iface(&tap_name(qube))?;
-        self.destroy_iface(&downstream_tap_name(qube))
+        self.destroy_iface(&tap_name(qube))
+            .and_then(|()| self.destroy_iface(&downstream_tap_name(qube)))
     }
 }
 
@@ -290,11 +294,8 @@ mod tests {
             ),
         );
         Net::new(&m).create_tap("work", "sys-net").unwrap();
-        assert!(
-            !m.calls().iter().any(|c| c.contains("addm")),
-            "{:?}",
-            m.calls()
-        );
+        let calls = m.calls();
+        assert!(!calls.iter().any(|c| c.contains("addm")), "{calls:?}");
         let m = MockRunner::new().respond(
             "ifconfig",
             &["br-sys-net"],
@@ -317,14 +318,14 @@ mod tests {
 
     impl Runner for Race {
         fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput> {
-            let out = self.inner.run(program, args)?;
-            if args == ["br-sys-net"] {
-                let again = self.queried.swap(true, std::sync::atomic::Ordering::SeqCst);
-                if !again || !self.winner_exists {
-                    return Ok(CmdOutput::failed(1, "does not exist"));
-                }
-            }
-            Ok(out)
+            let out = self.inner.run(program, args);
+            let missing = args == ["br-sys-net"]
+                && (!self.queried.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    || !self.winner_exists);
+            out.map(|o| match missing {
+                true => CmdOutput::failed(1, "does not exist"),
+                false => o,
+            })
         }
 
         fn run_with_input(&self, program: &str, args: &[&str], input: &str) -> Result<CmdOutput> {
@@ -381,6 +382,32 @@ mod tests {
             .inner
             .calls()
             .contains(&"ifconfig bridge3 destroy".to_string()));
+    }
+
+    #[test]
+    fn ifconfig_failing_fails_every_operation() {
+        let gone = MockRunner::new().missing("ifconfig");
+        let net = Net::new(&gone);
+        assert!(net.ensure_bridge("sys-net").is_err());
+        assert!(net.create_tap("work", "sys-net").is_err());
+        assert!(net.create_uplink_tap("work", "em0").is_err());
+        assert!(net.create_downstream_tap("sys-net").is_err());
+        assert!(net.destroy_taps("work").is_err());
+        // The kernel refuses a new bridge; a winner's bridge cannot be
+        // queried after a lost race.
+        let m = MockRunner::new()
+            .respond("ifconfig", &["br-sys-net"], CmdOutput::failed(1, ""))
+            .respond(
+                "ifconfig",
+                &["bridge", "create"],
+                CmdOutput::failed(1, "no"),
+            );
+        assert!(Net::new(&m).ensure_bridge("sys-net").is_err());
+        let r = Race {
+            inner: race(false).inner.missing("none"),
+            ..race(false)
+        };
+        assert!(r.run_with_input("ifconfig", &["x"], "").is_ok());
     }
 
     #[test]

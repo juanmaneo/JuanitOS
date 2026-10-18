@@ -61,17 +61,14 @@ pub fn parse_for(dialect: Dialect, text: &str) -> Option<Outcome> {
 /// ion: output between `ion: bg [0] PID` and `ion: ([0] PID) exited with
 /// N`; the prompt ion prints right after starting the job is dropped.
 fn parse_ion(text: &str) -> Option<Outcome> {
-    let bg = text.find("ion: bg [")?;
-    let start = bg + text.get(bg..)?.find('\n')? + 1;
-    let body = text.get(start..)?;
-    let end = body.find("ion: ([")?;
-    let report = body.get(end..)?;
-    let line = report.get(..report.find('\n')?)?;
-    let status = line.rsplit("exited with ").next()?.trim().parse().ok();
-    let output = body.get(..end)?.replace('\r', "");
+    let (before_bg, from_bg) = text.split_once("ion: bg [")?;
+    let (_, body) = from_bg.split_once('\n')?;
+    let (output, report) = body.split_once("ion: ([")?;
+    let (line, _) = report.split_once('\n')?;
+    let status = line.rsplit("exited with ").next().unwrap_or(line);
     Some(Outcome {
-        output: drop_ion_prompt(&output, ion_prompt(text.get(..bg)?)),
-        status,
+        output: drop_ion_prompt(&output.replace('\r', ""), ion_prompt(before_bg)),
+        status: status.trim().parse().ok(),
     })
 }
 
@@ -79,9 +76,8 @@ fn parse_ion(text: &str) -> Option<Outcome> {
 /// precedes ` &` on the last line before the job report.
 fn ion_prompt(before_bg: &str) -> Option<&str> {
     let line = before_bg.trim_end_matches(['\r', '\n']);
-    let line = line.get(line.rfind(['\r', '\n']).map_or(0, |i| i + 1)..)?;
-    let typed = line.trim_end();
-    let prompt = typed.get(..typed.rfind(" &")?)?;
+    let line = line.rsplit(['\r', '\n']).next().unwrap_or(line);
+    let (prompt, _) = line.trim_end().rsplit_once(" &")?;
     // The command may itself contain spaces: the prompt is the part up to
     // the first `$ ` or `# ` on the line.
     let end = prompt.find("$ ").or_else(|| prompt.find("# "))? + 2;
@@ -140,10 +136,9 @@ pub struct Outcome {
 /// status after it. `None` until the marker is complete (its newline
 /// has arrived).
 pub fn parse(text: &str) -> Option<Outcome> {
-    let at = text.find(&format!("\n{MARKER} "))?;
-    let after = text.get(at + MARKER.len() + 2..)?;
-    let line_end = after.find('\n')?;
-    let status = after.get(..line_end)?.trim().parse().ok();
+    let (output, after) = text.split_once(&format!("\n{MARKER} "))?;
+    let (status, _) = after.split_once('\n')?;
+    let status = status.trim().parse().ok();
     // Whatever precedes the echo of the typed line is stale (a prompt,
     // the end of a banner); the echo itself goes too, and a line editor
     // may render it more than once (redraws after a wrap, or the tail of
@@ -151,7 +146,6 @@ pub fn parse(text: &str) -> Option<Outcome> {
     // showing either goes.
     let tag = format!(": {TAG};");
     let echo = typed_marker();
-    let output = text.get(..at)?;
     let output = match output.find(&tag) {
         Some(i) => output.get(i..).unwrap_or(""),
         None => output,
@@ -175,22 +169,43 @@ pub struct Login {
 }
 
 /// Collect console output for `window`, returning it with escapes removed.
+/// Only used to see what the console shows before the command is typed:
+/// a read error counts as nothing shown, and the same error surfaces when
+/// the command is typed or its output read.
 fn drain<D: Read + Write>(
     dev: &mut D,
     poll: &impl Fn(&mut D) -> std::io::Result<Vec<u8>>,
     window: Duration,
-) -> std::io::Result<String> {
+) -> String {
     let mut buf = Vec::new();
     let start = Instant::now();
     while start.elapsed() < window {
-        let chunk = poll(dev)?;
+        let chunk = poll(dev).unwrap_or_default();
         if chunk.is_empty() {
             std::thread::sleep(Duration::from_millis(50));
         } else {
             buf.extend_from_slice(&chunk);
         }
     }
-    Ok(strip_ansi(&String::from_utf8_lossy(&buf)))
+    strip_ansi(&String::from_utf8_lossy(&buf))
+}
+
+fn send(dev: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
+    dev.write_all(bytes).and_then(|()| dev.flush())
+}
+
+/// When `seen` ends with `prompt`, type `reply` and collect what follows.
+fn answer<D: Read + Write>(
+    dev: &mut D,
+    poll: &impl Fn(&mut D) -> std::io::Result<Vec<u8>>,
+    seen: String,
+    prompt: &str,
+    reply: &str,
+) -> std::io::Result<String> {
+    if !wants(&seen, prompt) {
+        return Ok(seen);
+    }
+    send(dev, format!("{reply}\n").as_bytes()).map(|()| drain(dev, poll, Duration::from_secs(2)))
 }
 
 /// True when the console is waiting at a `login:` / `password:` prompt.
@@ -216,29 +231,19 @@ pub fn run<D: Read + Write>(
     poll: impl Fn(&mut D) -> std::io::Result<Vec<u8>>,
 ) -> std::io::Result<Outcome> {
     // Wake the line and let any pending output (a login banner) drain.
-    dev.write_all(b"\r")?;
-    dev.flush()?;
-    let mut seen = drain(dev, &poll, Duration::from_millis(500))?;
+    send(dev, b"\r")?;
+    let mut seen = drain(dev, &poll, Duration::from_millis(500));
     if let Some(l) = login {
-        if wants(&seen, "login:") {
-            dev.write_all(format!("{}\n", l.user).as_bytes())?;
-            dev.flush()?;
-            seen = drain(dev, &poll, Duration::from_secs(2))?;
-        }
-        if wants(&seen, "password:") {
-            dev.write_all(format!("{}\n", l.password).as_bytes())?;
-            dev.flush()?;
-            seen = drain(dev, &poll, Duration::from_secs(2))?;
-        }
+        seen = answer(dev, &poll, seen, "login:", &l.user)
+            .and_then(|seen| answer(dev, &poll, seen, "password:", &l.password))?;
     }
     // A shell that is still starting (autologin right after boot) would
     // lose what is typed now: give it a moment to show its prompt.
     let patience = Instant::now();
     while !at_prompt(&seen) && patience.elapsed() < Duration::from_secs(3) {
-        seen.push_str(&drain(dev, &poll, Duration::from_millis(250))?);
+        seen.push_str(&drain(dev, &poll, Duration::from_millis(250)));
     }
-    dev.write_all(script_for(dialect, command).as_bytes())?;
-    dev.flush()?;
+    send(dev, script_for(dialect, command).as_bytes())?;
     let mut buf = Vec::new();
     let deadline = Instant::now() + timeout;
     loop {
@@ -302,7 +307,6 @@ pub fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn script_splits_the_marker_and_parse_finds_it() {
@@ -358,51 +362,112 @@ mod tests {
         assert_eq!(strip_ansi("\u{1b}]2;t\u{1b}\\x\u{1b}]unterminated"), "x");
     }
 
-    /// A fake console: whatever is written is recorded; the wake-up gets
-    /// the prompt (the first two bytes of the reply), the rest of the
-    /// scripted reply only comes once the command was typed, like a shell
-    /// would.
-    struct Fake {
+    /// A scripted console: what is written is recorded, and a write that
+    /// starts with a rule's key queues that rule's reply, the way a shell
+    /// (or a getty) answers each typed line. Writes are refused once
+    /// `writes_ok` were made, reads once `fail_reads_after` writes were.
+    struct Console {
         written: Vec<u8>,
-        reply: Cursor<Vec<u8>>,
+        pending: Vec<u8>,
+        rules: Vec<(&'static str, &'static [u8])>,
+        writes: usize,
+        writes_ok: usize,
+        fail_reads_after: Option<usize>,
     }
-    impl Read for Fake {
-        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-            if self.written.is_empty() {
-                return Ok(0);
+    impl Console {
+        fn new(rules: &[(&'static str, &'static [u8])]) -> Self {
+            Console {
+                written: Vec::new(),
+                pending: Vec::new(),
+                rules: rules.to_vec(),
+                writes: 0,
+                writes_ok: usize::MAX,
+                fail_reads_after: None,
             }
-            if self.written.len() == 1 {
-                let left = 2usize.saturating_sub(self.reply.position() as usize);
-                let n = left.min(b.len());
-                return self.reply.read(&mut b[..n]);
-            }
-            self.reply.read(b)
         }
     }
-    impl Write for Fake {
+    impl Read for Console {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            if self.fail_reads_after.is_some_and(|w| self.writes >= w) {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            let n = self.pending.len().min(b.len());
+            b[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            Ok(n)
+        }
+    }
+    impl Write for Console {
         fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.writes >= self.writes_ok {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.writes += 1;
             self.written.extend_from_slice(b);
+            let line = String::from_utf8_lossy(b);
+            if let Some((_, reply)) = self.rules.iter().find(|(k, _)| line.starts_with(k)) {
+                self.pending.extend_from_slice(reply);
+            }
             Ok(b.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    fn poll(d: &mut Fake) -> std::io::Result<Vec<u8>> {
+    fn poll(d: &mut Console) -> std::io::Result<Vec<u8>> {
         let mut b = [0u8; 16];
-        let n = d.read(&mut b)?;
-        Ok(b[..n].to_vec())
+        d.read(&mut b).map(|n| b[..n].to_vec())
+    }
+
+    #[test]
+    fn a_console_that_breaks_at_any_point() {
+        let login = Login {
+            user: "user".into(),
+            password: "pw".into(),
+        };
+        let run_on = |mut dev: Console| {
+            run(
+                &mut dev,
+                "id",
+                Duration::from_millis(100),
+                Some(&login),
+                Dialect::Posix,
+                poll,
+            )
+        };
+        let refusing = |writes_ok, wake: &'static [u8]| Console {
+            writes_ok,
+            ..Console::new(&[("\r", wake)])
+        };
+        // Waking it; answering its login prompt; typing the command.
+        assert!(run_on(refusing(0, b"")).is_err());
+        assert!(run_on(refusing(1, b"login: ")).is_err());
+        assert!(run_on(refusing(1, b"$ ")).is_err());
+        // Reading the answer: unreadable from the start, then only once
+        // the command was typed.
+        for fail_reads_after in [1, 2] {
+            let dev = Console {
+                fail_reads_after: Some(fail_reads_after),
+                ..Console::new(&[("\r", b"$ ")])
+            };
+            let err = run_on(dev).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "{fail_reads_after}"
+            );
+        }
     }
 
     #[test]
     fn run_collects_output_and_status() {
-        let mut dev = Fake {
-            written: Vec::new(),
-            reply: Cursor::new(
-                b"$ \r\n: JOS_RUN; id; printf '...\r\nuid=1001(user)\r\n\nJOS_RUN_END 3\n$ "
-                    .to_vec(),
+        let mut dev = Console::new(&[
+            ("\r", b"$ "),
+            (
+                ": JOS_RUN",
+                b"\r\n: JOS_RUN; id; printf '...\r\nuid=1001(user)\r\n\nJOS_RUN_END 3\n$ ",
             ),
-        };
+        ]);
         let o = run(
             &mut dev,
             "id",
@@ -419,58 +484,24 @@ mod tests {
         assert!(typed.contains(": JOS_RUN; id; printf"));
     }
 
-    /// A console at a login prompt: replies are scripted per typed line.
-    struct Getty {
-        written: Vec<u8>,
-        pending: Vec<u8>,
-        logged_in: bool,
-    }
-    impl Read for Getty {
-        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-            let n = self.pending.len().min(b.len());
-            b[..n].copy_from_slice(&self.pending[..n]);
-            self.pending.drain(..n);
-            Ok(n)
-        }
-    }
-    impl Write for Getty {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.written.extend_from_slice(b);
-            let line = String::from_utf8_lossy(b).into_owned();
-            if line == "\r" {
-                self.pending.extend_from_slice(b"\r\nredox login: ");
-            } else if line == "user\n" {
-                self.pending.extend_from_slice(b"\r\npassword: ");
-            } else if line == "\n" {
-                self.logged_in = true;
-                self.pending.extend_from_slice(b"\r\nWelcome\r\nuser:~$ ");
-            } else if self.logged_in {
-                self.pending
-                    .extend_from_slice(b": JOS_RUN; id; printf '\r\nuid=1000\r\n\nJOS_RUN_END 0\n");
-            }
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
+    /// A console at a login prompt.
+    const GETTY: (&str, &[u8]) = ("\r", b"\r\nredox login: ");
 
     #[test]
     fn run_logs_in_when_a_getty_answers() {
-        fn poll(d: &mut Getty) -> std::io::Result<Vec<u8>> {
-            let mut b = [0u8; 64];
-            let n = d.read(&mut b)?;
-            Ok(b[..n].to_vec())
-        }
         let login = Login {
             user: "user".into(),
             password: String::new(),
         };
-        let mut dev = Getty {
-            written: Vec::new(),
-            pending: Vec::new(),
-            logged_in: false,
-        };
+        let mut dev = Console::new(&[
+            GETTY,
+            ("user\n", b"\r\npassword: "),
+            ("\n", b"\r\nWelcome\r\nuser:~$ "),
+            (
+                ": JOS_RUN",
+                b": JOS_RUN; id; printf '\r\nuid=1000\r\n\nJOS_RUN_END 0\n",
+            ),
+        ]);
         let o = run(
             &mut dev,
             "id",
@@ -487,35 +518,9 @@ mod tests {
             typed.starts_with("\ruser\n\n: JOS_RUN; id; printf"),
             "{typed:?}"
         );
-        // Without credentials the prompt is left alone (and times out).
-        let mut dev = Getty {
-            written: Vec::new(),
-            pending: Vec::new(),
-            logged_in: false,
-        };
-        let err = run(
-            &mut dev,
-            "id",
-            Duration::from_millis(100),
-            None,
-            Dialect::Posix,
-            poll,
-        )
-        .unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        assert!(!String::from_utf8(dev.written).unwrap().contains("user\n"));
-        assert!(wants("\r\nRedox Login: ", "login:"));
-        assert!(!wants("user@host:~ $ ", "login:"));
-        assert!(at_prompt("user@host:~ $ ") && at_prompt("root:~# "));
-        assert!(!at_prompt("redox login: ") && !at_prompt(""));
-    }
-
-    #[test]
-    fn run_times_out_without_marker() {
-        let mut dev = Fake {
-            written: Vec::new(),
-            reply: Cursor::new(b"login: ".to_vec()),
-        };
+        // Without credentials the prompt is left alone, and nothing ever
+        // answers the command.
+        let mut dev = Console::new(&[GETTY]);
         let err = run(
             &mut dev,
             "id",
@@ -527,6 +532,11 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(err.to_string().contains("no shell"));
+        assert!(!String::from_utf8(dev.written).unwrap().contains("user\n"));
+        assert!(wants("\r\nRedox Login: ", "login:"));
+        assert!(!wants("user@host:~ $ ", "login:"));
+        assert!(at_prompt("user@host:~ $ ") && at_prompt("root:~# "));
+        assert!(!at_prompt("redox login: ") && !at_prompt(""));
     }
 
     #[test]
@@ -548,6 +558,7 @@ mod tests {
         assert!(parse_for(Dialect::Ion, "ion: bg [0] 5\r\nout\r\n").is_none());
         assert!(parse_for(Dialect::Ion, "ion: bg [0] 5\r\nion: ([0] 5) exited with 1").is_none());
         assert!(parse_for(Dialect::Ion, "nothing").is_none());
+        assert!(parse_for(Dialect::Ion, "ion: bg [0] 5").is_none());
         // Root prompt, a command with spaces, the prompt redrawn in the
         // middle of the output, no echo at all, and a `$` in the output.
         let root = "root:~# ls -l /tmp &\r\nion: bg [0] 3\r\n\u{23ce}  root:~# hi\r\n\

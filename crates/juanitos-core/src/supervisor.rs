@@ -353,6 +353,17 @@ mod tests {
         quiet(false, &m, &cfg).kill("work").unwrap();
         assert!(!m.calls().contains(&"kill -TERM 4242".to_string()));
         assert!(!pidfile(&cfg, "work").exists());
+        // A pidfile naming this very process (the supervisor stopping its
+        // own qube) is not a reason to kill it.
+        std::fs::write(pidfile(&cfg, "work"), format!("{}\n", std::process::id())).unwrap();
+        let m = MockRunner::new();
+        quiet(false, &m, &cfg).kill("work").unwrap();
+        let calls = m.calls();
+        assert!(!calls.iter().any(|c| c.starts_with("kill")), "{calls:?}");
+        assert!(!pidfile(&cfg, "work").exists());
+        // No pidfile at all: still torn down.
+        quiet(false, &m, &cfg).kill("work").unwrap();
+        assert_eq!(m.calls().len(), calls.len() * 2);
         let _ = std::fs::remove_dir(&dir);
     }
 }

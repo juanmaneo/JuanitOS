@@ -373,6 +373,11 @@ mod tests {
         assert!(MockRunner::new()
             .run_inheriting_stdin("stty", &["-echo"])
             .is_ok());
+        let fed = RealRunner
+            .run_with_input("sh", &["-c", "cat; exit 2"], "piped in")
+            .unwrap();
+        assert_eq!(fed.status, Some(2));
+        assert_eq!(fed.stdout, "piped in");
     }
 
     #[test]

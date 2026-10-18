@@ -442,8 +442,9 @@ impl<'a> TemplateInstaller<'a> {
         q.memory_mb = r.memory_mb;
         q.label = Some(format!("recipe:{}", r.name));
         q.uplink = opts.uplink.clone();
-        let existing = self.store.list()?;
-        crate::firewall::assign_address(&mut q, &existing, self.cfg.default_netvm.as_deref())?;
+        self.store.list().and_then(|existing| {
+            crate::firewall::assign_address(&mut q, &existing, self.cfg.default_netvm.as_deref())
+        })?;
 
         let local = match (&opts.image, &opts.checksums) {
             (Some(i), Some(c)) => Some((i.as_path(), c.as_path())),
@@ -458,7 +459,7 @@ impl<'a> TemplateInstaller<'a> {
             "Creating template {name} ({} GiB zvol)",
             q.disk_gb
         ));
-        Storage::new(self.runner, self.cfg).provision(&q, |_| None)?;
+        Storage::new(self.runner, self.cfg).provision(&q, &|_| None)?;
         self.store.save(&q)?;
 
         self.step(&format!(
@@ -525,6 +526,7 @@ impl<'a> TemplateInstaller<'a> {
 mod tests {
     use super::*;
     use crate::sys::{CmdOutput, MockRunner};
+    use std::os::unix::fs::PermissionsExt;
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("jos-template-{tag}-{}", std::process::id()));
@@ -629,66 +631,63 @@ mod tests {
                 r.name
             );
             assert!(embedded(ud, agentd), "{}: stale jos-agentd", r.name);
-            match r.os {
-                OsType::Freebsd => {
-                    assert!(
-                        ud.contains("path: /usr/local/etc/rc.d/jos_agent\n"),
-                        "{}",
-                        r.name
-                    );
-                    assert!(embedded(ud, freebsd_agent), "{}: stale jos_agent", r.name);
-                    assert!(ud.contains("jos_agent_enable=YES"), "{}", r.name);
-                    assert!(
-                        ud.contains("path: /usr/local/etc/rc.d/jos_agentd\n"),
-                        "{}",
-                        r.name
-                    );
-                    assert!(embedded(ud, freebsd_agentd), "{}: stale jos_agentd", r.name);
-                    assert!(ud.contains("jos_agentd_enable=YES"), "{}", r.name);
-                    assert!(
-                        ud.contains(
-                            "- install -m 0755 /usr/local/sbin/jos-copy /usr/local/bin/jos-copy"
+            if r.os == OsType::Freebsd {
+                assert!(
+                    ud.contains("path: /usr/local/etc/rc.d/jos_agent\n"),
+                    "{}",
+                    r.name
+                );
+                assert!(embedded(ud, freebsd_agent), "{}: stale jos_agent", r.name);
+                assert!(ud.contains("jos_agent_enable=YES"), "{}", r.name);
+                assert!(
+                    ud.contains("path: /usr/local/etc/rc.d/jos_agentd\n"),
+                    "{}",
+                    r.name
+                );
+                assert!(embedded(ud, freebsd_agentd), "{}: stale jos_agentd", r.name);
+                assert!(ud.contains("jos_agentd_enable=YES"), "{}", r.name);
+                assert!(
+                    ud.contains(
+                        "- install -m 0755 /usr/local/sbin/jos-copy /usr/local/bin/jos-copy"
+                    ),
+                    "{}",
+                    r.name
+                );
+                assert!(
+                    ud.contains("- echo 'perm vtcon/events 0622' >> /etc/devfs.conf"),
+                    "{}: events port not writable",
+                    r.name
+                );
+            } else {
+                assert_eq!(r.os, OsType::Linux, "{}", r.name);
+                assert!(ud.contains("path: /usr/local/bin/jos-copy"), "{}", r.name);
+                assert!(
+                    ud.contains("path: /usr/local/sbin/jos-agent\n"),
+                    "{}",
+                    r.name
+                );
+                assert!(embedded(ud, linux_agent), "{}: stale jos-agent", r.name);
+                assert!(embedded(ud, linux_unit), "{}: stale unit", r.name);
+                assert!(
+                    embedded(ud, linux_agentd_unit),
+                    "{}: stale agentd unit",
+                    r.name
+                );
+                assert!(
+                    ud.contains(
+                        "enable, containerd.service, docker.service, jos-agent.service, jos-agentd.service"
+                    ),
+                    "{}",
+                    r.name
+                );
+                assert!(
+                    ud.contains("path: /etc/udev/rules.d/90-jos.rules\n")
+                        && ud.contains(
+                            "SUBSYSTEM==\"virtio-ports\", ATTR{name}==\"events\", MODE=\"0622\""
                         ),
-                        "{}",
-                        r.name
-                    );
-                    assert!(
-                        ud.contains("- echo 'perm vtcon/events 0622' >> /etc/devfs.conf"),
-                        "{}: events port not writable",
-                        r.name
-                    );
-                }
-                OsType::Linux => {
-                    assert!(ud.contains("path: /usr/local/bin/jos-copy"), "{}", r.name);
-                    assert!(
-                        ud.contains("path: /usr/local/sbin/jos-agent\n"),
-                        "{}",
-                        r.name
-                    );
-                    assert!(embedded(ud, linux_agent), "{}: stale jos-agent", r.name);
-                    assert!(embedded(ud, linux_unit), "{}: stale unit", r.name);
-                    assert!(
-                        embedded(ud, linux_agentd_unit),
-                        "{}: stale agentd unit",
-                        r.name
-                    );
-                    assert!(
-                        ud.contains(
-                            "enable, containerd.service, docker.service, jos-agent.service, jos-agentd.service"
-                        ),
-                        "{}",
-                        r.name
-                    );
-                    assert!(
-                        ud.contains("path: /etc/udev/rules.d/90-jos.rules\n")
-                            && ud.contains(
-                                "SUBSYSTEM==\"virtio-ports\", ATTR{name}==\"events\", MODE=\"0622\""
-                            ),
-                        "{}: events port not writable",
-                        r.name
-                    );
-                }
-                other => panic!("{}: unexpected os {other}", r.name),
+                    "{}: events port not writable",
+                    r.name
+                );
             }
         }
     }
@@ -701,8 +700,7 @@ mod tests {
         const EXISTING: [&str; 3] = ["/etc", "/usr/local/etc/rc.d", "/usr/local/sbin"];
         let mut checked = 0;
         for r in RECIPES.iter().filter(|r| r.os == OsType::Freebsd) {
-            let Some(ud) = r.user_data else { continue };
-            for line in ud.lines() {
+            for line in r.user_data.unwrap_or_default().lines() {
                 let Some(path) = line.strip_prefix("  - path: ") else {
                     continue;
                 };
@@ -768,6 +766,10 @@ mod tests {
         assert_eq!(find_checksum("zz  f\n", "f"), None, "not hex");
         assert_eq!(find_checksum("00  *f\n", "f").as_deref(), Some("00"));
         assert_eq!(find_checksum("\n\nlonely\n", "f"), None);
+        assert_eq!(find_checksum("f) = 00\n", "f"), None, "no algorithm");
+        let mut flat = find("redox").unwrap().clone();
+        flat.image_url = "plain.img.zst";
+        assert_eq!(flat.image_url_for("other.img.zst"), "other.img.zst");
     }
 
     #[test]
@@ -783,6 +785,7 @@ mod tests {
             .unwrap()
             .starts_with("ddaf35a193617aba"));
         assert!(digest_file(&d.join("missing"), Digest::Sha256).is_err());
+        assert!(digest_file(&d, Digest::Sha256).is_err(), "a directory");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -818,6 +821,250 @@ mod tests {
         (d, c, store)
     }
 
+    fn installer<'a>(
+        m: &'a MockRunner,
+        c: &'a GlobalConfig,
+        store: &'a QubeStore,
+        dry_run: bool,
+    ) -> TemplateInstaller<'a> {
+        TemplateInstaller {
+            runner: m,
+            cfg: c,
+            store,
+            dry_run,
+        }
+    }
+
+    /// Put `r`'s image (named `file`), verified, in the cache: nothing to
+    /// download. Returns the cache directory.
+    fn cache(c: &GlobalConfig, r: &Recipe, file: &str) -> PathBuf {
+        let images = Path::new(&c.cache_dir).join("images");
+        std::fs::create_dir_all(&images).unwrap();
+        let image = images.join(file);
+        std::fs::write(&image, b"image").unwrap();
+        let sum = digest_file(&image, r.digest).unwrap();
+        let list = images.join(format!("{}.checksums", r.name));
+        std::fs::write(list, format!("{sum} *{file}\n")).unwrap();
+        images
+    }
+
+    #[test]
+    fn fetch_fails_at_every_broken_step() {
+        let (d, c, store) = setup("fetch-fail");
+        let r = find("fbsd15-dev").unwrap();
+        let redox = find("redox").unwrap();
+        let image = d.join("image");
+        std::fs::write(&image, b"image").unwrap();
+        let m = MockRunner::new();
+        let inst = installer(&m, &c, &store, false);
+        // A local copy: its checksum list missing, or not naming it.
+        assert!(inst.fetch(r, Some((&image, &d.join("nosums")))).is_err());
+        let sums = d.join("SUMS");
+        std::fs::write(&sums, "aa *other\n").unwrap();
+        let err = inst.fetch(redox, Some((&image, &sums))).unwrap_err();
+        assert!(err.to_string().contains("nothing matching"), "{err}");
+        // The cache cannot be created.
+        std::fs::write(d.join("file"), "").unwrap();
+        let blocked = GlobalConfig {
+            cache_dir: d.join("file/cache").to_string_lossy().into_owned(),
+            ..c.clone()
+        };
+        assert!(installer(&m, &blocked, &store, false)
+            .fetch(r, None)
+            .is_err());
+        // The checksum list cannot be downloaded; is "downloaded" but not
+        // there; is there but does not name the image.
+        let gone = MockRunner::new().missing("fetch");
+        let err = installer(&gone, &c, &store, false)
+            .fetch(r, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("fetch"), "{err}");
+        assert!(inst.fetch(r, None).is_err(), "no list after the download");
+        let images = Path::new(&c.cache_dir).join("images");
+        std::fs::write(images.join("redox.checksums"), "aa *other\n").unwrap();
+        let err = inst.fetch(redox, None).unwrap_err();
+        assert!(err.to_string().contains("nothing matching"), "{err}");
+        // The image cannot be downloaded.
+        let images = cache(&c, r, r.image_file());
+        std::fs::remove_file(images.join(r.image_file())).unwrap();
+        let target = images.join(r.image_file()).to_string_lossy().into_owned();
+        let no_image =
+            MockRunner::new().respond("fetch", &["-o", &target], CmdOutput::failed(1, "404"));
+        let err = installer(&no_image, &c, &store, false)
+            .fetch(r, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("404"), "{err}");
+        // Cached, but the list is gone (a dry run cannot fetch it).
+        std::fs::write(images.join(r.image_file()), b"image").unwrap();
+        std::fs::remove_file(images.join(format!("{}.checksums", r.name))).unwrap();
+        assert!(installer(&m, &c, &store, true).fetch(r, None).is_err());
+        // Listed, "downloaded", unreadable.
+        cache(&c, r, r.image_file());
+        std::fs::remove_file(images.join(r.image_file())).unwrap();
+        std::fs::create_dir(images.join(r.image_file())).unwrap();
+        assert!(inst.fetch(r, None).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn seed_building_fails_at_every_broken_step() {
+        let (d, c, store) = setup("seed-fail");
+        let r = find("fbsd15-dev").unwrap();
+        let m = MockRunner::new().missing("makefs");
+        // The run directory cannot be created.
+        std::fs::write(d.join("file"), "").unwrap();
+        let blocked = GlobalConfig {
+            run_dir: d.join("file/run").to_string_lossy().into_owned(),
+            ..c.clone()
+        };
+        assert!(installer(&m, &blocked, &store, false)
+            .build_seed(r, "t")
+            .is_err());
+        // user-data: the seed directory is read-only.
+        let inst = installer(&m, &c, &store, false);
+        let seed_dir = Path::new(&c.run_dir).join("t-seed");
+        std::fs::create_dir_all(&seed_dir).unwrap();
+        std::fs::set_permissions(&seed_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(inst.build_seed(r, "t").is_err());
+        std::fs::set_permissions(&seed_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // meta-data: a directory in its place.
+        std::fs::create_dir(seed_dir.join("meta-data")).unwrap();
+        assert!(inst.build_seed(r, "t").is_err());
+        std::fs::remove_dir(seed_dir.join("meta-data")).unwrap();
+        // makefs itself.
+        let err = inst.build_seed(r, "t").unwrap_err().to_string();
+        assert!(err.contains("makefs"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn install_fails_at_every_broken_step() {
+        let (d, c, store) = setup("install-fail");
+        let r = find("fbsd15-dev").unwrap();
+        let redox = find("redox").unwrap();
+        std::fs::create_dir_all(&c.run_dir).unwrap();
+        let images = cache(&c, r, r.image_file());
+        let redox_file = "redox_server_x86_64_2026-10-13_552_harddrive.img.zst";
+        cache(&c, redox, redox_file);
+        let absent = || MockRunner::new().respond("zfs", &["list"], CmdOutput::failed(1, ""));
+        let opts = InstallOptions::default();
+        let fails_with = |m: &MockRunner, r: &Recipe, what: &str| {
+            let err = installer(m, &c, &store, false)
+                .install(r, &opts)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(what), "{}: {err}", r.name);
+            let _ = store.remove(r.name);
+        };
+        // The existing qubes cannot be listed.
+        std::fs::create_dir_all(&store.dir).unwrap();
+        let junk = store.dir.join("junk.toml");
+        std::fs::write(&junk, "name = 1\n").unwrap();
+        fails_with(&absent(), r, "TOML");
+        std::fs::remove_file(&junk).unwrap();
+        // A local image that does not verify; one that does (dry run).
+        let local = d.join("local.raw.xz");
+        std::fs::write(&local, b"local").unwrap();
+        let sums = d.join("SUMS");
+        std::fs::write(&sums, format!("{}  {}\n", "11".repeat(32), r.image_file())).unwrap();
+        let with_local = InstallOptions {
+            image: Some(local.clone()),
+            checksums: Some(sums.clone()),
+            ..Default::default()
+        };
+        let m = absent();
+        let err = installer(&m, &c, &store, false)
+            .install(r, &with_local)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("checksum mismatch"), "{err}");
+        std::fs::write(&local, b"local").unwrap();
+        let sum = digest_file(&local, r.digest).unwrap();
+        std::fs::write(&sums, format!("{sum}  {}\n", r.image_file())).unwrap();
+        installer(&m, &c, &store, true)
+            .install(r, &with_local)
+            .unwrap();
+        assert!(m
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("sh -c") && c.contains("local.raw.xz")));
+        store.remove(r.name).unwrap();
+        // The zvol; saving the definition; writing the image; the
+        // snapshot of an image that is the template; the seed; the boot.
+        fails_with(
+            &absent().respond("zfs", &["create"], CmdOutput::failed(1, "no space")),
+            r,
+            "no space",
+        );
+        std::fs::set_permissions(&store.dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        fails_with(&absent(), r, "I/O error");
+        std::fs::set_permissions(&store.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fails_with(&absent().missing("sh"), r, "sh");
+        fails_with(
+            &absent().respond("zfs", &["snapshot"], CmdOutput::failed(1, "snapfail")),
+            redox,
+            "snapfail",
+        );
+        fails_with(&absent().missing("makefs"), r, "makefs");
+        fails_with(&absent().missing("bhyve"), r, "bhyve");
+        assert!(images.join(r.image_file()).is_file(), "the cache is kept");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn provisioning_fails_at_every_broken_step() {
+        let (d, c, store) = setup("provision-fail");
+        std::fs::create_dir_all(&c.run_dir).unwrap();
+        let mut q = Qube::new("t", QubeKind::Template, OsType::Freebsd);
+        q.label = Some("recipe:fbsd15-dev".into());
+        let seed = Path::new(&c.run_dir).join("t-seed.iso");
+        let seed_s = seed.to_string_lossy().into_owned();
+        let off = || MockRunner::new().respond("bhyve", &[], CmdOutput::failed(1, ""));
+        // The dry run cannot even build the command; the boot fails.
+        let m = MockRunner::new().missing("ifconfig");
+        let err = installer(&m, &c, &store, true)
+            .provision(&q, &seed_s)
+            .unwrap_err();
+        assert!(err.to_string().contains("ifconfig"), "{err}");
+        let m = MockRunner::new().missing("bhyve");
+        let err = installer(&m, &c, &store, false)
+            .provision(&q, &seed_s)
+            .unwrap_err();
+        assert!(err.to_string().contains("bhyve"), "{err}");
+        // The seed cannot be removed (a directory); nor its sources (a
+        // file where the directory was).
+        std::fs::create_dir(&seed).unwrap();
+        let m = off();
+        assert!(installer(&m, &c, &store, false)
+            .provision(&q, &seed_s)
+            .is_err());
+        std::fs::remove_dir(&seed).unwrap();
+        let sources = Path::new(&c.run_dir).join("t-seed");
+        std::fs::write(&sources, "").unwrap();
+        assert!(installer(&m, &c, &store, false)
+            .provision(&q, &seed_s)
+            .is_err());
+        std::fs::remove_file(&sources).unwrap();
+        // The snapshot fails.
+        let m = off().respond("zfs", &["snapshot"], CmdOutput::failed(1, "snapfail"));
+        let err = installer(&m, &c, &store, false)
+            .provision(&q, &seed_s)
+            .unwrap_err();
+        assert!(err.to_string().contains("snapfail"), "{err}");
+        // Without a recipe to quote, a generic hint; with an unknown one
+        // too.
+        let m = off();
+        q.label = None;
+        installer(&m, &c, &store, false)
+            .provision(&q, &seed_s)
+            .unwrap();
+        q.label = Some("recipe:gone".into());
+        installer(&m, &c, &store, false)
+            .provision(&q, &seed_s)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn dry_run_install_prints_the_whole_pipeline() {
         let (d, c, store) = setup("dry");
@@ -837,16 +1084,16 @@ mod tests {
         assert_eq!(q.label.as_deref(), Some("recipe:debian-13-dev"));
         assert!(store.exists("debian-13-dev"));
         let calls = m.calls();
-        let pos = |p: &str| {
-            calls
-                .iter()
-                .position(|c| c.starts_with(p))
-                .unwrap_or_else(|| panic!("no {p:?} in {calls:#?}"))
-        };
-        assert!(pos("fetch -o") < pos("zfs create -V 40G"));
-        assert!(pos("zfs create -V 40G") < pos("sh -c 'tar -xOf"));
-        assert!(pos("sh -c") < pos("makefs -t cd9660"));
-        assert!(pos("makefs") < pos("zfs snapshot zroot/juanitos/templates/debian-13-dev@base"));
+        let pos = |p: &str| calls.iter().position(|c| c.starts_with(p));
+        let order = [
+            pos("fetch -o"),
+            pos("zfs create -V 40G"),
+            pos("sh -c 'tar -xOf"),
+            pos("makefs -t cd9660"),
+            pos("zfs snapshot zroot/juanitos/templates/debian-13-dev@base"),
+        ];
+        assert!(order.iter().all(Option::is_some), "{calls:#?}");
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
         // The provisioning boot is printed, not run, and creates the taps.
         assert!(calls.iter().all(|c| !c.starts_with("bhyve ")));
         let _ = std::fs::remove_dir_all(&d);
@@ -908,7 +1155,8 @@ mod tests {
         assert!(!inst.seed_path("podman").exists());
         assert!(!Path::new(&c.run_dir).join("podman-seed").exists());
         // A second install of the same name is refused.
-        assert!(matches!(inst.install(r, &opts), Err(Error::QubeExists(_))));
+        let again = inst.install(r, &opts).unwrap_err().to_string();
+        assert_eq!(again, "qube already exists: podman");
         let _ = std::fs::remove_dir_all(&d);
     }
 

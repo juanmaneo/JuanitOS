@@ -744,7 +744,7 @@ impl App {
 
         let store = &self.store;
         self.storage()
-            .provision(&q, |t| store.get(t).ok())
+            .provision(&q, &|t| store.get(t).ok())
             .context("provisioning disk")?;
         self.store.save(&q)?;
         let boot = match &q.kernel {

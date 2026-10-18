@@ -294,8 +294,16 @@ mod tests {
         ] {
             assert!(bad.parse::<PciAddr>().is_err(), "{bad}");
         }
-        use serde::de::value::{Error as DeError, U32Deserializer};
-        assert!(PciAddr::deserialize(U32Deserializer::<DeError>::new(1)).is_err());
+        // In a document: not a string, a string that is no address, one
+        // that is.
+        #[derive(Deserialize)]
+        struct Holder {
+            pci: PciAddr,
+        }
+        assert!(toml::from_str::<Holder>("pci = 1").is_err());
+        assert!(toml::from_str::<Holder>("pci = \"x\"").is_err());
+        let held = toml::from_str::<Holder>("pci = \"5/0/0\"").map(|h| h.pci.to_string());
+        assert_eq!(held.as_deref(), Ok("5/0/0"));
 
         // Lines that are not devices are skipped; a selector without the
         // fields still names a device.

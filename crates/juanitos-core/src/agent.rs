@@ -297,11 +297,14 @@ mod tests {
         chunks: std::collections::VecDeque<Vec<u8>>,
         /// Writes fail (the guest went away).
         broken: bool,
+        /// Reads fail (the device was closed under us).
+        dead: bool,
     }
 
     impl Read for Fake {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             match self.chunks.pop_front() {
+                _ if self.dead => Err(std::io::ErrorKind::ConnectionReset.into()),
                 Some(c) => {
                     let n = c.len().min(buf.len());
                     buf[..n].copy_from_slice(&c[..n]);
@@ -325,12 +328,13 @@ mod tests {
         }
     }
 
-    /// The fake only ever fails a read with `WouldBlock`: nothing yet.
+    /// `WouldBlock` means nothing yet; any other read error is fatal.
     fn poll(f: &mut Fake) -> std::io::Result<Vec<u8>> {
         let mut buf = [0u8; 64];
-        Ok(f.read(&mut buf)
-            .map(|n| buf[..n].to_vec())
-            .unwrap_or_default())
+        match f.read(&mut buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
+            r => r.map(|n| buf[..n].to_vec()),
+        }
     }
 
     #[test]
@@ -342,6 +346,23 @@ mod tests {
         let t = Duration::from_secs(1);
         assert!(handshake(&mut dev, "9", t, &poll).is_err());
         assert!(run(&mut dev, "9", "user", "true", t, &poll).is_err());
+    }
+
+    #[test]
+    fn a_channel_that_cannot_be_read_is_an_error() {
+        let mut dev = Fake {
+            dead: true,
+            ..Fake::default()
+        };
+        // The error comes from the first read, long before this deadline.
+        let t = Duration::from_secs(60);
+        let shake = handshake(&mut dev, "9", t, &poll).map_err(|e| e.kind());
+        assert_eq!(shake, Err(std::io::ErrorKind::ConnectionReset));
+        let ran = run(&mut dev, "9", "user", "true", t, &poll).map_err(|e| e.kind());
+        assert_eq!(
+            ran.map(|o| o.status),
+            Err(std::io::ErrorKind::ConnectionReset)
+        );
     }
 
     #[test]

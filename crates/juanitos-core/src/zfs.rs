@@ -135,7 +135,7 @@ impl<'a> Storage<'a> {
     pub fn provision(
         &self,
         q: &Qube,
-        template_lookup: impl Fn(&str) -> Option<Qube>,
+        template_lookup: &dyn Fn(&str) -> Option<Qube>,
     ) -> Result<()> {
         if q.is_unikernel() {
             return Ok(());
@@ -211,6 +211,7 @@ mod tests {
         assert!(!z.exists("zroot/x").unwrap());
         assert!(z.exists("zroot/y").unwrap());
         z.ensure_filesystem("zroot/x").unwrap();
+        z.ensure_filesystem("zroot/y").unwrap();
         z.create_zvol("zroot/x/v", 20).unwrap();
         assert_eq!(z.snapshot("zroot/t", "base").unwrap(), "zroot/t@base");
         z.clone("zroot/t@base", "zroot/q/w").unwrap();
@@ -223,6 +224,10 @@ mod tests {
 
         let calls = m.calls();
         assert!(calls.contains(&"zfs create -p zroot/x".to_string()));
+        assert!(
+            !calls.contains(&"zfs create -p zroot/y".to_string()),
+            "exists"
+        );
         assert!(calls.contains(&"zfs create -V 20G -s -o volmode=dev zroot/x/v".to_string()));
         assert!(calls.contains(&"zfs snapshot zroot/t@base".to_string()));
         assert!(calls.contains(&"zfs clone -o volmode=dev zroot/t@base zroot/q/w".to_string()));
@@ -245,7 +250,7 @@ mod tests {
         let lookup = |n: &str| {
             (n == "fbsd14").then(|| Qube::new("fbsd14", QubeKind::Template, OsType::Freebsd))
         };
-        st.provision(&q, lookup).unwrap();
+        st.provision(&q, &lookup).unwrap();
         let calls = m.calls();
         assert!(calls.contains(&"zfs snapshot zroot/juanitos/templates/fbsd14@base".to_string()));
         assert!(calls.contains(
@@ -261,14 +266,14 @@ mod tests {
         let st = Storage::new(&m, &cfg);
         let mut q = Qube::new("work", QubeKind::App, OsType::Freebsd);
         q.disk_gb = 40;
-        st.provision(&q, |_| None).unwrap();
+        st.provision(&q, &|_| None).unwrap();
         assert!(m.calls().contains(
             &"zfs create -V 40G -s -o volmode=dev zroot/juanitos/qubes/work".to_string()
         ));
 
         q.template = Some("nope".into());
         assert_eq!(
-            st.provision(&q, |_| None).unwrap_err().to_string(),
+            st.provision(&q, &|_| None).unwrap_err().to_string(),
             "qube not found: nope"
         );
     }
@@ -283,7 +288,7 @@ mod tests {
         assert!(z.latest_snapshot("zroot/t").is_err());
         let st = Storage::new(&gone, &cfg);
         let work = Qube::new("work", QubeKind::App, OsType::Freebsd);
-        assert!(st.provision(&work, |_| None).is_err());
+        assert!(st.provision(&work, &|_| None).is_err());
         assert!(st.destroy(&work).is_err());
 
         let refused =
@@ -291,18 +296,31 @@ mod tests {
         assert!(Zfs::new(&refused("clone")).clone("a@b", "c").is_err());
         assert!(Zfs::new(&refused("destroy")).destroy("c").is_err());
         assert!(Zfs::new(&refused("list")).list_children("c").is_err());
+        assert_eq!(
+            Zfs::new(&refused("list")).latest_snapshot("c").unwrap(),
+            None,
+            "no such dataset"
+        );
+        let m = refused("create").respond("zfs", &["list"], CmdOutput::failed(1, ""));
+        assert!(Zfs::new(&m).ensure_filesystem("zroot/x").is_err());
+        assert!(Zfs::new(&refused("create"))
+            .create_zvol("zroot/x", 1)
+            .is_err());
         let m = refused("destroy");
         assert!(
             Storage::new(&m, &cfg).destroy(&work).is_err(),
             "exists, cannot go"
         );
+        let m = refused("list");
+        Storage::new(&m, &cfg).destroy(&work).unwrap();
+        assert_eq!(m.calls().len(), 1, "absent: nothing to destroy");
 
         // A dataset in the way; a "template" that is not one; a template
         // with snapshots, then one whose @base cannot be taken.
         let m = MockRunner::new();
         let st = Storage::new(&m, &cfg);
         assert!(st
-            .provision(&work, |_| None)
+            .provision(&work, &|_| None)
             .unwrap_err()
             .to_string()
             .contains("already exists"));
@@ -318,14 +336,14 @@ mod tests {
         let app = |_: &str| Some(Qube::new("t", QubeKind::App, OsType::Freebsd));
         let tmpl = |_: &str| Some(Qube::new("t", QubeKind::Template, OsType::Freebsd));
         let m = absent();
-        let err = Storage::new(&m, &cfg).provision(&web, app).unwrap_err();
+        let err = Storage::new(&m, &cfg).provision(&web, &app).unwrap_err();
         assert!(err.to_string().contains("t is not a template"), "{err}");
         let m = absent().respond(
             "zfs",
             &["list", "-H", "-t", "snapshot"],
             CmdOutput::ok("zroot/juanitos/templates/t@v2\n"),
         );
-        Storage::new(&m, &cfg).provision(&web, tmpl).unwrap();
+        Storage::new(&m, &cfg).provision(&web, &tmpl).unwrap();
         assert!(m
             .calls()
             .iter()
@@ -333,7 +351,7 @@ mod tests {
         let m = absent()
             .respond("zfs", &["list", "-H", "-t", "snapshot"], CmdOutput::ok(""))
             .respond("zfs", &["snapshot"], CmdOutput::failed(1, "no"));
-        assert!(Storage::new(&m, &cfg).provision(&web, tmpl).is_err());
+        assert!(Storage::new(&m, &cfg).provision(&web, &tmpl).is_err());
     }
 
     #[test]
@@ -342,7 +360,7 @@ mod tests {
         let m = MockRunner::new();
         let st = Storage::new(&m, &cfg);
         let q = Qube::new("sys-firewall", QubeKind::Firewall, OsType::Unikernel);
-        st.provision(&q, |_| None).unwrap();
+        st.provision(&q, &|_| None).unwrap();
         st.destroy(&q).unwrap();
         assert!(m.calls().is_empty());
     }

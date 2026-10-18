@@ -188,11 +188,9 @@ impl Policy {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, self.render())?;
-        Ok(())
+        crate::fsops::create_parent(path)
+            .and_then(|()| std::fs::write(path, self.render()))
+            .map_err(Into::into)
     }
 
     pub fn decide(&self, src: &str, dst: &str) -> Verdict {
@@ -330,51 +328,43 @@ impl<'a> Broker<'a> {
         }
     }
 
-    /// Every request file under `<share_dir>/*/req/`, sorted by qube then
-    /// id. Reads the file system directly (it is dom0's own state).
-    pub fn scan(&self) -> Result<Vec<Found>> {
+    /// Every entry of every `<share_dir>/<qube>/req/`, with the qube's
+    /// name. Reads the file system directly (it is dom0's own state); a
+    /// share, or a qube's request directory, that does not exist yet is
+    /// empty.
+    fn request_entries(&self) -> Result<Vec<(String, std::fs::DirEntry)>> {
         let root = Path::new(&self.share.cfg.share_dir);
-        let mut found = Vec::new();
-        let qubes = match std::fs::read_dir(root) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
-            Err(e) => return Err(e.into()),
-        };
-        for qube in qubes {
-            let qube = qube?;
-            let src = qube.file_name().to_string_lossy().into_owned();
-            if validate_name(&src).is_err() {
+        let mut all = Vec::new();
+        for qube in list_dir(root)? {
+            let name = qube.file_name().to_string_lossy().into_owned();
+            if validate_name(&name).is_err() {
                 continue;
             }
-            let req_dir = qube.path().join(share::REQUESTS);
-            let entries = match std::fs::read_dir(&req_dir) {
-                Ok(rd) => rd,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            };
-            for entry in entries {
-                let entry = entry?;
-                let id = entry.file_name().to_string_lossy().into_owned();
-                if id.starts_with('.')
-                    || id.ends_with(REPLY_SUFFIX)
-                    || id.ends_with(TMP_SUFFIX)
-                    || !entry.path().is_file()
-                {
-                    continue;
-                }
-                let request = match validate_id(&id) {
-                    Err(e) => Err(e.to_string()),
-                    Ok(()) => match std::fs::read_to_string(entry.path()) {
-                        Ok(body) => Request::parse(&src, &id, &body).map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    },
-                };
-                found.push(Found {
-                    src: src.clone(),
-                    id,
-                    request,
-                });
+            for entry in list_dir(&qube.path().join(share::REQUESTS))? {
+                all.push((name.clone(), entry));
             }
+        }
+        Ok(all)
+    }
+
+    /// Every request file under `<share_dir>/*/req/`, sorted by qube then
+    /// id.
+    pub fn scan(&self) -> Result<Vec<Found>> {
+        let mut found = Vec::new();
+        for (src, entry) in self.request_entries()? {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if id.starts_with('.')
+                || id.ends_with(REPLY_SUFFIX)
+                || id.ends_with(TMP_SUFFIX)
+                || !entry.path().is_file()
+            {
+                continue;
+            }
+            let request = validate_id(&id)
+                .and_then(|()| std::fs::read_to_string(entry.path()).map_err(Error::from))
+                .and_then(|body| Request::parse(&src, &id, &body))
+                .map_err(|e| e.to_string());
+            found.push(Found { src, id, request });
         }
         found.sort_by(|a, b| (&a.src, &a.id).cmp(&(&b.src, &b.id)));
         Ok(found)
@@ -440,38 +430,19 @@ impl<'a> Broker<'a> {
     /// Remove replies the guest has had long enough to read (it polls
     /// every second; it cannot remove them itself).
     pub fn sweep_replies(&self, now: std::time::SystemTime) -> Result<()> {
-        let root = Path::new(&self.share.cfg.share_dir);
-        let qubes = match std::fs::read_dir(root) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.into()),
-        };
-        for qube in qubes {
-            let qube = qube?;
-            let name = qube.file_name().to_string_lossy().into_owned();
-            if validate_name(&name).is_err() {
+        for (name, entry) in self.request_entries()? {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            if !file.ends_with(REPLY_SUFFIX) {
                 continue;
             }
-            let entries = match std::fs::read_dir(qube.path().join(share::REQUESTS)) {
-                Ok(rd) => rd,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            };
-            for entry in entries {
-                let entry = entry?;
-                let file = entry.file_name().to_string_lossy().into_owned();
-                if !file.ends_with(REPLY_SUFFIX) {
-                    continue;
-                }
-                let age = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|m| now.duration_since(m).ok());
-                if age.is_some_and(|a| a >= REPLY_TTL) {
-                    let path = format!("{}/{file}", self.share.requests(&name));
-                    self.share.runner.run_checked("rm", &["-f", &path])?;
-                }
+            let age = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| now.duration_since(m).ok());
+            if age.is_some_and(|a| a >= REPLY_TTL) {
+                let path = format!("{}/{file}", self.share.requests(&name));
+                self.share.runner.run_checked("rm", &["-f", &path])?;
             }
         }
         Ok(())
@@ -491,13 +462,20 @@ impl<'a> Broker<'a> {
         let dir = self.share.requests(src);
         let reply_file = format!("{dir}/{id}{REPLY_SUFFIX}");
         let request_file = format!("{dir}/{id}");
-        self.share
-            .runner
-            .run_with_input_checked("tee", &[&reply_file], &format!("{reply}\n"))?;
-        self.share
-            .runner
-            .run_checked("rm", &["-f", &request_file])?;
-        Ok(())
+        let r = self.share.runner;
+        r.run_with_input_checked("tee", &[&reply_file], &format!("{reply}\n"))
+            .and_then(|_| r.run_checked("rm", &["-f", &request_file]))
+            .map(drop)
+    }
+}
+
+/// The entries of `dir`; none when it does not exist.
+fn list_dir(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
+    let entries = std::fs::read_dir(dir).and_then(|rd| rd.collect::<std::io::Result<Vec<_>>>());
+    match entries {
+        Ok(entries) => Ok(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -506,6 +484,7 @@ mod tests {
     use super::*;
     use crate::config::{GlobalConfig, OsType, Qube, QubeKind};
     use crate::sys::{CmdOutput, MockRunner};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn verdicts_and_rules_parse_and_print() {
@@ -520,6 +499,7 @@ mod tests {
         assert!("copy work".parse::<Rule>().is_err());
         assert!("exec work web allow".parse::<Rule>().is_err());
         assert!("copy Work web allow".parse::<Rule>().is_err());
+        assert!("copy work web maybe".parse::<Rule>().is_err());
         assert!(Rule::new("*", "../x", Verdict::Deny).is_err());
     }
 
@@ -553,6 +533,8 @@ mod tests {
         assert_eq!(Policy::load(&path).unwrap(), p);
         std::fs::write(&path, "garbage\n").unwrap();
         assert!(Policy::load(&path).is_err());
+        assert!(Policy::load(&dir).is_err(), "a directory");
+        assert!(p.save(&path.join("under-a-file")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -664,6 +646,16 @@ mod tests {
         std::fs::remove_dir_all(&f.dir).unwrap();
     }
 
+    /// One line per disposition, for comparisons.
+    fn brief(d: &Disposition) -> String {
+        match d {
+            Disposition::Delivered(d) => format!("ok {}", d.guest_path),
+            Disposition::Denied => "denied".into(),
+            Disposition::Pending => "pending".into(),
+            Disposition::Failed(e) => format!("failed {e}"),
+        }
+    }
+
     #[test]
     fn serve_applies_the_policy() {
         let f = fixture();
@@ -672,32 +664,21 @@ mod tests {
         drop_request(&f, "web", "2", "copy x work\n");
         drop_request(&f, "work", "3", "copy notes rx\n");
         drop_request(&f, "work", "4", "nonsense\n");
+        drop_request(&f, "vault", "5", "copy x work\n");
         let runner = MockRunner::new();
         let broker = Broker::new(&runner, &f.cfg, &f.store, policy);
         let done = broker.serve_once().unwrap();
-        let summary: Vec<(String, String)> = done
+        let summary: Vec<(&str, String)> = done
             .iter()
-            .map(|(f, d)| {
-                (
-                    f.id.clone(),
-                    match d {
-                        Disposition::Delivered(d) => format!("ok {}", d.guest_path),
-                        Disposition::Denied => "denied".into(),
-                        Disposition::Pending => "pending".into(),
-                        Disposition::Failed(e) => format!("failed {e}"),
-                    },
-                )
-            })
+            .map(|(f, d)| (f.id.as_str(), brief(d)))
             .collect();
-        assert_eq!(summary[0], ("2".to_string(), "denied".to_string()));
-        assert_eq!(
-            summary[1],
-            ("1".to_string(), "ok /mnt/jos/in/work/notes".to_string())
-        );
-        assert_eq!(summary[2].0, "3");
-        assert!(summary[2].1.contains("no dom0 share"), "{:?}", summary[2]);
-        assert_eq!(summary[3].0, "4");
-        assert!(summary[3].1.starts_with("failed"), "{:?}", summary[3]);
+        assert_eq!(summary[0], ("5", "pending".to_string()));
+        assert_eq!(summary[1], ("2", "denied".to_string()));
+        assert_eq!(summary[2], ("1", "ok /mnt/jos/in/work/notes".to_string()));
+        let (id, outcome) = &summary[3];
+        assert!(*id == "3" && outcome.contains("no dom0 share"), "{outcome}");
+        let (id, outcome) = &summary[4];
+        assert!(*id == "4" && outcome.starts_with("failed"), "{outcome}");
         let calls = runner.calls();
         let share = &f.cfg.share_dir;
         assert!(
@@ -770,14 +751,13 @@ mod tests {
             Disposition::Denied
         );
         let two = broker.find("work", "2").unwrap();
-        match broker.settle(&two, Some(Verdict::Allow)).unwrap() {
-            Disposition::Failed(why) => assert!(why.contains("nowhere"), "{why}"),
-            other => panic!("{other:?}"),
-        }
-        assert!(matches!(
-            broker.settle(&one, Some(Verdict::Allow)).unwrap(),
-            Disposition::Delivered(_)
-        ));
+        let failed = brief(&broker.settle(&two, Some(Verdict::Allow)).unwrap());
+        assert!(
+            failed.starts_with("failed") && failed.contains("nowhere"),
+            "{failed}"
+        );
+        let delivered = brief(&broker.settle(&one, Some(Verdict::Allow)).unwrap());
+        assert_eq!(delivered, "ok /mnt/jos/in/work/notes");
         std::fs::remove_dir_all(&f.dir).unwrap();
     }
 
@@ -785,13 +765,77 @@ mod tests {
     fn answer_failures_surface() {
         let f = fixture();
         drop_request(&f, "work", "1", "copy notes web\n");
-        let runner = MockRunner::new().respond("tee", &[], CmdOutput::failed(1, "read-only"));
-        let broker = Broker::new(
-            &runner,
-            &f.cfg,
-            &f.store,
-            Policy::parse("copy * * deny\n").unwrap(),
-        );
+        drop_request(&f, "work", "2", "copy notes nowhere\n");
+        drop_request(&f, "work", "3", "nonsense\n");
+        let no_tee = || MockRunner::new().respond("tee", &[], CmdOutput::failed(1, "read-only"));
+        let deny = Policy::parse("copy * * deny\n").unwrap();
+        let allow = Policy::parse("copy * * allow\n").unwrap();
+        let runner = no_tee();
+        let broker = Broker::new(&runner, &f.cfg, &f.store, deny.clone());
+        assert!(broker.serve_once().is_err());
+        // Every answer, under every verdict: a malformed request, a
+        // delivery, a failed delivery.
+        for id in ["1", "2", "3"] {
+            let found = broker.find("work", id).unwrap();
+            assert!(broker.settle(&found, Some(Verdict::Allow)).is_err(), "{id}");
+        }
+        // Discarding the export: when denied, when the delivery failed.
+        let no_discard = MockRunner::new().respond("rm", &["-rf"], CmdOutput::failed(1, "busy"));
+        let broker = Broker::new(&no_discard, &f.cfg, &f.store, allow);
+        let two = broker.find("work", "2").unwrap();
+        assert!(broker.settle(&two, Some(Verdict::Allow)).is_err());
+        assert!(broker.settle(&two, Some(Verdict::Deny)).is_err());
+        // Removing the answered request.
+        let no_remove = MockRunner::new().respond("rm", &["-f"], CmdOutput::failed(1, "busy"));
+        let broker = Broker::new(&no_remove, &f.cfg, &f.store, deny);
+        assert!(broker.serve_once().is_err());
+        std::fs::remove_dir_all(&f.dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_state_surfaces() {
+        let f = fixture();
+        let runner = MockRunner::new();
+        // A share directory that is a file.
+        let file = f.dir.join("file");
+        std::fs::write(&file, "").unwrap();
+        let cfg = GlobalConfig {
+            share_dir: file.to_string_lossy().into_owned(),
+            ..f.cfg.clone()
+        };
+        let broker = Broker::new(&runner, &cfg, &f.store, Policy::default());
+        assert!(broker.scan().is_err());
+        assert!(broker.find("work", "1").is_err());
+        assert!(broker.serve_once().is_err());
+        assert!(broker.sweep_replies(std::time::SystemTime::now()).is_err());
+        // A request that cannot be read is reported, not fatal.
+        drop_request(&f, "work", "1", "copy notes web\n");
+        let req = Path::new(&f.cfg.share_dir).join("work/req/1");
+        std::fs::set_permissions(&req, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let broker = Broker::new(&runner, &f.cfg, &f.store, Policy::default());
+        let found = broker.find("work", "1").unwrap();
+        let why = found.request.unwrap_err();
+        assert!(why.contains("I/O error"), "{why}");
+        std::fs::set_permissions(&req, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // A qube whose req/ is a file.
+        let vault_req = Path::new(&f.cfg.share_dir).join("vault/req");
+        std::fs::create_dir_all(vault_req.parent().unwrap()).unwrap();
+        std::fs::write(&vault_req, "").unwrap();
+        assert!(broker.scan().is_err());
+        std::fs::remove_file(&vault_req).unwrap();
+        // A sweep whose removal fails, on its own and during a pass.
+        let reply = Path::new(&f.cfg.share_dir).join("work/req/1.reply");
+        std::fs::write(&reply, "ok\n").unwrap();
+        let old = std::time::SystemTime::now() - REPLY_TTL * 2;
+        std::fs::File::options()
+            .write(true)
+            .open(&reply)
+            .and_then(|r| r.set_modified(old))
+            .unwrap();
+        std::fs::remove_file(&req).unwrap();
+        let no_remove = MockRunner::new().respond("rm", &["-f"], CmdOutput::failed(1, "busy"));
+        let broker = Broker::new(&no_remove, &f.cfg, &f.store, Policy::default());
+        assert!(broker.sweep_replies(std::time::SystemTime::now()).is_err());
         assert!(broker.serve_once().is_err());
         std::fs::remove_dir_all(&f.dir).unwrap();
     }

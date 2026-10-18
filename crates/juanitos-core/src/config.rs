@@ -856,6 +856,18 @@ mod tests {
         assert!(QubeStore::new(&file).list().is_err(), "not a directory");
         assert!(QubeStore::new(file.join("sub")).save(&q).is_err());
         assert!(load_global_config(Some(&dir)).is_err(), "a directory");
+        assert!(store.remove("work").is_err(), "a directory is not removed");
+        fs::remove_dir(dir.join("work.toml")).unwrap();
+        fs::write(dir.join("junk.toml"), "name = 1").unwrap();
+        assert!(store.list().is_err(), "not a definition");
+
+        let absent = load_global_config(Some(&dir.join("jos.toml"))).unwrap();
+        assert_eq!(absent, GlobalConfig::default());
+        fs::write(dir.join("jos.toml"), "pool = \"tank\"\n").unwrap();
+        let tank = load_global_config(Some(&dir.join("jos.toml"))).unwrap();
+        assert_eq!(tank.pool, "tank");
+        fs::write(dir.join("jos.toml"), "pool = [\n").unwrap();
+        assert!(load_global_config(Some(&dir.join("jos.toml"))).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

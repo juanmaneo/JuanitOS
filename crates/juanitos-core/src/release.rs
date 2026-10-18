@@ -230,7 +230,19 @@ src.txz\t789\t100\tsrc\t\"System source tree\"\toff\n";
         assert!(sha256_file(&missing).is_err());
         assert!(sha256_file(&dir.join("sub")).is_err(), "a directory");
         assert!(DistManifest::read(&missing).is_err());
+        std::fs::write(dir.join("MANIFEST"), "abc  3  base.txz\n").unwrap();
+        let read = DistManifest::read(&dir.join("MANIFEST")).unwrap();
+        assert_eq!(read.expected("base.txz"), Some(("abc", 3)));
+        std::fs::write(dir.join("base.txz"), "abc").unwrap();
+        let err = read.verify(&dir, "base.txz").unwrap_err().to_string();
+        assert!(err.contains("sha256 mismatch"), "{err}");
         assert!(DistManifest::verify_sha256(&missing, "x").is_err());
+        let base = dir.join("base.txz");
+        let err = DistManifest::verify_sha256(&base, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sha256 mismatch"), "{err}");
+        DistManifest::verify_sha256(&base, &sha256_bytes(b"abc")).unwrap();
         let mut m = DistManifest::default();
         m.add("x".into(), 1, "missing".into());
         let sub = std::fs::metadata(dir.join("sub")).unwrap().len();

@@ -535,8 +535,13 @@ mod tests {
         let err = share.copy(&src, &work, &mut never).unwrap_err().to_string();
         assert!(err.contains("same qube"), "{err}");
         let bad = Source::parse("work:/").unwrap();
-        assert!(share.copy(&bad, &redox, &mut never).is_err());
+        let web = Qube::new("web", QubeKind::App, OsType::Freebsd);
+        let err = share.copy(&bad, &web, &mut never).unwrap_err().to_string();
+        assert!(err.contains("cannot copy that path itself"), "{err}");
         assert!(runner.calls().is_empty());
+        let gone = MockRunner::new().missing("mkdir");
+        let err = Share::new(&gone, &cfg).copy(&src, &web, &mut never);
+        assert!(err.is_err(), "the inbox cannot be opened");
         drop(never);
         assert!(ran.is_empty());
     }

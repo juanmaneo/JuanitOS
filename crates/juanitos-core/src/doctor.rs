@@ -306,16 +306,7 @@ pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
     };
     checks.push(firmware_iommu_check(acpidump.as_deref(), amd));
 
-    // /dev/vmm
-    if Path::new("/dev/vmm").exists() {
-        checks.push(Check::new("/dev/vmm", Status::Ok, "present"));
-    } else {
-        checks.push(Check::new(
-            "/dev/vmm",
-            Status::Warn,
-            "missing; appears after vmm is loaded and the first VM is created",
-        ));
-    }
+    checks.push(vmm_device_check(Path::new("/dev/vmm").exists()));
 
     // UEFI firmware
     if Path::new(&cfg.uefi_firmware).is_file() {
@@ -361,6 +352,20 @@ pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
     }
 
     checks
+}
+
+/// `/dev/vmm` only appears once vmm has created a VM: its absence is a
+/// warning, not a failure.
+fn vmm_device_check(present: bool) -> Check {
+    if present {
+        Check::new("/dev/vmm", Status::Ok, "present")
+    } else {
+        Check::new(
+            "/dev/vmm",
+            Status::Warn,
+            "missing; appears after vmm is loaded and the first VM is created",
+        )
+    }
 }
 
 /// Checks on the ZFS pool and JuanitOS datasets.
@@ -490,6 +495,63 @@ mod tests {
         let host = run_host_checks(&m, &cfg);
         assert!(host.iter().all(|c| c.name != "zpool"));
         assert!(host.iter().any(|c| c.name == "ppt devices"));
+    }
+
+    #[test]
+    fn checks_cope_with_missing_tools_and_report_what_is_ready() {
+        // Not FreeBSD at all: nothing to run.
+        let bare = MockRunner::new()
+            .missing("kldstat")
+            .missing("sysctl")
+            .missing("pciconf")
+            .missing("zpool")
+            .missing("zfs");
+        let cfg = GlobalConfig::default();
+        let checks = run_checks(&bare, &cfg);
+        let get = |n: &str| checks.iter().find(|c| c.name == n).unwrap();
+        assert_eq!(
+            get("kernel module vmm").detail,
+            "could not run kldstat (not FreeBSD?)"
+        );
+        assert!(get("iommu").detail.contains("unavailable"));
+        assert_eq!(get("ppt devices").detail, "could not run pciconf");
+        assert_eq!(get("zpool").detail, "could not run zpool");
+        assert_eq!(get("uefi firmware").status, Status::Warn);
+
+        // The firmware is installed, the datasets exist, but the pool is
+        // not the configured one.
+        let dir = std::env::temp_dir().join(format!("jos-doctor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let firmware = dir.join("BHYVE_UEFI.fd");
+        std::fs::write(&firmware, "").unwrap();
+        let cfg = GlobalConfig {
+            uefi_firmware: firmware.to_string_lossy().into_owned(),
+            ..GlobalConfig::default()
+        };
+        let m = MockRunner::new().respond("zpool", &[], CmdOutput::ok("tank\nbackup\n"));
+        let checks = run_checks(&m, &cfg);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let get = |n: &str| checks.iter().find(|c| c.name == n).unwrap();
+        assert_eq!(get("uefi firmware").status, Status::Ok);
+        assert_eq!(get("uefi firmware").detail, cfg.uefi_firmware);
+        assert_eq!(get("zpool").status, Status::Fail);
+        assert_eq!(
+            get("zpool").detail,
+            "pool zroot not found (available: tank, backup)"
+        );
+        assert_eq!(get("dataset zroot/juanitos/qubes").status, Status::Ok);
+        assert_eq!(get("dataset zroot/juanitos/templates").detail, "exists");
+
+        let online = run_storage_checks(
+            &MockRunner::new().respond("zpool", &[], CmdOutput::ok("zroot\n")),
+            &cfg,
+        );
+        let zpool = online.iter().find(|c| c.name == "zpool").unwrap();
+        assert_eq!(zpool.status, Status::Ok);
+        assert_eq!(zpool.detail, "pool zroot online");
+
+        assert_eq!(vmm_device_check(true).status, Status::Ok);
+        assert_eq!(vmm_device_check(false).status, Status::Warn);
     }
 
     #[test]
