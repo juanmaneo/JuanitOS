@@ -275,10 +275,18 @@ mod tests {
         // Already connected: not dialed again (the dialer would assert on
         // another path anyway).
         assert!(ev.connect(["work"]).is_empty());
-        let batch = ev.wait(Duration::from_secs(5));
-        assert_eq!(batch.len(), 2, "{batch:?}");
-        assert_eq!(batch.first().map(|e| e.line.as_str()), Some("REQUEST 1"));
-        assert_eq!(batch.first().map(|e| e.qube.as_str()), Some("work"));
+        // The reader queues the lines one by one, so a wait may return
+        // before the second is queued: collect over as many as it takes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut lines = Vec::new();
+        while lines.len() < 2 && Instant::now() < deadline {
+            lines.extend(ev.wait(Duration::from_secs(5)));
+        }
+        let work = |line: &str| Event {
+            qube: "work".into(),
+            line: line.into(),
+        };
+        assert_eq!(lines, vec![work("REQUEST 1"), work("REQUEST 2")]);
         // The cursor is at EOF: the reader reports the port closed, and
         // the next wait sees it (a timeout, nothing to deliver).
         let deadline = Instant::now() + Duration::from_secs(5);
