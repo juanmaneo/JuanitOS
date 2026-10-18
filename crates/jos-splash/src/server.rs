@@ -186,8 +186,8 @@ pub fn serve<D: Display>(
             .with_context(|| format!("removing stale {}", socket_path.display()))?;
     }
     let sock = UnixDatagram::bind(socket_path)
+        .and_then(|s| s.set_read_timeout(Some(TICK)).map(|()| s))
         .with_context(|| format!("binding {}", socket_path.display()))?;
-    sock.set_read_timeout(Some(TICK))?;
 
     splash.redraw()?;
     let mut buf = [0u8; 512];
@@ -212,8 +212,9 @@ pub fn send(msg: &Message, socket_path: &std::path::Path) -> anyhow::Result<bool
     if !socket_path.exists() {
         return Ok(false);
     }
-    let sock = UnixDatagram::unbound()?;
-    match sock.send_to(msg.encode().as_bytes(), socket_path) {
+    let sent =
+        UnixDatagram::unbound().and_then(|sock| sock.send_to(msg.encode().as_bytes(), socket_path));
+    match sent {
         Ok(_) => Ok(true),
         Err(e)
             if e.kind() == std::io::ErrorKind::NotFound
@@ -332,14 +333,111 @@ mod tests {
         assert!(!s.display().restored);
     }
 
+    #[test]
+    fn the_same_status_twice_draws_once() {
+        let mut s = Splash::new(NullDisplay::new(64, 40), None);
+        s.handle(Message::Status("Starting".into()));
+        s.redraw().unwrap();
+        s.handle(Message::Status("Starting".into()));
+        s.redraw().unwrap();
+        assert_eq!(s.frames, 1);
+    }
+
+    /// A scratch directory for sockets, removed on drop.
+    #[cfg(unix)]
+    struct Dir(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl Dir {
+        fn new(tag: &str) -> Self {
+            let d = std::env::temp_dir().join(format!("jos-splash-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            Dir(d)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Run `serve` on `display` in a thread, send `msgs` once it listens,
+    /// and return its result.
+    #[cfg(unix)]
+    fn serve_with(
+        display: NullDisplay,
+        path: &std::path::Path,
+        msgs: &[&str],
+    ) -> anyhow::Result<NullDisplay> {
+        let p = path.to_path_buf();
+        let server = std::thread::spawn(move || serve(Splash::new(display, None), &p));
+        let probe = std::os::unix::net::UnixDatagram::unbound().unwrap();
+        for msg in msgs {
+            while probe.send_to(msg.as_bytes(), path).is_err() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        server.join().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn server_failures_are_reported() {
+        let d = Dir::new("fail");
+        // A stale path that cannot be removed (a non-empty directory).
+        let stuck = d.0.join("stuck");
+        std::fs::create_dir_all(stuck.join("x")).unwrap();
+        let err = serve(Splash::new(NullDisplay::new(8, 8), None), &stuck).unwrap_err();
+        assert!(format!("{err:#}").contains("removing stale"), "{err:#}");
+        // A socket in a directory that does not exist.
+        let nowhere = d.0.join("missing/s.sock");
+        let err = serve(Splash::new(NullDisplay::new(8, 8), None), &nowhere).unwrap_err();
+        assert!(format!("{err:#}").contains("binding"), "{err:#}");
+
+        let gone = |frames| NullDisplay {
+            fail_after_frames: Some(frames),
+            ..NullDisplay::new(8, 8)
+        };
+        let sock = d.0.join("s.sock");
+        // The first frame, a frame after a message, the last frame.
+        for (display, msgs) in [
+            (gone(0), &[][..]),
+            (gone(1), &["stage network"][..]),
+            (gone(1), &["finish keep"][..]),
+        ] {
+            let err = serve_with(display, &sock, msgs).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("framebuffer gone"),
+                "{msgs:?}: {err:#}"
+            );
+        }
+        // The console cannot be restored.
+        let stuck_vt = NullDisplay {
+            fail_release: true,
+            ..NullDisplay::new(8, 8)
+        };
+        let err = serve_with(stuck_vt, &sock, &["finish console"]).unwrap_err();
+        assert!(err.to_string().contains("restore"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_we_may_not_write_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = Dir::new("perm");
+        let path = d.0.join("s.sock");
+        let _listener = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = send(&Message::Status("x".into()), &path).unwrap_err();
+        assert!(format!("{err:#}").contains("sending to"), "{err:#}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn socket_roundtrip_ends_the_server() {
-        // Some build sandboxes (seccomp) forbid AF_UNIX altogether.
-        if std::os::unix::net::UnixDatagram::unbound().is_err() {
-            eprintln!("skipped: Unix sockets are not permitted in this environment");
-            return;
-        }
         let dir = std::env::temp_dir().join(format!("jos-splash-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.sock");
