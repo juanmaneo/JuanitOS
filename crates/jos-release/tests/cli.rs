@@ -204,6 +204,46 @@ fn qemu_refuses_an_iso_that_was_not_built() {
 }
 
 #[test]
+fn compare_reports_and_fails_on_differences() {
+    let w = Work::new("compare");
+    let out = w.ok(&["compare", "/x/a.txz", "/x/b.txz"]);
+    assert!(out.contains("+ tar -xpf /x/a.txz -C "), "{out}");
+    assert!(out.contains("same system"), "{out}");
+    assert!(!w.0.join("compare").exists(), "a dry run extracts nothing");
+
+    let src = w.0.join("src");
+    std::fs::create_dir_all(src.join("etc")).unwrap();
+    std::fs::write(src.join("etc/rc.conf"), "a\n").unwrap();
+    let tar = |name: &str| {
+        let p = w.0.join(name);
+        let st = Command::new("tar")
+            .arg("-C")
+            .arg(&src)
+            .arg("-cf")
+            .arg(&p)
+            .arg(".")
+            .status();
+        match st {
+            Ok(st) if st.success() => Some(p.to_string_lossy().into_owned()),
+            _ => None,
+        }
+    };
+    let Some(a) = tar("a.tar") else {
+        eprintln!("skipped: no tar");
+        return;
+    };
+    let work = w.0.join("work").to_string_lossy().into_owned();
+    let (ok, out) = real(&repo_root(), &["--work", &work, "compare", &a, &a]);
+    assert!(ok, "{out}");
+    std::fs::write(src.join("etc/rc.conf"), "b\n").unwrap();
+    let b = tar("b.tar").unwrap();
+    let (ok, out) = real(&repo_root(), &["--work", &work, "compare", &a, &b]);
+    assert!(!ok);
+    assert!(out.contains("DIFFERS   contents: /etc/rc.conf"), "{out}");
+    assert!(out.contains("differ"), "{out}");
+}
+
+#[test]
 fn release_steps_need_root() {
     let id = Command::new("id").arg("-u").output();
     if id.map(|o| o.stdout.starts_with(b"0\n")).unwrap_or(true) {

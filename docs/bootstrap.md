@@ -281,6 +281,20 @@ fills with the same `<crate>-<version>` names. A stage-1 build in
 can give the same bytes, and `built_at` follows `SOURCE_DATE_EPOCH` when
 it is set.
 
+The comparison itself is a command:
+
+```sh
+jos-release compare stage2/juanitos-dom0.txz stage3/juanitos-dom0.txz
+```
+
+It extracts both under `<work>/compare` (removed afterwards; `--keep`
+leaves it) and compares every entry: path, type, permission bits, owner
+(only when run as root; otherwise everything belongs to the caller), link
+target and SHA-256 of the contents. Member order and mtimes are ignored.
+The four `pkg`/stamp files above are reported as expected, each with its
+reason (`EXPECTED` in `crates/jos-release/src/compare.rs`); anything else
+is printed as `DIFFERS` and the command exits non-zero.
+
 ## Why not build FreeBSD from source?
 
 It would be a faithful LFS, but it buys nothing yet: the dom0 is not

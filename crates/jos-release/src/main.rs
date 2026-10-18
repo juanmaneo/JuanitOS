@@ -4,6 +4,7 @@
 //! runs the same command on an installed JuanitOS. See `docs/bootstrap.md`.
 
 mod builder;
+mod compare;
 mod console;
 mod disk;
 mod profile;
@@ -65,6 +66,18 @@ enum Cmd {
     /// Run a stock FreeBSD VM image under QEMU with this repo shared in,
     /// to build the ISO from a Linux host.
     Builder(BuilderArgs),
+    /// Compare two dom0 tarballs by contents (bootstrap stage 3): exits
+    /// non-zero on any difference not known to be harmless.
+    Compare(CompareArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct CompareArgs {
+    a: PathBuf,
+    b: PathBuf,
+    /// Leave the extracted trees in <work>/compare.
+    #[arg(long)]
+    keep: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -264,6 +277,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli.dry_run,
         ),
         Cmd::Builder(a) => qemu::run_builder(&a.image, &repo, cli.dry_run),
+        Cmd::Compare(a) => {
+            let report = compare::compare_tarballs(
+                runner,
+                &FsOps::new(cli.dry_run),
+                &a.a,
+                &a.b,
+                &work.join("compare"),
+                a.keep,
+            )?;
+            print!("{}", report.render());
+            if report.unexpected().next().is_some() {
+                bail!("{} and {} differ", a.a.display(), a.b.display());
+            }
+            Ok(())
+        }
     }
 }
 
