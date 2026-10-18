@@ -201,9 +201,11 @@ impl Greeter {
             .iter()
             .position(|f| *f == self.focus)
             .unwrap_or(0);
-        if let Some(f) = FOCUS_ORDER.get((i + step) % FOCUS_ORDER.len()) {
-            self.focus = *f;
-        }
+        // The index is taken modulo the length: `get` always finds it.
+        self.focus = FOCUS_ORDER
+            .get((i + step) % FOCUS_ORDER.len())
+            .copied()
+            .unwrap_or(self.focus);
     }
 
     fn cycle(&mut self, forward: bool) {
@@ -224,9 +226,8 @@ impl Greeter {
                     (Some(i), true) => (i + 1) % n,
                     (Some(i), false) => (i + n - 1) % n,
                 };
-                if let Some(u) = self.users.get(next) {
-                    self.user = u.clone();
-                }
+                // `next < n`: `get` always finds it.
+                self.user = self.users.get(next).cloned().unwrap_or_default();
             }
             _ => {}
         }
@@ -303,8 +304,10 @@ pub fn human_users(passwd: &str) -> Vec<String> {
         .filter(|l| !l.starts_with('#'))
         .filter_map(|l| {
             let f: Vec<&str> = l.split(':').collect();
-            let name = f.first()?;
-            let uid: u32 = f.get(2)?.parse().ok()?;
+            let [name, _, uid, ..] = f.as_slice() else {
+                return None;
+            };
+            let uid: u32 = uid.parse().ok()?;
             let shell = f.get(6).copied().unwrap_or("");
             let real_shell = !shell.is_empty() && !shell.ends_with("nologin");
             ((1000..65534).contains(&uid) && real_shell && !name.is_empty())
@@ -328,7 +331,7 @@ mod tests {
     fn greeter() -> Greeter {
         Greeter::new(
             "box",
-            vec!["juan".into(), "ana".into()],
+            vec!["alice".into(), "bob".into()],
             vec![Session::cosmic_default(), sway()],
         )
     }
@@ -342,19 +345,19 @@ mod tests {
     #[test]
     fn prefilled_user_logs_in_with_the_password() {
         let mut g = greeter();
-        assert_eq!(g.user, "juan");
+        assert_eq!(g.user, "alice");
         assert_eq!(g.focus, Focus::Password);
         typed(&mut g, "s3cret");
         assert_eq!(g.password, "s3cret");
-        let Action::Login(req) = g.handle(Key::Enter) else {
-            panic!("expected a login")
+        let req = Request {
+            user: "alice".into(),
+            password: "s3cret".into(),
+            session: Session::cosmic_default(),
         };
-        assert_eq!(req.user, "juan");
-        assert_eq!(req.password, "s3cret");
-        assert_eq!(req.session, Session::cosmic_default());
+        let dbg = format!("{req:?}");
+        assert_eq!(g.handle(Key::Enter), Action::Login(req));
         assert!(g.password.is_empty(), "the greeter keeps no copy");
         assert_eq!(g.message, Some(Message::Info("Logging in...".into())));
-        let dbg = format!("{req:?}");
         assert!(!dbg.contains("s3cret") && dbg.contains("<hidden>"), "{dbg}");
     }
 
@@ -364,10 +367,10 @@ mod tests {
         assert_eq!(g.focus, Focus::User);
         assert_eq!(g.sessions, vec![Session::cosmic_default()]);
         assert_eq!(g.handle(Key::Enter), Action::None);
-        assert!(matches!(g.message, Some(Message::Error(_))));
-        typed(&mut g, "ana bad!");
+        assert_eq!(g.message, Some(Message::Error("Enter a user name".into())));
+        typed(&mut g, "chuck bad!");
         assert_eq!(
-            g.user, "anabad",
+            g.user, "chuckbad",
             "spaces and punctuation are not login names"
         );
         assert_eq!(g.handle(Key::Enter), Action::None);
@@ -375,10 +378,15 @@ mod tests {
         // Users cycle only when known.
         g.focus = Focus::User;
         g.handle(Key::Right);
-        assert_eq!(g.user, "anabad");
+        assert_eq!(g.user, "chuckbad");
         // Submitting from the session selector works too.
         g.focus = Focus::Session;
-        assert!(matches!(g.handle(Key::Enter), Action::Login(_)));
+        let req = Request {
+            user: "chuckbad".into(),
+            password: String::new(),
+            session: Session::cosmic_default(),
+        };
+        assert_eq!(g.handle(Key::Enter), Action::Login(req));
     }
 
     #[test]
@@ -405,24 +413,24 @@ mod tests {
         g.handle(Key::Left);
         assert_eq!(g.current_session().name, "Sway");
         typed(&mut g, "x");
-        assert!(g.password.is_empty() && g.user == "juan");
+        assert!(g.password.is_empty() && g.user == "alice");
         g.handle(Key::Backspace);
 
         g.focus = Focus::User;
         g.handle(Key::Right);
-        assert_eq!(g.user, "ana");
+        assert_eq!(g.user, "bob");
         g.handle(Key::Right);
-        assert_eq!(g.user, "juan");
+        assert_eq!(g.user, "alice");
         g.handle(Key::Left);
-        assert_eq!(g.user, "ana");
+        assert_eq!(g.user, "bob");
         g.handle(Key::Ctrl('u'));
         assert_eq!(g.user, "");
         g.handle(Key::Left);
-        assert_eq!(g.user, "juan", "an unknown name restarts the list");
+        assert_eq!(g.user, "alice", "an unknown name restarts the list");
         // Arrows in the password field do nothing.
         g.focus = Focus::Password;
         g.handle(Key::Left);
-        assert_eq!(g.user, "juan");
+        assert_eq!(g.user, "alice");
         // Out-of-range index still yields a session.
         g.session = 99;
         assert_eq!(g.current_session().name, "COSMIC");
@@ -485,9 +493,12 @@ mod tests {
         g.focus = Focus::User;
         g.session_ended(Ok(()));
         assert_eq!(g.focus, Focus::Password);
-        assert_eq!(g.message, Some(Message::Info("juan logged out".into())));
+        assert_eq!(g.message, Some(Message::Info("alice logged out".into())));
         g.session_ended(Err("COSMIC exited with status 1".into()));
-        assert!(matches!(g.message, Some(Message::Error(_))));
+        assert_eq!(
+            g.message,
+            Some(Message::Error("COSMIC exited with status 1".into()))
+        );
     }
 
     #[test]
@@ -501,11 +512,12 @@ mod tests {
     fn humans_from_passwd() {
         let passwd = "# comment\nroot:*:0:0:Charlie &:/root:/bin/sh\n\
             nobody:*:65534:65534:Unprivileged user:/nonexistent:/usr/sbin/nologin\n\
-            juan:*:1001:1001:Juan:/home/juan:/bin/sh\n\
+            alice:*:1001:1001:Alice:/home/alice:/bin/sh\n\
             svc:*:1002:1002:svc:/var/empty:/usr/sbin/nologin\n\
             noshell:*:1003:1003::/home/x:\n\
             broken\n\
-            ana:*:1004:1004:Ana:/home/ana:/usr/local/bin/zsh\n";
-        assert_eq!(human_users(passwd), vec!["juan", "ana"]);
+            baduid:*:x:1005::/home/b:/bin/sh\n\
+            bob:*:1004:1004:Bob:/home/bob:/usr/local/bin/zsh\n";
+        assert_eq!(human_users(passwd), vec!["alice", "bob"]);
     }
 }

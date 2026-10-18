@@ -210,6 +210,19 @@ mod tests {
         )
         .unwrap();
         assert!(dir.join("greeter-1-login.png").is_file());
+        let not_a_dir = dir.join("greeter-1-login.png");
+        assert!(run(
+            Cli::parse_from(["jos-greet", "screenshots", not_a_dir.to_str().unwrap()]),
+            &mut no_input,
+        )
+        .is_err());
+        // A password that is not text cannot be read.
+        let err = run(
+            Cli::parse_from(["jos-greet", "try-login", "--user", "alice", "--", "true"]),
+            &mut std::io::Cursor::new(b"\xff\xfe\n".to_vec()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
         run(
             Cli::parse_from(["jos-greet", "sessions", "--dir", dir.to_str().unwrap()]),
             &mut no_input,
@@ -235,7 +248,7 @@ mod tests {
             .unwrap_err();
             assert!(err.to_string().contains("vt(4)"));
             let err = run(
-                Cli::parse_from(["jos-greet", "try-login", "--user", "juan", "--", "true"]),
+                Cli::parse_from(["jos-greet", "try-login", "--user", "alice", "--", "true"]),
                 &mut std::io::Cursor::new(b"pw\n".to_vec()),
             )
             .unwrap_err();

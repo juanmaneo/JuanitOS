@@ -127,12 +127,12 @@ pub fn tty_name(vt: i32) -> String {
 mod tests {
     use super::*;
 
-    fn juan() -> Account {
+    fn alice() -> Account {
         Account {
-            name: "juan".into(),
+            name: "alice".into(),
             uid: 1001,
             gid: 1001,
-            home: "/home/juan".into(),
+            home: "/home/alice".into(),
             shell: "/bin/sh".into(),
         }
     }
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn plan_runs_the_wrapper_with_the_session() {
         let p = plan(
-            &juan(),
+            &alice(),
             &Session::cosmic_default(),
             9,
             &[
@@ -159,13 +159,13 @@ mod tests {
         );
         assert_eq!(p.program, SESSION_WRAPPER);
         assert_eq!(p.args, vec!["/usr/local/bin/start-cosmic"]);
-        assert_eq!(p.cwd, "/home/juan");
+        assert_eq!(p.cwd, "/home/alice");
         assert_eq!(get(&p, "LANG"), Some("C.UTF-8"));
-        assert_eq!(get(&p, "HOME"), Some("/home/juan"), "ours win over PAM's");
-        assert_eq!(get(&p, "USER"), Some("juan"));
-        assert_eq!(get(&p, "LOGNAME"), Some("juan"));
+        assert_eq!(get(&p, "HOME"), Some("/home/alice"), "ours win over PAM's");
+        assert_eq!(get(&p, "USER"), Some("alice"));
+        assert_eq!(get(&p, "LOGNAME"), Some("alice"));
         assert_eq!(get(&p, "SHELL"), Some("/bin/sh"));
-        assert!(get(&p, "PATH").unwrap().ends_with(":/home/juan/bin"));
+        assert!(get(&p, "PATH").unwrap().ends_with(":/home/alice/bin"));
         assert_eq!(get(&p, "XDG_RUNTIME_DIR"), Some("/var/run/user/1001"));
         assert_eq!(get(&p, "XDG_SESSION_TYPE"), Some("wayland"));
         assert_eq!(get(&p, "XDG_CURRENT_DESKTOP"), Some("COSMIC"));
@@ -176,23 +176,23 @@ mod tests {
         assert!(p.env.iter().all(|(k, _)| !k.is_empty()));
         let homeless = Account {
             home: String::new(),
-            ..juan()
+            ..alice()
         };
         assert_eq!(plan(&homeless, &Session::cosmic_default(), 9, &[]).cwd, "/");
     }
 
     #[test]
     fn accounts_are_checked() {
-        assert!(juan().check().is_ok());
-        let root = Account { uid: 0, ..juan() };
+        assert!(alice().check().is_ok());
+        let root = Account { uid: 0, ..alice() };
         assert!(root.check().unwrap_err().contains("root"));
         let svc = Account {
             shell: "/usr/sbin/nologin".into(),
-            ..juan()
+            ..alice()
         };
         assert!(svc.check().unwrap_err().contains("not allowed"));
         assert_eq!(
-            juan().session_log(),
+            alice().session_log(),
             PathBuf::from("/var/run/user/1001/jos-session.log")
         );
     }

@@ -195,6 +195,7 @@ mod tests {
     struct Mock {
         log: Vec<String>,
         session_result: Option<String>,
+        power_fails: bool,
     }
 
     impl Backend for Mock {
@@ -215,8 +216,67 @@ mod tests {
         }
         fn power(&mut self, p: Power) -> anyhow::Result<()> {
             self.log.push(format!("power {p:?}"));
+            anyhow::ensure!(!self.power_fails, "shutdown refused");
             Ok(())
         }
+    }
+
+    /// One display typed `keys` on and set up by `tweak`; `run` with it.
+    fn run_once(
+        keys: &'static [u8],
+        tweak: impl Fn(&mut NullDisplay),
+        m: &mut Mock,
+    ) -> anyhow::Result<Outcome> {
+        let mut open = || {
+            let mut d = NullDisplay::new(320, 200);
+            d.type_bytes(keys);
+            tweak(&mut d);
+            Ok(d)
+        };
+        run(&mut open, &mut sample_greeter(), m, opts())
+    }
+
+    #[test]
+    fn display_and_backend_failures_end_the_loop() {
+        let f1_twice: &[u8] = b"\x1b[M\x1b[M";
+        let gone = |n: usize| move |d: &mut NullDisplay| d.fail_after_frames = Some(n);
+        // The very first frame, the confirmation of a power key, the
+        // "Logging in" frame, and the refusal frame.
+        for (keys, frames) in [
+            (b"" as &[u8], 0),
+            (f1_twice, 1),
+            (b"wrong\r", 1),
+            (b"wrong\r", 2),
+        ] {
+            let err = run_once(keys, gone(frames), &mut Mock::default()).unwrap_err();
+            assert_eq!(err.to_string(), "framebuffer gone", "{keys:?} {frames}");
+        }
+        // shutdown(8) refusing.
+        let mut m = Mock {
+            power_fails: true,
+            ..Mock::default()
+        };
+        let err = run_once(f1_twice, |_| {}, &mut m).unwrap_err();
+        assert_eq!(err.to_string(), "shutdown refused");
+        // The VT cannot be handed to the session.
+        let mut m = Mock::default();
+        let err = run_once(b"right\r", |d| d.fail_release = true, &mut m).unwrap_err();
+        assert_eq!(err.to_string(), "cannot release the display");
+        assert_eq!(m.log, ["auth alice"], "no session without the VT");
+        // Typing that asks for nothing: the screen is redrawn, then the
+        // loop idles until it runs out of ticks.
+        let err = run_once(b"x", |_| {}, &mut Mock::default()).unwrap_err();
+        assert!(err.to_string().contains("ticks"), "{err}");
+    }
+
+    #[test]
+    fn keys_typed_during_the_refusal_pause_are_dropped() {
+        // Frames: the screen, "Logging in", the refusal (3rd): typed then.
+        let mut m = Mock::default();
+        let during_pause = |d: &mut NullDisplay| d.typed_at_frame = Some((3, b"right\r".to_vec()));
+        let err = run_once(b"wrong\r", during_pause, &mut m).unwrap_err();
+        assert!(err.to_string().contains("ticks"), "{err}");
+        assert_eq!(m.log, ["auth alice"], "one attempt only");
     }
 
     fn opts() -> LoopOptions {
@@ -247,7 +307,7 @@ mod tests {
         let mut m = Mock::default();
         let err = run(&mut open, &mut g, &mut m, opts()).unwrap_err();
         assert!(err.to_string().contains("ticks"));
-        assert_eq!(m.log, vec!["auth juan"]);
+        assert_eq!(m.log, vec!["auth alice"]);
         assert_eq!(g.message, Some(Message::Error("Login incorrect".into())));
         assert!(g.password.is_empty());
 
@@ -256,8 +316,11 @@ mod tests {
         o.max_sessions = Some(1);
         let out = run(&mut open, &mut g, &mut m, o).unwrap();
         assert_eq!(out, Outcome::SessionsDone);
-        assert_eq!(m.log, vec!["auth juan", "auth juan", "session juan COSMIC"]);
-        assert_eq!(g.message, Some(Message::Info("juan logged out".into())));
+        assert_eq!(
+            m.log,
+            vec!["auth alice", "auth alice", "session alice COSMIC"]
+        );
+        assert_eq!(g.message, Some(Message::Info("alice logged out".into())));
     }
 
     #[test]
@@ -301,9 +364,9 @@ mod tests {
     fn dry_backend_and_shutdown() {
         let m = MockRunner::new().respond("shutdown", &[], CmdOutput::ok(""));
         let mut b = DryBackend { runner: &m };
-        assert!(b.authenticate("juan", "").is_err());
-        assert!(b.authenticate("juan", "x").is_ok());
-        assert!(b.run_session("juan", &Session::cosmic_default()).is_ok());
+        assert!(b.authenticate("alice", "").is_err());
+        assert!(b.authenticate("alice", "x").is_ok());
+        assert!(b.run_session("alice", &Session::cosmic_default()).is_ok());
         b.power(Power::Reboot).unwrap();
         b.power(Power::Off).unwrap();
         assert_eq!(m.calls(), vec!["shutdown -r now", "shutdown -p now"]);

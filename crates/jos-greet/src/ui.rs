@@ -179,7 +179,7 @@ pub fn sample_greeter() -> Greeter {
     use crate::sessions::Session;
     Greeter::new(
         "juanitos",
-        vec!["juan".to_string(), "ana".to_string()],
+        vec!["alice".to_string(), "bob".to_string()],
         vec![
             Session::cosmic_default(),
             Session {
@@ -220,6 +220,24 @@ mod tests {
 
     fn differs(a: &Image, b: &Image) -> bool {
         (0..a.height()).any(|y| a.row(y) != b.row(y))
+    }
+
+    #[test]
+    fn screenshot_failures_are_reported() {
+        let dir = std::env::temp_dir().join(format!("jos-greet-badshots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The directory is a file.
+        let file = dir.join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(screenshots(&file, 64, 40).is_err());
+        // The first picture, then the second, cannot be written.
+        for name in ["greeter-1-login.png", "greeter-2-failed.png"] {
+            let out = dir.join(name.replace(".png", ""));
+            std::fs::create_dir_all(out.join(name)).unwrap();
+            assert!(screenshots(&out, 64, 40).is_err(), "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -101,6 +101,14 @@ pub struct NullDisplay {
     /// The last frame presented, when [`NullDisplay::keep_frames`] is set.
     pub last_frame: Option<Image>,
     pub keep_frames: bool,
+    /// Fail `present` once this many frames were shown, and `release` /
+    /// `restore_console` when set: the error paths of the programs that
+    /// draw (a framebuffer that goes away, a VT that cannot be switched).
+    pub fail_after_frames: Option<usize>,
+    pub fail_release: bool,
+    /// Bytes typed while frame N is on screen (counted from 1): keys
+    /// pressed while the program is busy rather than waiting for them.
+    pub typed_at_frame: Option<(usize, Vec<u8>)>,
 }
 
 impl NullDisplay {
@@ -128,7 +136,13 @@ impl Display for NullDisplay {
             frame.width() == self.width && frame.height() == self.height,
             "frame size mismatch"
         );
+        if self.fail_after_frames.is_some_and(|n| self.presented >= n) {
+            anyhow::bail!("framebuffer gone");
+        }
         self.presented += 1;
+        if let Some((_, bytes)) = self.typed_at_frame.take_if(|(n, _)| *n == self.presented) {
+            self.keys.extend(bytes);
+        }
         if self.keep_frames {
             self.last_frame = Some(frame.clone());
         }
@@ -136,11 +150,13 @@ impl Display for NullDisplay {
     }
 
     fn restore_console(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.fail_release, "cannot restore the console");
         self.restored = true;
         Ok(())
     }
 
     fn release(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.fail_release, "cannot release the display");
         self.released = true;
         Ok(())
     }
@@ -212,6 +228,30 @@ mod tests {
         assert!(d.restored);
         d.release().unwrap();
         assert!(d.released);
+
+        // On request it fails like a framebuffer that went away.
+        let mut d = NullDisplay {
+            fail_after_frames: Some(1),
+            fail_release: true,
+            ..NullDisplay::new(4, 4)
+        };
+        d.present(&Image::new(4, 4, Rgba::TRANSPARENT)).unwrap();
+        let err = d.present(&Image::new(4, 4, Rgba::TRANSPARENT)).unwrap_err();
+        assert_eq!(err.to_string(), "framebuffer gone");
+        assert_eq!(d.presented, 1);
+        assert!(d.release().is_err() && !d.released);
+        assert!(d.restore_console().is_err() && !d.restored);
+
+        // Keys arriving while a given frame is shown.
+        let mut d = NullDisplay {
+            typed_at_frame: Some((2, b"k".to_vec())),
+            ..NullDisplay::new(4, 4)
+        };
+        d.present(&Image::new(4, 4, Rgba::TRANSPARENT)).unwrap();
+        assert_eq!(d.poll_key(), None);
+        d.present(&Image::new(4, 4, Rgba::TRANSPARENT)).unwrap();
+        assert_eq!(d.poll_key(), Some(b'k'));
+        assert!(d.typed_at_frame.is_none(), "typed once");
     }
 
     #[test]

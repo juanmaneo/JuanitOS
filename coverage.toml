@@ -63,21 +63,6 @@ lines = 4
 functions = 1
 regions = 4
 
-[files."crates/jos-greet/src/greeter.rs"]
-lines = 1
-regions = 8
-
-[files."crates/jos-greet/src/gui.rs"]
-regions = 8
-
-[files."crates/jos-greet/src/main.rs"]
-lines = 6
-functions = 1
-regions = 11
-
-[files."crates/jos-greet/src/ui.rs"]
-regions = 4
-
 [files."crates/jos-install/src/disks.rs"]
 lines = 2
 regions = 6
