@@ -311,7 +311,7 @@ impl Qube {
     }
 
     pub fn to_toml(&self) -> Result<String> {
-        Ok(toml::to_string_pretty(self)?)
+        toml::to_string_pretty(self).map_err(Error::from)
     }
 
     pub fn is_template(&self) -> bool {
@@ -596,19 +596,17 @@ impl QubeStore {
 
     pub fn save(&self, q: &Qube) -> Result<()> {
         validate_name(&q.name)?;
+        let path = self.path_for(&q.name);
         if let Some(overlay) = &self.overlay {
-            let toml = q.to_toml()?;
-            println!(
-                "+ write {} ({} bytes)",
-                self.path_for(&q.name).display(),
-                toml.len()
-            );
-            overlay.borrow_mut().insert(q.name.clone(), Some(q.clone()));
-            return Ok(());
+            return q.to_toml().map(|toml| {
+                println!("+ write {} ({} bytes)", path.display(), toml.len());
+                overlay.borrow_mut().insert(q.name.clone(), Some(q.clone()));
+            });
         }
-        fs::create_dir_all(&self.dir)?;
-        fs::write(self.path_for(&q.name), q.to_toml()?)?;
-        Ok(())
+        fs::create_dir_all(&self.dir)
+            .map_err(Error::from)
+            .and_then(|()| q.to_toml())
+            .and_then(|toml| fs::write(&path, toml).map_err(Error::from))
     }
 
     pub fn remove(&self, name: &str) -> Result<()> {
@@ -631,14 +629,17 @@ impl QubeStore {
 
     /// All qubes, sorted by name. A missing directory yields an empty list.
     pub fn list(&self) -> Result<Vec<Qube>> {
-        let entries = match fs::read_dir(&self.dir) {
-            Ok(rd) => rd.collect::<Vec<_>>(),
+        let paths = fs::read_dir(&self.dir).and_then(|rd| {
+            rd.map(|entry| entry.map(|e| e.path()))
+                .collect::<std::io::Result<Vec<PathBuf>>>()
+        });
+        let paths = match paths {
+            Ok(paths) => paths,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
         let mut qubes = Vec::new();
-        for entry in entries {
-            let path = entry?.path();
+        for path in paths {
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
             }
@@ -819,7 +820,11 @@ mod tests {
         let store = QubeStore::new(&dir);
         assert!(store.list().unwrap().is_empty());
         assert!(!store.exists("work"));
-        assert!(matches!(store.get("work"), Err(Error::QubeNotFound(_))));
+        let not_found = |r: Result<()>| r.unwrap_err().to_string();
+        assert_eq!(
+            not_found(store.get("work").map(drop)),
+            "qube not found: work"
+        );
 
         let q = Qube::new("work", QubeKind::App, OsType::Freebsd);
         store.save(&q).unwrap();
@@ -833,7 +838,24 @@ mod tests {
 
         store.remove("work").unwrap();
         assert!(!store.exists("work"));
-        assert!(matches!(store.remove("work"), Err(Error::QubeNotFound(_))));
+        assert_eq!(not_found(store.remove("work")), "qube not found: work");
+
+        // Invalid names, files that are not definitions, unreadable ones.
+        assert!(store.get("Bad Name").is_err());
+        assert!(store
+            .save(&Qube::new("Bad Name", QubeKind::App, OsType::Freebsd))
+            .is_err());
+        assert!(Qube::from_toml(&q.to_toml().unwrap().replace("\"work\"", "\"Bad\"")).is_err());
+        fs::write(dir.join("notes.txt"), "not a qube").unwrap();
+        assert_eq!(store.list().unwrap().len(), 1, "only abc.toml");
+        fs::create_dir_all(dir.join("work.toml")).unwrap();
+        assert!(store.get("work").is_err(), "a directory");
+        assert!(store.list().is_err());
+        assert!(store.save(&q).is_err(), "cannot write over a directory");
+        let file = dir.join("notes.txt");
+        assert!(QubeStore::new(&file).list().is_err(), "not a directory");
+        assert!(QubeStore::new(file.join("sub")).save(&q).is_err());
+        assert!(load_global_config(Some(&dir)).is_err(), "a directory");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -855,8 +877,14 @@ mod tests {
 
         let store = QubeStore::dry_run(&dir);
         assert_eq!(store.get("old").unwrap(), old);
-        assert!(matches!(store.get("new"), Err(Error::QubeNotFound(_))));
-        assert!(matches!(store.remove("new"), Err(Error::QubeNotFound(_))));
+        assert_eq!(
+            store.get("new").unwrap_err().to_string(),
+            "qube not found: new"
+        );
+        assert_eq!(
+            store.remove("new").unwrap_err().to_string(),
+            "qube not found: new"
+        );
 
         let new = Qube::new("new", QubeKind::App, OsType::Linux);
         store.save(&new).unwrap();
@@ -872,7 +900,10 @@ mod tests {
 
         store.remove("old").unwrap();
         assert!(!store.exists("old"));
-        assert!(matches!(store.get("old"), Err(Error::QubeNotFound(_))));
+        assert_eq!(
+            store.get("old").unwrap_err().to_string(),
+            "qube not found: old"
+        );
         assert!(dir.join("old.toml").is_file());
         let names: Vec<String> = store.list().unwrap().into_iter().map(|q| q.name).collect();
         assert_eq!(names, vec!["keep", "new"]);

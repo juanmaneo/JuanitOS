@@ -157,11 +157,9 @@ impl<'a> Events<'a> {
     pub fn wait(&mut self, timeout: Duration) -> Vec<Event> {
         let deadline = Instant::now() + timeout;
         if let Some(last) = self.last_wake {
-            let now = Instant::now();
-            let earliest = last + SPACING;
-            if earliest > now {
-                std::thread::sleep((earliest - now).min(timeout));
-            }
+            // Zero when the last wake-up is long enough ago.
+            let pause = (last + SPACING).saturating_duration_since(Instant::now());
+            std::thread::sleep(pause.min(timeout));
         }
         let mut batch = Vec::new();
         loop {
@@ -287,12 +285,10 @@ mod tests {
             line: line.into(),
         };
         assert_eq!(lines, vec![work("REQUEST 1"), work("REQUEST 2")]);
-        // The cursor is at EOF: the reader reports the port closed, and
-        // the next wait sees it (a timeout, nothing to deliver).
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !ev.connected().is_empty() && Instant::now() < deadline {
-            assert!(ev.wait(Duration::from_millis(50)).is_empty());
-        }
+        // The cursor is at EOF: the reader reports the port closed right
+        // after the lines, and a wait takes the report in (then times out,
+        // nothing to deliver).
+        assert!(ev.wait(Duration::from_secs(2)).is_empty());
         assert!(ev.connected().is_empty());
         // ... and it gets dialed again.
         assert_eq!(ev.connect(["work"]), vec!["work".to_string()]);
@@ -319,15 +315,12 @@ mod tests {
         });
         let mut ev = Events::with_dialer(&cfg, dial);
         ev.connect(["web"]);
-        let first = ev.wait(Duration::from_secs(5));
-        assert!(
-            !first.is_empty() && first.len() <= MAX_BATCH,
-            "{}",
-            first.len()
-        );
+        let first = ev.wait(Duration::from_secs(5)).len();
+        assert!(first > 0 && first <= MAX_BATCH, "{first}");
         let t = Instant::now();
         let _ = ev.wait(Duration::from_secs(5));
-        assert!(t.elapsed() >= SPACING, "{:?}", t.elapsed());
+        let elapsed = t.elapsed();
+        assert!(elapsed >= SPACING, "{elapsed:?}");
     }
 
     #[cfg(unix)]

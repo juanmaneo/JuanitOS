@@ -102,9 +102,7 @@ impl DistManifest {
     }
 
     pub fn read(path: &Path) -> Result<Self> {
-        let mut text = String::new();
-        BufReader::new(File::open(path)?).read_to_string(&mut text)?;
-        Ok(Self::parse(&text))
+        Ok(Self::parse(&std::fs::read_to_string(path)?))
     }
 
     pub fn expected(&self, file: &str) -> Option<(&str, u64)> {
@@ -172,11 +170,11 @@ pub struct ReleaseInfo {
 
 impl ReleaseInfo {
     pub fn to_toml(&self) -> Result<String> {
-        Ok(toml::to_string_pretty(self)?)
+        toml::to_string_pretty(self).map_err(Error::from)
     }
 
     pub fn from_toml(text: &str) -> Result<Self> {
-        Ok(toml::from_str(text)?)
+        toml::from_str(text).map_err(Error::from)
     }
 }
 
@@ -216,6 +214,33 @@ src.txz\t789\t100\tsrc\t\"System source tree\"\toff\n";
         std::fs::write(dir.join("x.txz"), b"tampered").unwrap();
         assert!(parsed.verify(&dir, "x.txz").is_err());
         assert!(parsed.verify(&dir, "missing").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn odd_manifests_and_unreadable_files() {
+        assert!(parse_freebsd_manifest("single-field\n").is_empty());
+        let m = DistManifest::parse("abc 12\nabc twelve file\nabc 12 ok.txz\n");
+        assert_eq!(m.entries, [("abc".into(), 12, "ok.txz".into())]);
+
+        let dir = std::env::temp_dir().join(format!("jos-release-io-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let missing = dir.join("missing");
+        assert!(sha256_file(&missing).is_err());
+        assert!(sha256_file(&dir.join("sub")).is_err(), "a directory");
+        assert!(DistManifest::read(&missing).is_err());
+        assert!(DistManifest::verify_sha256(&missing, "x").is_err());
+        let mut m = DistManifest::default();
+        m.add("x".into(), 1, "missing".into());
+        let sub = std::fs::metadata(dir.join("sub")).unwrap().len();
+        m.add("x".into(), sub, "sub".into());
+        assert!(m.verify(&dir, "missing").is_err());
+        assert!(
+            m.verify(&dir, "sub").is_err(),
+            "listed, the right size, unreadable"
+        );
+        assert!(ReleaseInfo::from_toml("version = [").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

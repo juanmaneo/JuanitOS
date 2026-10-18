@@ -118,18 +118,14 @@ pub fn parse(id: &str, text: &str) -> Option<Outcome> {
     let marker = format!("END {id} ");
     // At the very start (nothing was printed, not even the daemon's
     // newline yet) or at the start of a line.
-    let (body_end, marker_at) = if text.starts_with(&marker) {
-        (0, 0)
-    } else {
-        let at = text.find(&format!("\n{marker}"))?;
-        (at, at + 1)
+    let (body, after) = match text.strip_prefix(&marker) {
+        Some(after) => ("", after),
+        None => text.split_once(&format!("\n{marker}"))?,
     };
-    let after = text.get(marker_at + marker.len()..)?;
-    let line_end = after.find('\n')?;
-    let status = after.get(..line_end)?.trim().parse().ok();
+    let (status, _) = after.split_once('\n')?;
     Some(Outcome {
-        output: text.get(..body_end)?.to_string(),
-        status,
+        output: body.to_string(),
+        status: status.trim().parse().ok(),
     })
 }
 
@@ -141,8 +137,7 @@ pub fn handshake<D: Read + Write>(
     timeout: Duration,
     poll: &impl Fn(&mut D) -> std::io::Result<Vec<u8>>,
 ) -> std::io::Result<bool> {
-    dev.write_all(ping(id).as_bytes())?;
-    dev.flush()?;
+    send(dev, &ping(id))?;
     let mut buf = Vec::new();
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -169,8 +164,7 @@ pub fn run<D: Read + Write>(
     timeout: Duration,
     poll: &impl Fn(&mut D) -> std::io::Result<Vec<u8>>,
 ) -> std::io::Result<Outcome> {
-    dev.write_all(request(id, user, command).as_bytes())?;
-    dev.flush()?;
+    send(dev, &request(id, user, command))?;
     let mut buf = Vec::new();
     let deadline = Instant::now() + timeout;
     loop {
@@ -192,6 +186,10 @@ pub fn run<D: Read + Write>(
     }
 }
 
+fn send(dev: &mut impl Write, line: &str) -> std::io::Result<()> {
+    dev.write_all(line.as_bytes()).and_then(|()| dev.flush())
+}
+
 /// dom0-side housekeeping for the channel.
 pub struct Agent<'a> {
     runner: &'a dyn Runner,
@@ -209,16 +207,13 @@ impl<'a> Agent<'a> {
         if !q.os.has_agent() {
             return Ok(());
         }
+        let (agent, events) = (
+            self.cfg.agent_socket(&q.name),
+            self.cfg.events_socket(&q.name),
+        );
         self.runner
-            .run_checked("mkdir", &["-p", &self.cfg.run_dir])?;
-        self.runner.run_checked(
-            "rm",
-            &[
-                "-f",
-                &self.cfg.agent_socket(&q.name),
-                &self.cfg.events_socket(&q.name),
-            ],
-        )?;
+            .run_checked("mkdir", &["-p", &self.cfg.run_dir])
+            .and_then(|_| self.runner.run_checked("rm", &["-f", &agent, &events]))?;
         Ok(())
     }
 
@@ -233,7 +228,7 @@ impl<'a> Agent<'a> {
 mod tests {
     use super::*;
     use crate::config::{OsType, QubeKind};
-    use crate::sys::MockRunner;
+    use crate::sys::{CmdOutput, MockRunner};
 
     #[test]
     fn device_and_socket() {
@@ -296,9 +291,12 @@ mod tests {
 
     /// In-memory stream: what the host writes is recorded, what it reads
     /// comes from a script of chunks.
+    #[derive(Default)]
     struct Fake {
         written: Vec<u8>,
         chunks: std::collections::VecDeque<Vec<u8>>,
+        /// Writes fail (the guest went away).
+        broken: bool,
     }
 
     impl Read for Fake {
@@ -316,6 +314,9 @@ mod tests {
 
     impl Write for Fake {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.broken {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
             self.written.extend_from_slice(buf);
             Ok(buf.len())
         }
@@ -324,20 +325,30 @@ mod tests {
         }
     }
 
+    /// The fake only ever fails a read with `WouldBlock`: nothing yet.
     fn poll(f: &mut Fake) -> std::io::Result<Vec<u8>> {
         let mut buf = [0u8; 64];
-        match f.read(&mut buf) {
-            Ok(n) => Ok(buf[..n].to_vec()),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
+        Ok(f.read(&mut buf)
+            .map(|n| buf[..n].to_vec())
+            .unwrap_or_default())
+    }
+
+    #[test]
+    fn a_channel_that_cannot_be_written_is_an_error() {
+        let mut dev = Fake {
+            broken: true,
+            ..Fake::default()
+        };
+        let t = Duration::from_secs(1);
+        assert!(handshake(&mut dev, "9", t, &poll).is_err());
+        assert!(run(&mut dev, "9", "user", "true", t, &poll).is_err());
     }
 
     #[test]
     fn handshake_and_run_over_a_stream() {
         let mut dev = Fake {
-            written: Vec::new(),
             chunks: vec![b"PO".to_vec(), b"NG 9\n".to_vec()].into(),
+            ..Fake::default()
         };
         assert!(handshake(&mut dev, "9", Duration::from_secs(1), &poll).unwrap());
         assert_eq!(dev.written, b"PING 9\n");
@@ -361,8 +372,8 @@ mod tests {
     #[test]
     fn silence_is_no_agent_or_a_timeout() {
         let mut dev = Fake {
-            written: Vec::new(),
             chunks: vec![b"noise\n".to_vec()].into(),
+            ..Fake::default()
         };
         assert!(!handshake(&mut dev, "9", Duration::from_millis(60), &poll).unwrap());
         let err = run(
@@ -396,5 +407,11 @@ mod tests {
         a.prepare(&rx).unwrap();
         assert!(m.calls().is_empty());
         assert!(!a.available(&rx));
+
+        // Either command failing fails the preparation.
+        for program in ["mkdir", "rm"] {
+            let m = MockRunner::new().respond(program, &[], CmdOutput::failed(1, "denied"));
+            assert!(Agent::new(&m, &cfg).prepare(&q).is_err(), "{program}");
+        }
     }
 }

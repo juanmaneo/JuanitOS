@@ -213,14 +213,14 @@ impl<'a> Share<'a> {
         let inbox = format!("{dir}/{INBOX}");
         let outbox = format!("{dir}/{OUTBOX}");
         let requests = format!("{dir}/{REQUESTS}");
-        self.runner
-            .run_checked("mkdir", &["-p", &inbox, &outbox, &requests])?;
-        self.runner
-            .run_checked("chmod", &["1777", &inbox, &outbox])?;
-        self.runner.run_checked("chmod", &["777", &requests])?;
         let name_file = format!("{dir}/{NAME_FILE}");
-        self.runner
-            .run_with_input_checked("tee", &[&name_file], &format!("{}\n", q.name))?;
+        let r = self.runner;
+        r.run_checked("mkdir", &["-p", &inbox, &outbox, &requests])
+            .and_then(|_| r.run_checked("chmod", &["1777", &inbox, &outbox]))
+            .and_then(|_| r.run_checked("chmod", &["777", &requests]))
+            .and_then(|_| {
+                r.run_with_input_checked("tee", &[&name_file], &format!("{}\n", q.name))
+            })?;
         Ok(())
     }
 
@@ -261,19 +261,18 @@ impl<'a> Share<'a> {
         }
         let base = src.basename()?;
         let target = self.open_inbox(&dst.name, src.label(), &base)?;
+        let r = self.runner;
         match src {
             Source::Qube { name, path } => {
                 let staged = format!("{}/{base}", self.outbox(name));
-                self.runner.run_checked("rm", &["-rf", &staged])?;
-                run_in_qube(name, &guest_export_command(path, &base))?;
-                self.runner.run_checked("mv", &[&staged, &target])?;
+                r.run_checked("rm", &["-rf", &staged])
+                    .and_then(|_| run_in_qube(name, &guest_export_command(path, &base)))
+                    .and_then(|()| r.run_checked("mv", &[&staged, &target]))
             }
-            Source::Dom0 { path } => {
-                self.runner.run_checked("cp", &["-RL", path, &target])?;
-                self.runner
-                    .run_checked("chmod", &["-R", "a+rwX", &target])?;
-            }
-        }
+            Source::Dom0 { path } => r
+                .run_checked("cp", &["-RL", path, &target])
+                .and_then(|_| r.run_checked("chmod", &["-R", "a+rwX", &target])),
+        }?;
         Ok(Delivery {
             dom0_path: target,
             guest_path: guest_inbox_path(src.label(), &base),
@@ -297,9 +296,12 @@ impl<'a> Share<'a> {
                 "{src}: source and destination are the same qube"
             )));
         }
-        let target = self.open_inbox(&dst.name, src, base)?;
         let staged = format!("{}/{base}", self.outbox(src));
-        self.runner.run_checked("mv", &[&staged, &target])?;
+        let target = self.open_inbox(&dst.name, src, base).and_then(|target| {
+            self.runner
+                .run_checked("mv", &[&staged, &target])
+                .map(|_| target)
+        })?;
         Ok(Delivery {
             dom0_path: target,
             guest_path: guest_inbox_path(src, base),
@@ -310,10 +312,10 @@ impl<'a> Share<'a> {
     /// (request denied or failed). The guest cannot do it itself (see the
     /// module docs on deletion through 9p).
     pub fn discard_export(&self, src: &str, base: &str) -> Result<()> {
-        crate::config::validate_name(src)?;
-        validate_basename(base)?;
         let staged = format!("{}/{base}", self.outbox(src));
-        self.runner.run_checked("rm", &["-rf", &staged])?;
+        crate::config::validate_name(src)
+            .and_then(|()| validate_basename(base))
+            .and_then(|()| self.runner.run_checked("rm", &["-rf", &staged]))?;
         Ok(())
     }
 
@@ -322,10 +324,11 @@ impl<'a> Share<'a> {
     fn open_inbox(&self, dst: &str, label: &str, base: &str) -> Result<String> {
         let inbox = self.inbox(dst, label);
         let target = format!("{inbox}/{base}");
-        self.runner.run_checked("mkdir", &["-p", &inbox])?;
-        self.runner.run_checked("chmod", &["777", &inbox])?;
-        self.runner.run_checked("rm", &["-rf", &target])?;
-        Ok(target)
+        let r = self.runner;
+        r.run_checked("mkdir", &["-p", &inbox])
+            .and_then(|_| r.run_checked("chmod", &["777", &inbox]))
+            .and_then(|_| r.run_checked("rm", &["-rf", &target]))
+            .map(|_| target)
     }
 }
 
@@ -477,12 +480,7 @@ mod tests {
         let dst = Qube::new("jail", QubeKind::App, OsType::Freebsd);
         let src = Source::parse("work:/etc/motd").unwrap();
         let mut ran: Vec<(String, String)> = Vec::new();
-        let d = share
-            .copy(&src, &dst, &mut |q, c| {
-                ran.push((q.into(), c.into()));
-                Ok(())
-            })
-            .unwrap();
+        let d = share.copy(&src, &dst, &mut recorder(&mut ran)).unwrap();
         assert_eq!(ran.len(), 1);
         assert_eq!(ran[0].0, "work");
         assert!(ran[0].1.ends_with("cp -RL /etc/motd /mnt/jos/out/motd"));
@@ -507,11 +505,9 @@ mod tests {
         let share = Share::new(&runner, &cfg);
         let dst = Qube::new("gpu", QubeKind::Gpu, OsType::Linux);
         let src = Source::parse("/root/data set/").unwrap();
-        let d = share
-            .copy(&src, &dst, &mut |_, _| {
-                panic!("no guest command for dom0 sources")
-            })
-            .unwrap();
+        let mut ran = Vec::new();
+        let d = share.copy(&src, &dst, &mut recorder(&mut ran)).unwrap();
+        assert!(ran.is_empty(), "no guest command for dom0 sources");
         assert_eq!(
             runner.calls(),
             vec![
@@ -530,7 +526,8 @@ mod tests {
         let runner = MockRunner::new();
         let cfg = GlobalConfig::default();
         let share = Share::new(&runner, &cfg);
-        let mut never = |_: &str, _: &str| -> Result<()> { panic!("not reached") };
+        let mut ran = Vec::new();
+        let mut never = recorder(&mut ran);
         let redox = Qube::new("rx", QubeKind::App, OsType::Redox);
         let src = Source::parse("work:/etc/motd").unwrap();
         assert!(share.copy(&src, &redox, &mut never).is_err());
@@ -540,6 +537,38 @@ mod tests {
         let bad = Source::parse("work:/").unwrap();
         assert!(share.copy(&bad, &redox, &mut never).is_err());
         assert!(runner.calls().is_empty());
+        drop(never);
+        assert!(ran.is_empty());
+    }
+
+    /// A `run_in_qube` that records what it was asked to run.
+    fn recorder(ran: &mut Vec<(String, String)>) -> impl FnMut(&str, &str) -> Result<()> + '_ {
+        move |q, c| {
+            ran.push((q.into(), c.into()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dom0_commands_failing() {
+        let cfg = GlobalConfig::default();
+        let jail = Qube::new("jail", QubeKind::App, OsType::Freebsd);
+        let refusing =
+            |program: &str| MockRunner::new().respond(program, &[], CmdOutput::failed(1, "no"));
+        let m = refusing("mkdir");
+        let mut ran = Vec::new();
+        let src = Source::parse("work:/etc/motd").unwrap();
+        assert!(Share::new(&m, &cfg)
+            .copy(&src, &jail, &mut recorder(&mut ran))
+            .is_err());
+        assert!(Share::new(&m, &cfg).deliver("work", "x", &jail).is_err());
+        let m = refusing("rm");
+        let share = Share::new(&m, &cfg);
+        assert!(share.destroy("work").is_err());
+        assert!(share.discard_export("work", "x").is_err());
+        assert!(share.discard_export("bad name", "x").is_err());
+        assert!(share.discard_export("work", "../x").is_err());
+        assert!(ran.is_empty());
     }
 
     #[test]
@@ -564,8 +593,9 @@ mod tests {
         let share = Share::new(&runner, &cfg);
         let dst = Qube::new("jail", QubeKind::App, OsType::Freebsd);
         let src = Source::parse("/missing").unwrap();
+        let mut ran = Vec::new();
         let err = share
-            .copy(&src, &dst, &mut |_, _| Ok(()))
+            .copy(&src, &dst, &mut recorder(&mut ran))
             .unwrap_err()
             .to_string();
         assert!(err.contains("no such file"), "{err}");

@@ -104,23 +104,24 @@ impl fmt::Display for Step {
                 )
             }
             Step::Create(q) => {
-                write!(f, "create {} ({} qube, {}", q.name, q.kind, q.os)?;
+                let mut s = format!("create {} ({} qube, {}", q.name, q.kind, q.os);
                 if let Some(t) = &q.template {
-                    write!(f, ", from {t}")?;
+                    s.push_str(&format!(", from {t}"));
                 }
                 if let Some(k) = &q.kernel {
-                    write!(f, ", booting {k}")?;
+                    s.push_str(&format!(", booting {k}"));
                 }
                 if !q.pci_passthrough.is_empty() {
-                    write!(f, ", PCI {}", pci::addr_list(&q.pci_passthrough))?;
+                    s.push_str(&format!(", PCI {}", pci::addr_list(&q.pci_passthrough)));
                 }
                 if let Some(u) = &q.uplink {
-                    write!(f, ", bridged to {u}")?;
+                    s.push_str(&format!(", bridged to {u}"));
                 }
                 if q.autostart {
-                    write!(f, ", autostart")?;
+                    s.push_str(", autostart");
                 }
-                write!(f, ")")
+                s.push(')');
+                f.write_str(&s)
             }
             Step::ReservePci(addrs) => write!(
                 f,
@@ -189,9 +190,8 @@ pub fn plan(host: &Host, existing: &[Qube], opts: &SetupOptions) -> Result<Plan>
         if has(t) || recipes.iter().any(|r| r.name == t) {
             continue;
         }
-        let r = template::find(t)
-            .ok_or_else(|| Error::Other(format!("no recipe builds template {t}")))?;
-        recipes.push(r);
+        // Every template the plan clones from has a recipe (tested).
+        recipes.extend(template::find(t));
     }
     let mut steps = Vec::new();
     if !recipes.is_empty() {
@@ -249,10 +249,8 @@ fn clone_of(name: &str, kind: QubeKind, template_name: &str) -> Qube {
     let recipe = template::find(template_name);
     let mut q = Qube::new(name, kind, recipe.map_or(OsType::Freebsd, |r| r.os));
     q.template = Some(template_name.to_string());
-    if let Some(r) = recipe {
-        q.cpus = r.cpus;
-        q.memory_mb = r.memory_mb;
-    }
+    q.cpus = recipe.map_or(q.cpus, |r| r.cpus);
+    q.memory_mb = recipe.map_or(q.memory_mb, |r| r.memory_mb);
     q
 }
 
@@ -387,6 +385,16 @@ pub fn reserve(runner: &dyn Runner, addrs: &[PciAddr]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::sys::{CmdOutput, MockRunner};
+
+    #[test]
+    fn every_template_the_plan_uses_has_a_recipe() {
+        for t in [NET_TEMPLATE, GPU_TEMPLATE] {
+            assert!(template::find(t).is_some(), "{t}");
+        }
+        let q = clone_of("x", QubeKind::App, "no-such-recipe");
+        assert_eq!(q.os, OsType::Freebsd);
+        assert_eq!(q.cpus, Qube::new("x", QubeKind::App, OsType::Freebsd).cpus);
+    }
 
     fn dev(addr: &str, driver: &str, vendor: u16, class: u32) -> PciDevice {
         PciDevice {
@@ -597,9 +605,11 @@ mod tests {
     fn a_nic_reserved_at_install_time_goes_to_sys_net() {
         let mut h = host();
         h.uplink = None;
-        if let Some(d) = h.devices.iter_mut().find(|d| d.addr == addr("5/0/0")) {
-            d.driver = "ppt2".into();
-        }
+        h.devices
+            .iter_mut()
+            .find(|d| d.addr == addr("5/0/0"))
+            .unwrap()
+            .driver = "ppt2".into();
         h.pptdevs.push(addr("5/0/0"));
         // No network left in the dom0 to download the templates...
         let err = plan(&h, &[], &SetupOptions::default())
@@ -676,9 +686,11 @@ mod tests {
         // The card is reserved but its audio function is not: it follows
         // the card and gets reserved too.
         let mut devices = host().devices;
-        if let Some(d) = devices.iter_mut().find(|d| d.addr == addr("1/0/1")) {
-            d.driver = "hdac1".into();
-        }
+        devices
+            .iter_mut()
+            .find(|d| d.addr == addr("1/0/1"))
+            .unwrap()
+            .driver = "hdac1".into();
         assert_eq!(gpu_devices(&devices), [addr("1/0/0"), addr("1/0/1")]);
         let h = Host {
             devices,

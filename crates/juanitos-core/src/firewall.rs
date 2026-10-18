@@ -266,6 +266,39 @@ mod tests {
         let mut isolated = Qube::new("iso", QubeKind::App, OsType::Freebsd);
         assign_address(&mut isolated, &[], None).unwrap();
         assert!(isolated.ip.is_none());
+
+        // A MAC chosen earlier is kept.
+        let mut kept = Qube::new("kept", QubeKind::App, OsType::Freebsd);
+        kept.mac = Some("02:4a:00:00:00:01".into());
+        assign_address(&mut kept, &[], Some("sys-firewall")).unwrap();
+        assert_eq!(kept.mac.as_deref(), Some("02:4a:00:00:00:01"));
+
+        // Every client address taken.
+        let base = u32::from(CLIENT_NET.addr);
+        let all: Vec<Qube> = (FIRST_CLIENT_HOST..CLIENT_NET.size() as u32 - 1)
+            .map(|host| {
+                let mut q = Qube::new("q", QubeKind::App, OsType::Freebsd);
+                q.ip = Some(Ipv4Addr::from(base + host));
+                q
+            })
+            .collect();
+        let mut late = Qube::new("late", QubeKind::App, OsType::Freebsd);
+        let err = assign_address(&mut late, &all, Some("sys-firewall")).unwrap_err();
+        assert!(err.to_string().contains("no free address"), "{err}");
+    }
+
+    #[test]
+    fn rendering_skips_what_has_no_address() {
+        let fw = Qube::new("fw", QubeKind::Firewall, OsType::Unikernel);
+        let mut bare = Qube::new("bare", QubeKind::App, OsType::Freebsd);
+        bare.netvm = Some("fw".into());
+        let text = render_config(&fw, &[&bare]);
+        assert!(
+            !text.contains("gateway") && !text.contains("bare"),
+            "{text}"
+        );
+        let err = parse_config("policy ghost deny\n").unwrap_err();
+        assert!(err.to_string().contains("unknown client ghost"), "{err}");
     }
 
     #[test]

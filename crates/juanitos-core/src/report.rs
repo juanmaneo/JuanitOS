@@ -331,6 +331,7 @@ mountroot>
 
     #[test]
     fn a_bare_host_still_gets_a_report() {
+        assert!(NoTools.run_with_input("tee", &[], "").is_err());
         let r = build(&NoTools, &[], &|_| None);
         assert!(r.contains("==== uname -a ====\n(not run: running uname: not found)"));
         assert!(r.contains(&format!(

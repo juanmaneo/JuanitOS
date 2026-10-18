@@ -282,6 +282,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn malformed_addresses_and_lines() {
+        for bad in [
+            "0000:zz:00.0",
+            "0000:01:zz.0",
+            "0000:01:00.z",
+            "0000::00.0",
+            "1/0/0.5",
+            "1/x/0",
+            "1/0/x",
+        ] {
+            assert!(bad.parse::<PciAddr>().is_err(), "{bad}");
+        }
+        use serde::de::value::{Error as DeError, U32Deserializer};
+        assert!(PciAddr::deserialize(U32Deserializer::<DeError>::new(1)).is_err());
+
+        // Lines that are not devices are skipped; a selector without the
+        // fields still names a device.
+        let text = "\n    no equals sign\nnocolon\nnoat:1:0:0:  class=0x030000\n\
+                    none0@pci0:1:0:0:\nbad0@pci0:x:0:0:  class=0x0\n\
+                    vgapci0@pci0:2:0:0:  junk class=0x030000\n";
+        let devs = parse_pciconf(text);
+        let addrs: Vec<String> = devs.iter().map(|d| d.addr.to_string()).collect();
+        assert_eq!(addrs, ["1/0/0", "2/0/0"]);
+        assert_eq!(devs[0].class, 0);
+        assert!(devs[1].is_gpu());
+    }
+
+    #[test]
     fn parse_all_forms() {
         let want = PciAddr::new(1, 0, 0);
         assert_eq!("1/0/0".parse::<PciAddr>().unwrap(), want);

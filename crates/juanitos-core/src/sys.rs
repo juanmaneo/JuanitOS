@@ -68,7 +68,8 @@ pub trait Runner: Send + Sync {
         args: &[&str],
         input: &str,
     ) -> Result<CmdOutput> {
-        check(program, args, self.run_with_input(program, args, input)?)
+        self.run_with_input(program, args, input)
+            .and_then(|out| check(program, args, out))
     }
 }
 
@@ -141,14 +142,18 @@ impl Runner for RealRunner {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(io_error(program))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(input.as_bytes())
-                .map_err(io_error(program))?;
-        }
-        Ok(convert(
-            child.wait_with_output().map_err(io_error(program))?,
-        ))
+        // A program that exits without reading all its input makes the
+        // write fail (EPIPE) or not, depending on timing: its exit status
+        // is what tells whether it did its job, so the write's own result
+        // is left out. Dropping the pipe here is the end of input.
+        let _ = child
+            .stdin
+            .take()
+            .map(|mut stdin| stdin.write_all(input.as_bytes()));
+        child
+            .wait_with_output()
+            .map(convert)
+            .map_err(io_error(program))
     }
 }
 
@@ -229,6 +234,8 @@ impl Runner for DryRunner {
 #[derive(Debug, Default)]
 pub struct MockRunner {
     responses: HashMap<String, Vec<(Vec<String>, CmdOutput)>>,
+    /// Programs that cannot be started at all (not installed).
+    missing: Vec<String>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -247,6 +254,13 @@ impl MockRunner {
         self
     }
 
+    /// Make `program` fail to start, like a tool that is not installed:
+    /// [`Runner::run`] returns an error instead of an exit status.
+    pub fn missing(mut self, program: &str) -> Self {
+        self.missing.push(program.to_string());
+        self
+    }
+
     /// Every command executed, as shell-joined strings.
     pub fn calls(&self) -> Vec<String> {
         lock_log(&self.calls).clone()
@@ -256,6 +270,9 @@ impl MockRunner {
 impl Runner for MockRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput> {
         lock_log(&self.calls).push(shell_join(program, args));
+        if self.missing.iter().any(|m| m == program) {
+            return Err(io_error(program)(std::io::ErrorKind::NotFound.into()));
+        }
 
         let best = self
             .responses
@@ -332,13 +349,14 @@ mod tests {
     fn run_checked_fails_on_nonzero() {
         let m = MockRunner::new().respond("zfs", &[], CmdOutput::failed(1, "boom"));
         let err = m.run_checked("zfs", &["destroy"]).unwrap_err();
-        match err {
-            Error::Command { code, stderr, .. } => {
-                assert_eq!(code, Some(1));
-                assert_eq!(stderr, "boom");
-            }
-            other => panic!("unexpected error {other:?}"),
-        }
+        assert_eq!(
+            err.to_string(),
+            "command `zfs destroy` failed (exit code Some(1)): boom"
+        );
+        let err = m
+            .run_with_input_checked("zfs", &["destroy"], "")
+            .unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
     }
 
     #[cfg(unix)]
@@ -366,16 +384,12 @@ mod tests {
             r.run_with_input("jos-no-such-tool", &[], "x"),
         ];
         for e in errors {
-            match e {
-                Err(Error::Io(e)) => {
-                    assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
-                    assert!(
-                        e.to_string().starts_with("running jos-no-such-tool: "),
-                        "{e}"
-                    );
-                }
-                other => panic!("{other:?}"),
-            }
+            let e = e.unwrap_err();
+            let kind = std::error::Error::source(&e)
+                .and_then(|s| s.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind);
+            assert_eq!(kind, Some(std::io::ErrorKind::NotFound), "{e}");
+            assert!(e.to_string().contains("running jos-no-such-tool: "), "{e}");
         }
     }
 

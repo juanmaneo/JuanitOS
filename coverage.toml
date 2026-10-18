@@ -104,17 +104,16 @@ functions = 2
 regions = 16
 
 [files."crates/juanitos-core/src/agent.rs"]
-lines = 2
-regions = 13
+regions = 2
 
 [files."crates/juanitos-core/src/bhyve.rs"]
 lines = 14
 functions = 1
-regions = 44
+regions = 42
 
 [files."crates/juanitos-core/src/config.rs"]
-lines = 6
-regions = 27
+lines = 2
+regions = 5
 
 [files."crates/juanitos-core/src/console.rs"]
 lines = 4
@@ -124,60 +123,39 @@ regions = 33
 lines = 22
 regions = 38
 
-[files."crates/juanitos-core/src/events.rs"]
-lines = 2
-regions = 10
-
 [files."crates/juanitos-core/src/firewall.rs"]
-lines = 3
-functions = 2
-regions = 8
+regions = 1
 
 [files."crates/juanitos-core/src/fsops.rs"]
 lines = 13
 functions = 1
-regions = 39
+regions = 37
 
 [files."crates/juanitos-core/src/net.rs"]
 lines = 4
 functions = 1
-regions = 33
+regions = 29
 
 [files."crates/juanitos-core/src/pci.rs"]
-lines = 12
-functions = 3
-regions = 18
+regions = 1
 
 [files."crates/juanitos-core/src/release.rs"]
-lines = 5
-regions = 13
-
-[files."crates/juanitos-core/src/report.rs"]
 lines = 3
-functions = 1
-regions = 6
+regions = 3
 
 [files."crates/juanitos-core/src/requests.rs"]
 lines = 11
-regions = 42
-
-[files."crates/juanitos-core/src/setup.rs"]
-lines = 1
-functions = 1
-regions = 11
+regions = 40
 
 [files."crates/juanitos-core/src/share.rs"]
-lines = 4
-functions = 3
-regions = 22
+regions = 1
 
 [files."crates/juanitos-core/src/supervisor.rs"]
-lines = 3
-regions = 7
+lines = 1
+regions = 1
 
 [files."crates/juanitos-core/src/sys.rs"]
-lines = 3
-regions = 9
+regions = 1
 
 [files."crates/juanitos-core/src/template.rs"]
 lines = 8
@@ -185,5 +163,5 @@ functions = 2
 regions = 43
 
 [files."crates/juanitos-core/src/zfs.rs"]
-lines = 7
-regions = 24
+lines = 4
+regions = 8

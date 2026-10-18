@@ -102,8 +102,9 @@ impl<'a> Supervisor<'a> {
             )));
         }
         let pid = pidfile(self.cfg, &q.name);
-        self.fs.mkdir_p(Path::new(&self.cfg.run_dir))?;
-        self.fs.write(&pid, &format!("{}\n", std::process::id()))?;
+        self.fs
+            .mkdir_p(Path::new(&self.cfg.run_dir))
+            .and_then(|()| self.fs.write(&pid, &format!("{}\n", std::process::id())))?;
 
         let result = self.boot_loop(q);
 
@@ -133,15 +134,11 @@ impl<'a> Supervisor<'a> {
             if !exit.wants_restart() {
                 return Ok(Report { exit, boots });
             }
-            if let Some(max) = self.max_restarts {
-                if boots > max {
-                    self.log(&q.name, "restart budget exhausted; not rebooting");
-                    return Ok(Report { exit, boots });
-                }
+            if self.max_restarts.is_some_and(|max| boots > max) {
+                self.log(&q.name, "restart budget exhausted; not rebooting");
+                return Ok(Report { exit, boots });
             }
-            if !self.restart_delay.is_zero() {
-                std::thread::sleep(self.restart_delay);
-            }
+            std::thread::sleep(self.restart_delay);
         }
     }
 
@@ -156,8 +153,9 @@ impl<'a> Supervisor<'a> {
                 let _ = self.runner.run("kill", &["-TERM", &pid.to_string()]);
             }
         }
-        Net::new(self.runner).destroy_taps(name)?;
-        self.fs.remove_file(&pidfile(self.cfg, name))
+        Net::new(self.runner)
+            .destroy_taps(name)
+            .and_then(|()| self.fs.remove_file(&pidfile(self.cfg, name)))
     }
 }
 
@@ -253,10 +251,26 @@ mod tests {
         let m = MockRunner::new().respond("bhyve", &[], CmdOutput::failed(4, "boom"));
         let q = Qube::new("work", QubeKind::App, OsType::Freebsd);
         let err = quiet(false, &m, &cfg).run(&q).unwrap_err();
-        assert!(matches!(err, Error::Command { code: Some(4), .. }));
+        assert!(
+            err.to_string().contains("(exit code Some(4)): boom"),
+            "{err}"
+        );
         assert!(!pidfile(&cfg, "work").exists());
         assert!(m.calls().contains(&"ifconfig tap-work destroy".to_string()));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn no_run_directory_no_boot() {
+        let dir = tmp_run_dir("blocked");
+        let file = dir.join("file");
+        std::fs::write(&file, "").unwrap();
+        let cfg = test_cfg(&file.join("run"));
+        let m = MockRunner::new();
+        let q = Qube::new("work", QubeKind::App, OsType::Freebsd);
+        assert!(quiet(false, &m, &cfg).run(&q).is_err());
+        assert_eq!(m.calls(), Vec::<String>::new(), "nothing run");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
