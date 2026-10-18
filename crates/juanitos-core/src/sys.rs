@@ -184,6 +184,8 @@ fn is_query(program: &str, args: &[&str]) -> bool {
         "ifconfig" => args.len() == 1,
         "route" => args.contains(&"get"),
         "sysrc" => args.contains(&"-n"),
+        // Signal 0 only asks whether the process exists.
+        "kill" => args.first() == Some(&"-0"),
         _ => false,
     }
 }
@@ -416,6 +418,8 @@ mod tests {
         assert!(is_query("gpart", &["show"]));
         assert!(is_query("acpidump", &["-t"]));
         assert!(!is_query("acpidump", &["-o", "/tmp/dsdt"]));
+        assert!(is_query("kill", &["-0", "42"]));
+        assert!(!is_query("kill", &["-TERM", "42"]));
         assert!(!is_query("gpart", &["destroy", "-F", "nda0"]));
         assert!(is_query("mount", &["-p"]));
         assert!(!is_query("mount", &["-t", "msdosfs", "/dev/da1s1", "/mnt"]));

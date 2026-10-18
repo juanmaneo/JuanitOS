@@ -439,8 +439,8 @@ impl App {
             .store
             .dir
             .parent()
-            .map_or_else(|| PathBuf::from(&self.cfg.config_dir), PathBuf::from);
-        requests::policy_path(&config_dir)
+            .unwrap_or(std::path::Path::new(&self.cfg.config_dir));
+        requests::policy_path(config_dir)
     }
 
     fn broker(&self) -> Result<Broker<'_>> {
@@ -507,11 +507,13 @@ impl App {
             }
             RequestsCmd::Approve { qube, id } => {
                 let found = broker.find(&qube, &id)?;
-                report(&found, &broker.settle(&found, Some(Verdict::Allow))?)
+                report(&found, &broker.settle(&found, Some(Verdict::Allow))?);
+                Ok(())
             }
             RequestsCmd::Deny { qube, id } => {
                 let found = broker.find(&qube, &id)?;
-                report(&found, &broker.settle(&found, Some(Verdict::Deny))?)
+                report(&found, &broker.settle(&found, Some(Verdict::Deny))?);
+                Ok(())
             }
         }
     }
@@ -545,7 +547,7 @@ impl App {
             }
             for (found, disposition) in broker.serve_once()? {
                 if disposition != Disposition::Pending || once {
-                    report(&found, &disposition)?;
+                    report(&found, &disposition);
                 }
             }
             if once {
@@ -721,8 +723,8 @@ impl App {
                 bail!("{ip} is already used by {}", o.name);
             }
         }
-        firewall::assign_address(&mut q, &existing, self.cfg.default_netvm.as_deref())?;
-        bhyve::check_vcpus(&q, bhyve::max_vcpus(self.runner.as_ref()))?;
+        firewall::assign_address(&mut q, &existing, self.cfg.default_netvm.as_deref())
+            .and_then(|()| bhyve::check_vcpus(&q, bhyve::max_vcpus(self.runner.as_ref())))?;
 
         if let Some(t) = &q.template {
             let tq = self.store.get(t).context("looking up template")?;
@@ -762,7 +764,8 @@ impl App {
         let clients = firewall::clients_of(&all, &fw.name, self.cfg.default_netvm.as_deref());
         let text = firewall::render_config(fw, &clients);
         let path = PathBuf::from(self.cfg.firewall_config_disk(&fw.name));
-        FsOps::new(self.dry_run).write_bytes(&path, &firewall::config_disk_bytes(&text)?)?;
+        firewall::config_disk_bytes(&text)
+            .and_then(|bytes| FsOps::new(self.dry_run).write_bytes(&path, &bytes))?;
         Ok(())
     }
 
@@ -786,21 +789,21 @@ impl App {
                 println!("{name}: + {rule}");
                 q.firewall.push(rule);
                 self.store.save(&q)?;
-                self.note_restart(&name);
+                self.note_restart(&q);
                 Ok(())
             }
             FirewallCmd::Clear { name } => {
                 let mut q = self.store.get(&name)?;
                 q.firewall.clear();
                 self.store.save(&q)?;
-                self.note_restart(&name);
+                self.note_restart(&q);
                 Ok(())
             }
             FirewallCmd::Policy { name, policy } => {
                 let mut q = self.store.get(&name)?;
                 q.firewall_policy = policy;
                 self.store.save(&q)?;
-                self.note_restart(&name);
+                self.note_restart(&q);
                 Ok(())
             }
             FirewallCmd::Render { name } => {
@@ -817,27 +820,31 @@ impl App {
         }
     }
 
-    fn note_restart(&self, name: &str) {
-        if let Ok(q) = self.store.get(name) {
-            if let Some(fw) = self.vm().effective_netvm(&q) {
-                eprintln!("note: rules apply after `jos stop {fw} && jos start {fw}`");
-            }
+    fn note_restart(&self, q: &Qube) {
+        if let Some(fw) = self.vm().effective_netvm(q) {
+            eprintln!("note: rules apply after `jos stop {fw} && jos start {fw}`");
         }
     }
 
     fn remove(&self, name: &str, force: bool) -> Result<()> {
         let q = self.store.get(name)?;
-        if bhyve::is_running(&self.cfg, name) {
-            if !force {
-                bail!("{name} is running; stop it first or use --force");
-            }
-            self.supervisor().kill(name)?;
+        let running = bhyve::is_running(&self.cfg, name);
+        if running && !force {
+            bail!("{name} is running; stop it first or use --force");
         }
-        self.storage().destroy(&q)?;
-        if q.os.has_share() {
-            self.share().destroy(name)?;
-        }
-        self.store.remove(name)?;
+        // Each step only once the previous one succeeded; the definition
+        // goes last so a failure leaves something to retry.
+        let killed = match running {
+            true => self.supervisor().kill(name),
+            false => Ok(()),
+        };
+        killed
+            .and_then(|()| self.storage().destroy(&q))
+            .and_then(|()| match q.os.has_share() {
+                true => self.share().destroy(name),
+                false => Ok(()),
+            })
+            .and_then(|()| self.store.remove(name))?;
         println!("removed {name}");
         Ok(())
     }
@@ -864,21 +871,19 @@ impl App {
         }
         let timeout = std::time::Duration::from_secs(timeout);
         let mut run_in_qube = |name: &str, command: &str| -> juanitos_core::Result<()> {
-            let q = self.store.get(name)?;
-            let Some(outcome) = self
-                .run_in(&q, None, command, timeout, None, false)
-                .map_err(|e| juanitos_core::Error::Other(format!("{e:#}")))?
-            else {
-                return Ok(());
-            };
-            match outcome.status {
-                Some(0) => Ok(()),
-                Some(code) => Err(juanitos_core::Error::Other(format!(
+            let outcome = self.store.get(name).and_then(|q| {
+                self.run_in(&q, None, command, timeout, None, false)
+                    .map_err(|e| juanitos_core::Error::Other(format!("{e:#}")))
+            })?;
+            // `None`: a dry run, which only printed the command.
+            match outcome.map(|o| (o.status, o.output)) {
+                None | Some((Some(0), _)) => Ok(()),
+                Some((Some(code), output)) => Err(juanitos_core::Error::Other(format!(
                     "{name}: exporting {} failed (exit {code}):\n{}",
                     src.path(),
-                    outcome.output.trim_end()
+                    output.trim_end()
                 ))),
-                None => Err(juanitos_core::Error::Other(format!(
+                Some((None, _)) => Err(juanitos_core::Error::Other(format!(
                     "{name}: could not read the exit status of the export"
                 ))),
             }
@@ -1008,33 +1013,34 @@ impl App {
         let fs = FsOps::new(false);
         fs.mkdir_p(std::path::Path::new(&self.cfg.run_dir))?;
         let log_path = supervisor::logfile(&self.cfg, name);
-        let log = std::fs::OpenOptions::new()
+        let config = self
+            .config_path
+            .iter()
+            .flat_map(|c| [std::ffi::OsStr::new("--config"), c.as_os_str()]);
+        let child = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
-            .with_context(|| format!("opening {}", log_path.display()))?;
-        let log_err = log
-            .try_clone()
-            .with_context(|| format!("opening {}", log_path.display()))?;
-
-        let exe = std::env::current_exe().context("locating the jos binary")?;
-        let mut cmd = std::process::Command::new(exe);
-        if let Some(c) = &self.config_path {
-            cmd.arg("--config").arg(c);
-        }
-        cmd.arg("supervise")
-            .arg(&q.name)
-            .stdin(std::process::Stdio::null())
-            .stdout(log)
-            .stderr(log_err);
-        #[cfg(unix)]
-        {
-            // Own process group: the supervisor must outlive this shell and
-            // not receive its SIGINT/SIGHUP.
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        let child = cmd.spawn().context("spawning supervisor")?;
+            .and_then(|log| log.try_clone().map(|log_err| (log, log_err)))
+            .and_then(|logs| std::env::current_exe().map(|exe| (logs, exe)))
+            .and_then(|((log, log_err), exe)| {
+                let mut cmd = std::process::Command::new(exe);
+                cmd.args(config)
+                    .arg("supervise")
+                    .arg(&q.name)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(log)
+                    .stderr(log_err);
+                #[cfg(unix)]
+                {
+                    // Own process group: the supervisor must outlive this
+                    // shell and not receive its SIGINT/SIGHUP.
+                    use std::os::unix::process::CommandExt;
+                    cmd.process_group(0);
+                }
+                cmd.spawn()
+            })
+            .with_context(|| format!("starting the supervisor (log {})", log_path.display()))?;
         println!(
             "started {name} (supervisor pid {}, log {})",
             child.id(),
@@ -1208,7 +1214,7 @@ impl App {
             Some(p) => bail!("{}: no such firewall image", p.display()),
             None => std::path::Path::new(dom0::FIREWALL_IMAGE)
                 .is_file()
-                .then(|| dom0::FIREWALL_IMAGE.to_string()),
+                .then_some(dom0::FIREWALL_IMAGE.to_string()),
         };
         let opts = setup::SetupOptions {
             uplink: a.uplink,
@@ -1229,24 +1235,26 @@ impl App {
             println!("{:>2}. {step}", i + 1);
         }
         for step in plan.steps {
-            match step {
+            let done = match step {
                 setup::Step::InstallTemplate { recipe, uplink } => self.template_install(
                     recipe,
                     &juanitos_core::template::InstallOptions {
                         uplink: Some(uplink),
                         ..Default::default()
                     },
-                )?,
-                setup::Step::Create(q) => self.create_qube(*q)?,
-                setup::Step::ReservePci(addrs) => {
-                    setup::reserve(runner, &addrs)?;
-                    println!(
-                        "wrote {} to {}",
-                        pci::pptdevs_line(&addrs),
-                        setup::LOADER_CONF
-                    );
-                }
-            }
+                ),
+                setup::Step::Create(q) => self.create_qube(*q),
+                setup::Step::ReservePci(addrs) => setup::reserve(runner, &addrs)
+                    .map(|()| {
+                        println!(
+                            "wrote {} to {}",
+                            pci::pptdevs_line(&addrs),
+                            setup::LOADER_CONF
+                        )
+                    })
+                    .map_err(Into::into),
+            };
+            done?;
         }
         if plan.reboot {
             println!(
@@ -1289,7 +1297,7 @@ impl App {
 /// `jos run` on the host: the nmdm device, read without blocking.
 /// `USER[:PASSWORD]` of `jos run --login`.
 /// One line per settled request, for `jos serve` and `jos requests`.
-fn report(found: &Found, disposition: &Disposition) -> Result<()> {
+fn report(found: &Found, disposition: &Disposition) {
     let what = match &found.request {
         Ok(r) => r.to_string(),
         Err(_) => format!("{} {}", found.src, found.id),
@@ -1300,7 +1308,6 @@ fn report(found: &Found, disposition: &Disposition) -> Result<()> {
         Disposition::Pending => println!("{what}: pending (policy says ask)"),
         Disposition::Failed(why) => println!("{what}: failed: {why}"),
     }
-    Ok(())
 }
 
 /// Print what the guest printed and exit with the command's status.
@@ -1334,7 +1341,8 @@ fn agent_run(
     command: &str,
     timeout: std::time::Duration,
 ) -> Result<Option<juanitos_core::console::Outcome>> {
-    Ok(agent_session(sock, id, user, command, timeout)?.transpose()?)
+    agent_session(sock, id, user, command, timeout)
+        .and_then(|answer| answer.transpose().map_err(Into::into))
 }
 
 /// Connect to the socket bhyve listens on, ping, then run `command`.
@@ -1351,8 +1359,8 @@ fn agent_session(
 ) -> Result<Option<std::io::Result<juanitos_core::console::Outcome>>> {
     use std::io::Read;
     let mut stream = std::os::unix::net::UnixStream::connect(sock)
+        .and_then(|s| s.set_nonblocking(true).map(|()| s))
         .with_context(|| format!("connecting to {sock} (is the qube running?)"))?;
-    stream.set_nonblocking(true)?;
     let poll = |s: &mut std::os::unix::net::UnixStream| -> std::io::Result<Vec<u8>> {
         let mut buf = [0u8; 4096];
         match s.read(&mut buf) {
@@ -1361,8 +1369,10 @@ fn agent_session(
                 "the agent channel closed (bhyve exited, or another client took it)",
             )),
             Ok(n) => Ok(buf.get(..n).unwrap_or(&[]).to_vec()),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
-            Err(e) => Err(e),
+            // Nothing yet; any other error ends the session.
+            Err(e) => (e.kind() == std::io::ErrorKind::WouldBlock)
+                .then(Vec::new)
+                .ok_or(e),
         }
     };
     if !juanitos_core::agent::handshake(&mut stream, id, juanitos_core::agent::PING_TIMEOUT, &poll)?
@@ -1419,13 +1429,14 @@ fn console_run(
         let mut buf = [0u8; 4096];
         match f.read(&mut buf) {
             Ok(n) => Ok(buf.get(..n).unwrap_or(&[]).to_vec()),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
-            Err(e) => Err(e),
+            // Nothing yet; any other error ends the session.
+            Err(e) => (e.kind() == std::io::ErrorKind::WouldBlock)
+                .then(Vec::new)
+                .ok_or(e),
         }
     };
-    Ok(juanitos_core::console::run(
-        &mut file, command, timeout, login, dialect, poll,
-    )?)
+    juanitos_core::console::run(&mut file, command, timeout, login, dialect, poll)
+        .map_err(Into::into)
 }
 
 /// Set by SIGTERM or SIGINT: `jos serve` finishes its wait and returns
@@ -1459,17 +1470,18 @@ fn set_raw(file: &std::fs::File) -> std::io::Result<()> {
     let fd = file.as_raw_fd();
     // SAFETY: termios is plain data filled in by tcgetattr; the fd is open
     // for the lifetime of `file`.
-    unsafe {
+    let raw = unsafe {
         let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut t) != 0 {
-            return Err(std::io::Error::last_os_error());
+        libc::tcgetattr(fd, &mut t) == 0 && {
+            libc::cfmakeraw(&mut t);
+            libc::tcsetattr(fd, libc::TCSANOW, &t) == 0
         }
-        libc::cfmakeraw(&mut t);
-        if libc::tcsetattr(fd, libc::TCSANOW, &t) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+    };
+    if raw {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
-    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -1517,8 +1529,9 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Kill { name } => {
-            app.store.get(&name)?;
-            app.supervisor().kill(&name)?;
+            app.store
+                .get(&name)
+                .and_then(|_| app.supervisor().kill(&name))?;
             Ok(())
         }
         Cmd::Console { name } => {

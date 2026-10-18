@@ -103,11 +103,6 @@ lines = 2
 functions = 2
 regions = 16
 
-[files."crates/jos/src/main.rs"]
-lines = 32
-functions = 12
-regions = 115
-
 [files."crates/juanitos-core/src/agent.rs"]
 lines = 2
 regions = 13

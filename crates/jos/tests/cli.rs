@@ -845,9 +845,35 @@ fn fake_agent(
     output: &'static str,
     on_command: impl FnOnce(&str) -> i32 + Send + 'static,
 ) -> std::thread::JoinHandle<String> {
+    fake_agent_raw(listener, answer_ping, move |id, command| {
+        let status = on_command(command);
+        format!("{output}\nEND {id} {status}\n")
+    })
+}
+
+/// [`fake_agent`] with the whole reply after the RUN line left to
+/// `reply(id, command)`: output and the END line, well-formed or not.
+#[cfg(unix)]
+fn fake_agent_raw(
+    listener: std::os::unix::net::UnixListener,
+    answer_ping: bool,
+    reply: impl FnOnce(&str, &str) -> String + Send + 'static,
+) -> std::thread::JoinHandle<String> {
     use std::io::{BufRead, Write};
     std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        // Never hang the suite on a `jos` that failed before connecting.
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let stream = loop {
+            match listener.accept() {
+                Ok((s, _)) => break s,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                Err(e) => panic!("nobody connected to the agent socket: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
         let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
         let mut stream = stream;
         let mut seen = String::new();
@@ -869,11 +895,7 @@ fn fake_agent(
         let (rid, rest) = rest.split_once(' ').unwrap();
         assert_eq!(rid, id);
         let (_user, command) = rest.split_once(' ').unwrap();
-        let status = on_command(command);
-        stream.write_all(output.as_bytes()).unwrap();
-        stream
-            .write_all(format!("\nEND {id} {status}\n").as_bytes())
-            .unwrap();
+        stream.write_all(reply(&id, command).as_bytes()).unwrap();
         seen
     })
 }
@@ -1261,6 +1283,10 @@ fn serve_answers_guest_requests_by_policy() {
     while reply("work", "6").is_err() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+    // A policy file being edited (or wrong) is not taken: the daemon keeps
+    // the last good one and goes on.
+    std::fs::write(e.dir.join("policy"), "nonsense\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     let log = terminate(daemon);
     assert_eq!(reply("work", "6").unwrap(), "ok /mnt/jos/in/work/notes\n");
     assert!(log.contains("policy reloaded (1 rules)"), "{log}");
@@ -1589,6 +1615,8 @@ esac"#,
                 "acpidump",
                 "echo '  DMAR: Length=80, Revision=1, Checksum=9,'",
             ),
+            // Every process asked about is alive.
+            ("kill", "exit 0"),
         ],
     );
     let run_dir = e.dir.join("run");
@@ -1859,4 +1887,518 @@ fn real_runs_against_a_stand_in_host() {
     let out = jos(&["run", "web", "true"]);
     assert!(peer.join().unwrap().contains("PING"));
     assert!(stderr(&out).contains("the agent channel closed"), "{out:?}");
+}
+
+/// `jos` with `--config cfg`, the sandbox's `JOS_CONFIG_DIR` and `path` as
+/// the whole `PATH`; `--dry-run` when `dry`.
+#[cfg(unix)]
+fn jos_on(
+    e: &Env,
+    cfg: &std::path::Path,
+    path: &std::path::Path,
+    dry: bool,
+    args: &[&str],
+) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_jos"));
+    if dry {
+        cmd.arg("--dry-run");
+    }
+    cmd.arg("--config")
+        .arg(cfg)
+        .args(args)
+        .env("JOS_CONFIG_DIR", &e.dir)
+        .env("PATH", path)
+        .output()
+        .unwrap()
+}
+
+/// A `jos.toml` setting each `key` to a directory of that name in the
+/// sandbox (created).
+#[cfg(unix)]
+fn sandbox_config(e: &Env, keys: &[(&str, &str)]) -> PathBuf {
+    let mut text = String::new();
+    for (key, dir) in keys {
+        let d = e.dir.join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        text.push_str(&format!("{key} = {:?}\n", d.to_string_lossy()));
+    }
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(&cfg, text).unwrap();
+    cfg
+}
+
+#[cfg(unix)]
+fn chmod(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn bad_values_are_refused_by_the_parser() {
+    let e = Env::new("parse");
+    for args in [
+        &["create", "x", "--kind", "bogus", "--os", "freebsd"][..],
+        &["create", "x", "--kind", "app", "--os", "bogus"],
+        &[
+            "create", "x", "--kind", "app", "--os", "freebsd", "--pci", "zz",
+        ],
+        &[
+            "create",
+            "x",
+            "--kind",
+            "app",
+            "--os",
+            "freebsd",
+            "--firewall",
+            "permit",
+        ],
+        &[
+            "create",
+            "x",
+            "--kind",
+            "app",
+            "--os",
+            "freebsd",
+            "--firewall-policy",
+            "maybe",
+        ],
+    ] {
+        assert!(e.err(args).contains("invalid value"), "{args:?}");
+    }
+}
+
+/// One definition that cannot be read fails everything that needs the
+/// whole list, rather than silently leaving a qube out.
+#[test]
+fn a_broken_definition_fails_every_listing() {
+    let e = Env::new("broken");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&[
+        "create",
+        "fw",
+        "--kind",
+        "firewall",
+        "--os",
+        "unikernel",
+        "--kernel",
+        "/k.img",
+    ]);
+    std::fs::write(e.qube_file("zz"), "nonsense [").unwrap();
+    for args in [
+        &["ls"][..],
+        &["create", "y", "--kind", "app", "--os", "freebsd"],
+        &["firewall", "render", "fw"],
+        &["autostart"],
+        &["stop", "--all"],
+        &["setup", "--uplink", "em0", "--no-gpu"],
+        &["serve"],
+        // The unikernel's config disk lists its clients.
+        &["start", "fw"],
+    ] {
+        e.err(args);
+    }
+}
+
+/// Qubes that do not exist, and definitions that cannot be written.
+#[cfg(unix)]
+#[test]
+fn unknown_qubes_and_read_only_definitions() {
+    let e = Env::new("ro");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    for args in [
+        &["firewall", "add", "ghost", "allow"][..],
+        &["firewall", "clear", "ghost"],
+        &["firewall", "policy", "ghost", "deny"],
+        &["firewall", "render", "ghost"],
+        &["copy", "work:/x", "ghost"],
+        &["copy", "ghost:/x", "work"],
+        &["template", "run", "ghost"],
+        &["template", "snapshot", "ghost"],
+        &["supervise", "ghost"],
+        &["remove", "ghost"],
+        &["run", "ghost", "true"],
+        &["kill", "ghost"],
+        &["stop", "ghost"],
+    ] {
+        assert!(e.err(args).contains("ghost"), "{args:?}");
+    }
+    // Saving rewrites the file; creating and removing change the directory.
+    let qubes = e.dir.join("qubes");
+    let work = e.qube_file("work");
+    chmod(&work, 0o444);
+    chmod(&qubes, 0o555);
+    for args in [
+        &["firewall", "add", "work", "allow", "tcp", "any", "443"][..],
+        &["firewall", "clear", "work"],
+        &["firewall", "policy", "work", "deny"],
+        &["create", "y", "--kind", "app", "--os", "freebsd"],
+        &["remove", "work"],
+    ] {
+        let err = e.err(args);
+        chmod(&qubes, 0o755);
+        assert!(err.contains("ermission denied"), "{args:?}: {err}");
+        chmod(&qubes, 0o555);
+    }
+    chmod(&qubes, 0o755);
+    chmod(&work, 0o644);
+    assert!(work.is_file(), "nothing was removed");
+}
+
+/// The policy file and the share directory failing under the broker.
+#[cfg(unix)]
+#[test]
+fn policy_and_request_failures() {
+    let e = Env::new("policy-fail");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    let cfg = sandbox_config(&e, &[("share_dir", "share")]);
+    let empty = e.dir.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+    let jos = |args: &[&str]| jos_on(&e, &cfg, &empty, true, args);
+
+    let policy = e.dir.join("policy");
+    std::fs::write(&policy, "nonsense\n").unwrap();
+    for args in [&["policy", "show"][..], &["requests"], &["serve", "--once"]] {
+        let out = jos(args);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("policy line 1"),
+            "{out:?}"
+        );
+    }
+    std::fs::remove_file(&policy).unwrap();
+
+    // The policy cannot be saved next to the definitions.
+    chmod(&e.dir, 0o555);
+    let add = jos(&["policy", "add", "work", "work", "allow"]);
+    let clear = jos(&["policy", "clear"]);
+    chmod(&e.dir, 0o755);
+    assert!(
+        !add.status.success() && !clear.status.success(),
+        "{add:?} {clear:?}"
+    );
+
+    // The share cannot be read.
+    let share = e.dir.join("share");
+    chmod(&share, 0o000);
+    let ls = jos(&["requests"]);
+    let serve = jos(&["serve", "--once"]);
+    chmod(&share, 0o755);
+    assert!(
+        !ls.status.success() && !serve.status.success(),
+        "{ls:?} {serve:?}"
+    );
+
+    let out = jos(&["requests", "deny", "work", "9"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no pending request 9"));
+}
+
+/// The operator's answer cannot be written back to the guest.
+#[cfg(unix)]
+#[test]
+fn an_answer_that_cannot_be_written_fails_approve_and_deny() {
+    let e = Env::new("answer");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&["create", "web", "--kind", "app", "--os", "linux"]);
+    let cfg = sandbox_config(&e, &[("share_dir", "share")]);
+    let bin = fake_host(&e, &[("tee", "exit 1"), ("rm", "exit 0"), ("mv", "exit 0")]);
+    let req = e.dir.join("share/web/req");
+    std::fs::create_dir_all(&req).unwrap();
+    std::fs::write(req.join("3"), "copy notes work\n").unwrap();
+    for verdict in ["deny", "approve"] {
+        let out = jos_on(&e, &cfg, &bin, false, &["requests", verdict, "web", "3"]);
+        assert!(!out.status.success(), "{verdict}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("tee"),
+            "{out:?}"
+        );
+    }
+}
+
+/// Storage and the qube directory failing at `init`, and `setup` with it.
+#[cfg(unix)]
+#[test]
+fn init_failures() {
+    let e = Env::new("init-fail");
+    std::fs::write(e.dir.join("qubes"), "").unwrap();
+    assert!(e.err(&["init"]).contains("creating"));
+    std::fs::remove_file(e.dir.join("qubes")).unwrap();
+
+    let cfg = sandbox_config(&e, &[("run_dir", "run")]);
+    let bin = fake_host(&e, &[("zfs", "exit 1")]);
+    for args in [
+        &["init"][..],
+        &["setup", "--uplink", "em0"],
+        &["create", "y", "--kind", "app", "--os", "freebsd"],
+    ] {
+        let out = jos_on(&e, &cfg, &bin, false, args);
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+    }
+}
+
+/// A detached start whose run directory or log cannot be created.
+#[cfg(unix)]
+#[test]
+fn start_failures() {
+    let e = Env::new("start-fail");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    let empty = e.dir.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::write(e.dir.join("file"), "").unwrap();
+    let cfg = e.dir.join("jos.toml");
+    std::fs::write(&cfg, format!("run_dir = {:?}\n", e.dir.join("file/run"))).unwrap();
+    let out = jos_on(&e, &cfg, &empty, false, &["start", "work"]);
+    assert!(!out.status.success(), "{out:?}");
+
+    let cfg = sandbox_config(&e, &[("run_dir", "run")]);
+    let out = jos_on(&e, &cfg, &empty, false, &["start", "ghost"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("ghost"),
+        "{out:?}"
+    );
+    // The unikernel's config disk cannot be written.
+    e.ok(&[
+        "create",
+        "fw",
+        "--kind",
+        "firewall",
+        "--os",
+        "unikernel",
+        "--kernel",
+        "/k.img",
+    ]);
+    std::fs::create_dir_all(e.dir.join("run/fw.fwcfg")).unwrap();
+    let out = jos_on(&e, &cfg, &empty, false, &["supervise", "fw"]);
+    assert!(!out.status.success(), "{out:?}");
+    std::fs::create_dir_all(e.dir.join("run/work.log")).unwrap();
+    let out = jos_on(&e, &cfg, &empty, false, &["start", "work"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("starting the supervisor (log "),
+        "{out:?}"
+    );
+}
+
+/// A running qube is not started twice nor removed without `--force`; a
+/// stale pidfile does not count as a supervisor.
+#[cfg(unix)]
+#[test]
+fn running_qubes_and_stale_supervisors() {
+    let e = Env::new("running");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&["create", "web", "--kind", "app", "--os", "linux"]);
+    let cfg = sandbox_config(&e, &[("vmm_dir", "vmm"), ("run_dir", "run")]);
+    let empty = e.dir.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+    let jos = |args: &[&str]| jos_on(&e, &cfg, &empty, true, args);
+    e.ok(&["create", "t", "--kind", "template", "--os", "freebsd"]);
+    std::fs::write(e.dir.join("vmm/work"), "").unwrap();
+    std::fs::write(e.dir.join("vmm/t"), "").unwrap();
+    let ls = String::from_utf8_lossy(&jos(&["ls"]).stdout).into_owned();
+    let line = ls.lines().find(|l| l.starts_with("work ")).unwrap();
+    assert!(line.contains("running"), "{ls}");
+    let stderr = |out: Output| String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(stderr(jos(&["template", "run", "t"])).contains("t is already running"));
+    assert!(stderr(jos(&["start", "work"])).contains("work is already running"));
+    assert!(stderr(jos(&["remove", "work"])).contains("stop it first or use --force"));
+    let out = jos(&["remove", "work", "--force"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("removed work"));
+    // No `kill` on this host: the pid is not a live supervisor.
+    std::fs::write(e.dir.join("run/web.pid"), "4242\n").unwrap();
+    let out = jos(&["start", "web"]);
+    assert!(out.status.success(), "{out:?}");
+}
+
+/// Commands `jos run` refuses before typing anything.
+#[test]
+fn run_refuses_what_it_cannot_send() {
+    let e = Env::new("run-refuse");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&["create", "rx", "--kind", "app", "--os", "redox"]);
+    assert!(e
+        .err(&["run", "work", "--", "a\nb"])
+        .contains("single line"));
+    assert!(e
+        .err(&["run", "rx", "--user", "root", "true"])
+        .contains("cannot run commands as root"));
+}
+
+/// The host refusing: no `pciconf`, a `bhyvectl` that fails, a template
+/// whose taps or snapshot cannot be made, no `cu`.
+#[cfg(unix)]
+#[test]
+fn host_tools_failing() {
+    let e = Env::new("tools");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "freebsd"]);
+    e.ok(&[
+        "create", "t", "--kind", "template", "--os", "freebsd", "--cpus", "8",
+    ]);
+    let cfg = sandbox_config(
+        &e,
+        &[
+            ("vmm_dir", "vmm"),
+            ("run_dir", "run"),
+            ("console_dir", "consoles"),
+        ],
+    );
+    let bin = fake_host(
+        &e,
+        &[
+            ("bhyvectl", "exit 1"),
+            ("ifconfig", "exit 1"),
+            ("zfs", "exit 1"),
+            ("sysctl", "echo 2"),
+        ],
+    );
+    let real = |args: &[&str]| jos_on(&e, &cfg, &bin, false, args);
+    let fails = |out: Output| assert!(!out.status.success(), "{out:?}");
+    fails(real(&["pci", "list"]));
+    std::fs::write(e.dir.join("vmm/work"), "").unwrap();
+    fails(real(&["stop", "work", "--force"]));
+    fails(real(&["stop", "--all", "--force"]));
+    std::fs::remove_file(e.dir.join("vmm/work")).unwrap();
+    fails(real(&["template", "snapshot", "t"]));
+    // 8 vCPUs on a 2-CPU host, then taps that cannot be created.
+    let out = jos_on(&e, &cfg, &bin, true, &["template", "run", "t"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("8 vCPUs"),
+        "{out:?}"
+    );
+    let bin = fake_host(&e, &[("sysctl", "exit 1")]);
+    fails(jos_on(&e, &cfg, &bin, false, &["template", "run", "t"]));
+
+    // `jos console` hands the terminal to cu(1).
+    let out = real(&["console", "work"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("running cu"),
+        "{out:?}"
+    );
+    let bin = fake_host(&e, &[("cu", "exit 0")]);
+    let out = jos_on(&e, &cfg, &bin, false, &["console", "work"]);
+    assert!(out.status.success(), "{out:?}");
+}
+
+/// `jos setup` with a loader.conf it cannot read, and a qube it cannot
+/// create.
+#[cfg(unix)]
+#[test]
+fn setup_failures() {
+    let e = Env::new("setup-fail");
+    let cfg = sandbox_config(&e, &[("run_dir", "run")]);
+    let tools = |sysrc: &'static str, sysctl: &'static str| {
+        fake_host(
+            &e,
+            &[("pciconf", PCICONF), ("sysrc", sysrc), ("sysctl", sysctl)],
+        )
+    };
+    let bin = tools("echo 'not/an/address'", "exit 1");
+    let out = jos_on(&e, &cfg, &bin, true, &["setup", "--uplink", "em0"]);
+    assert!(!out.status.success(), "{out:?}");
+    // A gpu qube larger than the host.
+    let bin = tools("echo '1/0/0 1/0/1'", "echo 4");
+    let out = jos_on(
+        &e,
+        &cfg,
+        &bin,
+        true,
+        &["setup", "--uplink", "em0", "--gpu-cpus", "16"],
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("16 vCPUs"),
+        "{out:?}"
+    );
+    // For real, the first step (a template download) fails: no fetch(1)
+    // or curl(1) on this host.
+    let bin = fake_host(
+        &e,
+        &[
+            ("pciconf", PCICONF),
+            ("sysrc", "exit 1"),
+            ("sysctl", "exit 1"),
+            ("zfs", "exit 0"),
+        ],
+    );
+    let out = jos_on(&e, &cfg, &bin, false, &["setup", "--uplink", "em0"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("1. install template"),
+        "{out:?}"
+    );
+}
+
+/// Firewall rules of a qube without a network: nothing to restart.
+#[test]
+fn rules_of_an_offline_qube_need_no_restart() {
+    let e = Env::new("offline-rules");
+    e.ok(&["init"]);
+    e.ok(&[
+        "create", "offline", "--kind", "app", "--os", "freebsd", "--netvm", "none",
+    ]);
+    let out = e.jos(&["firewall", "add", "offline", "deny"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("note:"));
+}
+
+/// The guest's answer to `jos run` and to the export of `jos copy`: a
+/// failure, and an end line without a readable status.
+#[cfg(unix)]
+#[test]
+fn unreadable_and_failed_guest_answers() {
+    let e = Env::new("answers");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "linux"]);
+    e.ok(&["create", "web", "--kind", "app", "--os", "linux"]);
+    let cfg = sandbox_config(&e, &[("run_dir", "run"), ("share_dir", "share")]);
+    // The inbox is prepared before the export.
+    let bin = fake_host(
+        &e,
+        &[("mkdir", "exit 0"), ("chmod", "exit 0"), ("rm", "exit 0")],
+    );
+    let sock = e.dir.join("run/work.agent");
+    let session = |end: &'static str, args: &[&str]| {
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let agent = fake_agent_raw(listener, true, move |id, _| {
+            format!("out\nEND {id} {end}\n")
+        });
+        let out = jos_on(&e, &cfg, &bin, false, args);
+        agent.join().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    assert!(session("x", &["run", "work", "true"]).contains("could not read the exit status"));
+    let copy = ["copy", "work:/home/user/notes", "web"];
+    assert!(session("3", &copy).contains("exporting /home/user/notes failed (exit 3)"));
+    assert!(session("x", &copy).contains("could not read the exit status of the export"));
+    // Neither an agent nor a console to export through.
+    std::fs::remove_file(&sock).unwrap();
+    let out = jos_on(&e, &cfg, &bin, false, &copy);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is the qube running?"),
+        "{out:?}"
+    );
+}
+
+/// A guest asked to power off that says yes but stays up is forced off;
+/// a `bhyvectl` that fails then fails the stop.
+#[cfg(unix)]
+#[test]
+fn forcing_off_a_guest_that_stays_up_can_fail() {
+    let e = Env::new("stay-up");
+    e.ok(&["init"]);
+    e.ok(&["create", "work", "--kind", "app", "--os", "linux"]);
+    let cfg = sandbox_config(&e, &[("run_dir", "run"), ("vmm_dir", "vmm")]);
+    std::fs::write(e.dir.join("vmm/work"), "").unwrap();
+    let bin = fake_host(&e, &[("bhyvectl", "exit 1")]);
+    let listener = std::os::unix::net::UnixListener::bind(e.dir.join("run/work.agent")).unwrap();
+    let agent = fake_agent(listener, true, "", |_| 0);
+    let out = jos_on(&e, &cfg, &bin, false, &["stop", "work", "--timeout", "1"]);
+    agent.join().unwrap();
+    assert!(!out.status.success(), "{out:?}");
 }
