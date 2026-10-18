@@ -50,13 +50,42 @@ impl<'a> Net<'a> {
         Ok(self.runner.run("ifconfig", &[name])?.success())
     }
 
+    /// Create the bridge `name` unless it exists. Supervisors start in
+    /// parallel (`jos autostart`) and a NetVM's bridge is needed by the
+    /// NetVM and by its clients, so two of them can race here. The bridge
+    /// is created under the kernel's name (`bridgeN`) and then renamed:
+    /// the loser's rename fails, and it destroys its own `bridgeN` instead
+    /// of leaving it behind (`ifconfig bridge create name X` would).
+    fn create_bridge(&self, name: &str) -> Result<()> {
+        if self.iface_exists(name)? {
+            return Ok(());
+        }
+        let out = self.runner.run_checked("ifconfig", &["bridge", "create"])?;
+        // ifconfig prints the new interface; a dry run has no name to show.
+        let created = match out.stdout.trim() {
+            "" => "bridgeN",
+            n => n,
+        };
+        match self
+            .runner
+            .run_checked("ifconfig", &[created, "name", name])
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                self.runner.run_checked("ifconfig", &[created, "destroy"])?;
+                if self.iface_exists(name)? {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
     /// Create (if needed) and bring up the bridge for `netvm`.
     pub fn ensure_bridge(&self, netvm: &str) -> Result<String> {
         let br = bridge_name(netvm);
-        if !self.iface_exists(&br)? {
-            self.runner
-                .run_checked("ifconfig", &["bridge", "create", "name", &br])?;
-        }
+        self.create_bridge(&br)?;
         self.runner.run_checked("ifconfig", &[&br, "up"])?;
         Ok(br)
     }
@@ -99,10 +128,7 @@ impl<'a> Net<'a> {
     /// interface `iface` (no NetVM in between) and return the tap name.
     pub fn create_uplink_tap(&self, qube: &str, iface: &str) -> Result<String> {
         let br = uplink_bridge_name(iface);
-        if !self.iface_exists(&br)? {
-            self.runner
-                .run_checked("ifconfig", &["bridge", "create", "name", &br])?;
-        }
+        self.create_bridge(&br)?;
         self.runner.run_checked("ifconfig", &[iface, "up"])?;
         self.add_member(&br, iface)?;
         self.runner.run_checked("ifconfig", &[&br, "up"])?;
@@ -171,7 +197,7 @@ mod tests {
             "tap-sys-net"
         );
         let calls = m.calls();
-        assert!(calls.contains(&"ifconfig bridge create name bru-em0".to_string()));
+        assert!(calls.contains(&"ifconfig bridgeN name bru-em0".to_string()));
         assert!(calls.contains(&"ifconfig em0 up".to_string()));
         assert!(calls.contains(&"ifconfig bru-em0 addm em0".to_string()));
         assert!(calls.contains(&"ifconfig bru-em0 addm tap-sys-net".to_string()));
@@ -206,7 +232,7 @@ mod tests {
         let net = Net::new(&m);
         assert_eq!(net.create_downstream_tap("sys-fw").unwrap(), "tapd-sys-fw");
         let calls = m.calls();
-        assert!(calls.contains(&"ifconfig bridge create name br-sys-fw".to_string()));
+        assert!(calls.contains(&"ifconfig bridgeN name br-sys-fw".to_string()));
         assert!(calls.contains(&"ifconfig br-sys-fw addm tapd-sys-fw".to_string()));
     }
 
@@ -224,6 +250,11 @@ mod tests {
                 CmdOutput::failed(1, "no such iface"),
             )
             // `ifconfig X up` etc. match the longer prefixes below and succeed.
+            .respond(
+                "ifconfig",
+                &["bridge", "create"],
+                CmdOutput::ok("bridge2\n"),
+            )
             .respond("ifconfig", &["br-sys-net", "up"], CmdOutput::ok(""))
             .respond("ifconfig", &["br-sys-net", "addm"], CmdOutput::ok(""))
             .respond("ifconfig", &["tap-work", "up"], CmdOutput::ok(""));
@@ -233,7 +264,8 @@ mod tests {
             m.calls(),
             vec![
                 "ifconfig br-sys-net",
-                "ifconfig bridge create name br-sys-net",
+                "ifconfig bridge create",
+                "ifconfig bridge2 name br-sys-net",
                 "ifconfig br-sys-net up",
                 "ifconfig tap-work",
                 "ifconfig tap create name tap-work",
@@ -272,6 +304,83 @@ mod tests {
         assert!(m
             .calls()
             .contains(&"ifconfig br-sys-net addm tap-work".to_string()));
+    }
+
+    /// A runner whose `ifconfig br-sys-net` query answers "missing" the
+    /// first time and "present" afterwards: another supervisor created the
+    /// bridge in between.
+    struct Race {
+        inner: MockRunner,
+        queried: std::sync::atomic::AtomicBool,
+        winner_exists: bool,
+    }
+
+    impl Runner for Race {
+        fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput> {
+            let out = self.inner.run(program, args)?;
+            if args == ["br-sys-net"] {
+                let again = self.queried.swap(true, std::sync::atomic::Ordering::SeqCst);
+                if !again || !self.winner_exists {
+                    return Ok(CmdOutput::failed(1, "does not exist"));
+                }
+            }
+            Ok(out)
+        }
+
+        fn run_with_input(&self, program: &str, args: &[&str], input: &str) -> Result<CmdOutput> {
+            self.inner.run_with_input(program, args, input)
+        }
+    }
+
+    fn race(winner_exists: bool) -> Race {
+        Race {
+            inner: MockRunner::new()
+                .respond(
+                    "ifconfig",
+                    &["bridge", "create"],
+                    CmdOutput::ok("bridge3\n"),
+                )
+                .respond(
+                    "ifconfig",
+                    &["bridge3", "name"],
+                    CmdOutput::failed(1, "ifconfig: ioctl SIOCSIFNAME (set name): File exists"),
+                ),
+            queried: std::sync::atomic::AtomicBool::new(false),
+            winner_exists,
+        }
+    }
+
+    #[test]
+    fn losing_the_bridge_race_cleans_up_and_uses_the_winners_bridge() {
+        let r = race(true);
+        assert_eq!(Net::new(&r).ensure_bridge("sys-net").unwrap(), "br-sys-net");
+        let calls = r.inner.calls();
+        assert_eq!(
+            calls[..5],
+            [
+                "ifconfig br-sys-net",
+                "ifconfig bridge create",
+                "ifconfig bridge3 name br-sys-net",
+                "ifconfig bridge3 destroy",
+                "ifconfig br-sys-net",
+            ]
+        );
+        assert_eq!(calls.last().unwrap(), "ifconfig br-sys-net up");
+    }
+
+    #[test]
+    fn a_failed_rename_without_a_winner_is_an_error() {
+        let r = race(false);
+        let err = Net::new(&r)
+            .ensure_bridge("sys-net")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ifconfig bridge3 name br-sys-net"), "{err}");
+        assert!(err.contains("File exists"), "{err}");
+        assert!(r
+            .inner
+            .calls()
+            .contains(&"ifconfig bridge3 destroy".to_string()));
     }
 
     #[test]
