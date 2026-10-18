@@ -164,6 +164,10 @@ pub struct ReleaseInfo {
     pub packages: Vec<String>,
     #[serde(default)]
     pub git_rev: Option<String>,
+    /// `rustc -V` of the compiler that built the JuanitOS binaries: two
+    /// builds can only produce identical binaries with the same one.
+    #[serde(default)]
+    pub rustc: Option<String>,
 }
 
 impl ReleaseInfo {
@@ -234,8 +238,17 @@ src.txz\t789\t100\tsrc\t\"System source tree\"\toff\n";
             stage: 1,
             packages: vec!["seatd".into()],
             git_rev: None,
+            rustc: Some("rustc 1.99.0 (b940084d7 2026-09-28)".into()),
         };
         let text = r.to_toml().unwrap();
         assert_eq!(ReleaseInfo::from_toml(&text).unwrap(), r);
+
+        // Written before the field existed.
+        let old = text
+            .lines()
+            .filter(|l| !l.starts_with("rustc"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(ReleaseInfo::from_toml(&old).unwrap().rustc, None);
     }
 }

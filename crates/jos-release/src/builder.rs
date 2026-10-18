@@ -23,6 +23,8 @@ use crate::ventoy;
 pub const SRC_SET: &str = "src.txz";
 /// Ventoy's GEOM class, shipped on the live ISO.
 pub const VENTOY_MODULE: &str = "geom_ventoy";
+/// Where the dom0 keeps its own sources (stage 2 builds from here).
+pub const INSTALLED_SOURCE: &str = "/usr/local/src/juanitos";
 
 pub struct Builder<'a> {
     pub runner: &'a dyn Runner,
@@ -201,6 +203,7 @@ impl<'a> Builder<'a> {
     pub fn bins(&self) -> anyhow::Result<()> {
         self.step("Building release binaries");
         let manifest = self.repo.join("Cargo.toml");
+        let rustflags = rustflags_config(&path_remaps(&self.repo, cargo_home().as_deref()));
         self.runner.run_checked(
             "cargo",
             &[
@@ -209,6 +212,8 @@ impl<'a> Builder<'a> {
                 "--workspace",
                 "--manifest-path",
                 &Self::s(&manifest),
+                "--config",
+                &rustflags,
             ],
         )?;
 
@@ -227,6 +232,8 @@ impl<'a> Builder<'a> {
                     UEFI_TARGET,
                     "--target-dir",
                     &target_dir,
+                    "--config",
+                    &rustflags,
                 ],
             )?;
             if !out.success() {
@@ -493,7 +500,7 @@ impl<'a> Builder<'a> {
     /// Copy this repository into the root (for stage 2: building JuanitOS
     /// on JuanitOS) and vendor the crates so that works offline.
     fn install_source(&self) -> anyhow::Result<()> {
-        let dst = self.rootfs().join("usr/local/src/juanitos");
+        let dst = self.rootfs().join(INSTALLED_SOURCE.trim_start_matches('/'));
         self.step(&format!("Copying source tree to {}", dst.display()));
         self.fs.remove_tree(&dst)?;
         let excludes = source_excludes(self.profile.source.vendor);
@@ -504,8 +511,11 @@ impl<'a> Builder<'a> {
             let vendor = dst.join("vendor");
             self.runner.run_checked(
                 "cargo",
+                // Versioned like the registry's own directories, so the
+                // two remap to the same paths (see `path_remaps`).
                 &[
                     "vendor",
+                    "--versioned-dirs",
                     "--manifest-path",
                     &Self::s(&manifest),
                     &Self::s(&vendor),
@@ -546,12 +556,19 @@ impl<'a> Builder<'a> {
             .filter(|o| o.success())
             .map(|o| o.stdout.trim().to_string())
             .filter(|s| !s.is_empty());
+        let rustc = self
+            .runner
+            .run("rustc", &["-V"])
+            .ok()
+            .filter(|o| o.success())
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty());
         let (required, optional) = p.package_sets();
         Ok(ReleaseInfo {
             version: p.version.clone(),
             freebsd_version: p.freebsd_version.clone(),
             arch: p.arch.clone(),
-            built_at: now_utc(),
+            built_at: build_time(std::env::var("SOURCE_DATE_EPOCH").ok().as_deref()),
             built_on,
             stage,
             packages: required
@@ -560,6 +577,7 @@ impl<'a> Builder<'a> {
                 .map(|s| s.to_string())
                 .collect(),
             git_rev,
+            rustc,
         })
     }
 
@@ -994,6 +1012,60 @@ fn motd(p: &Profile) -> String {
     )
 }
 
+/// `$CARGO_HOME`, else `~/.cargo`.
+fn cargo_home() -> Option<PathBuf> {
+    std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+}
+
+/// `--remap-path-prefix` pairs that make the binaries independent of where
+/// they were built. Stage 1 builds in a scratch checkout against the
+/// crates.io registry; stage 2 builds in [`INSTALLED_SOURCE`] against the
+/// copy `cargo vendor --versioned-dirs` put in its `vendor/`. Both name a
+/// crate's sources `<name>-<version>`, so mapping the repository onto
+/// [`INSTALLED_SOURCE`] and every registry source directory onto its
+/// `vendor/` gives both builds the same embedded paths (panic locations,
+/// debug info). Rustc applies the last matching pair, so the registry,
+/// which may live inside the repository's parent, comes after the repository.
+pub fn path_remaps(repo: &Path, cargo_home: Option<&Path>) -> Vec<(String, String)> {
+    let mut v = vec![(unix(repo), INSTALLED_SOURCE.to_string())];
+    let vendor = format!("{INSTALLED_SOURCE}/vendor");
+    if let Some(home) = cargo_home {
+        let mut indexes: Vec<PathBuf> = std::fs::read_dir(home.join("registry/src"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        indexes.sort();
+        v.extend(indexes.iter().map(|p| (unix(p), vendor.clone())));
+    }
+    v
+}
+
+/// `cargo --config` value carrying the remaps as `build.rustflags`
+/// (`Runner` passes no environment, and argv keeps the build visible in
+/// dry runs).
+pub fn rustflags_config(remaps: &[(String, String)]) -> String {
+    let flags: Vec<String> = remaps
+        .iter()
+        .map(|(from, to)| {
+            toml::Value::String(format!("--remap-path-prefix={from}={to}")).to_string()
+        })
+        .collect();
+    format!("build.rustflags=[{}]", flags.join(", "))
+}
+
+/// `built_at`: `SOURCE_DATE_EPOCH` when set (reproducible builds), else now.
+pub fn build_time(source_date_epoch: Option<&str>) -> String {
+    source_date_epoch
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(format_utc)
+        .unwrap_or_else(now_utc)
+}
+
 /// `YYYY-MM-DDTHH:MM:SSZ` without pulling in a date crate.
 pub fn now_utc() -> String {
     let secs = std::time::SystemTime::now()
@@ -1039,6 +1111,74 @@ mod tests {
         let again = vendored_cargo_config(&c);
         assert_eq!(again, c);
         assert_eq!(again.matches("[source.crates-io]").count(), 1);
+    }
+
+    #[test]
+    fn binaries_are_built_with_the_installed_paths() {
+        let s = Scratch::new("remap");
+        let home = s.0.join("cargo");
+        let index = home.join("registry/src/index.crates.io-1949cf8c6b5b557f");
+        std::fs::create_dir_all(index.join("toml-0.8.23")).unwrap();
+        s.put("cargo/registry/src/stray-file", b"");
+        let remaps = path_remaps(Path::new("/root/juanitos"), Some(&home));
+        assert_eq!(
+            remaps,
+            vec![
+                ("/root/juanitos".into(), INSTALLED_SOURCE.into()),
+                (unix(&index), format!("{INSTALLED_SOURCE}/vendor")),
+            ]
+        );
+        // No registry (a vendored stage-2 tree, or no cargo home at all).
+        let only_repo = vec![("/r".to_string(), INSTALLED_SOURCE.to_string())];
+        assert_eq!(
+            path_remaps(Path::new("/r"), Some(&s.0.join("none"))),
+            only_repo
+        );
+        assert_eq!(path_remaps(Path::new("/r"), None), only_repo);
+
+        let cfg = rustflags_config(&[("/a".into(), "/b".into()), ("/c d".into(), "/e\"".into())]);
+        assert!(
+            cfg.starts_with(r#"build.rustflags=["--remap-path-prefix=/a=/b", "#),
+            "{cfg}"
+        );
+        // What cargo will parse, quotes in paths included.
+        let parsed: toml::Table = toml::from_str(&cfg.replacen("build.", "", 1)).unwrap();
+        assert_eq!(
+            parsed["rustflags"].as_array().unwrap()[1].as_str(),
+            Some("--remap-path-prefix=/c d=/e\"")
+        );
+
+        // Every cargo build carries them.
+        let m = MockRunner::new();
+        let profile = Profile::default();
+        let b = Builder {
+            fs: FsOps::new(true),
+            ..real_builder(&m, &profile, Path::new("/x"))
+        };
+        b.bins().unwrap();
+        let builds: Vec<String> = m
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("cargo build"))
+            .collect();
+        assert_eq!(builds.len(), 1 + UEFI_CRATES.len());
+        for c in &builds {
+            assert!(
+                c.contains(
+                    "build.rustflags=[\"--remap-path-prefix=/x/repo=/usr/local/src/juanitos\""
+                ),
+                "{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_time_honours_source_date_epoch() {
+        assert_eq!(build_time(Some("951782400")), "2000-02-29T00:00:00Z");
+        assert_eq!(build_time(Some(" 0\n")), "1970-01-01T00:00:00Z");
+        for unset in [None, Some(""), Some("yesterday")] {
+            assert!(build_time(unset).starts_with("20"), "{unset:?}");
+        }
     }
 
     #[test]
@@ -1610,7 +1750,7 @@ mod tests {
         assert_eq!(
             m.calls(),
             vec![format!(
-                "cargo vendor --manifest-path {0}/Cargo.toml {0}/vendor",
+                "cargo vendor --versioned-dirs --manifest-path {0}/Cargo.toml {0}/vendor",
                 unix(&dst)
             )]
         );
@@ -1867,11 +2007,21 @@ mod tests {
     fn a_dom0_rebuilding_itself_is_the_next_stage() {
         let s = Scratch::new("stage");
         let profile = Profile::default();
-        let m = MockRunner::new().respond("git", &[], CmdOutput::ok("f826e4e\n"));
+        let m = MockRunner::new()
+            .respond("git", &[], CmdOutput::ok("f826e4e\n"))
+            .respond(
+                "rustc",
+                &["-V"],
+                CmdOutput::ok("rustc 1.99.0 (b940084d7 2026-09-28)\n"),
+            );
         let b = real_builder(&m, &profile, &s.0);
         let first = b.release_info().unwrap();
         assert_eq!((first.built_on.as_str(), first.stage), ("freebsd", 1));
         assert_eq!(first.git_rev.as_deref(), Some("f826e4e"));
+        assert_eq!(
+            first.rustc.as_deref(),
+            Some("rustc 1.99.0 (b940084d7 2026-09-28)")
+        );
 
         s.put(
             &format!("root/{}", dom0::RELEASE_INFO_PATH.trim_start_matches('/')),
@@ -1884,6 +2034,9 @@ mod tests {
         let m =
             MockRunner::new().respond("git", &[], CmdOutput::failed(128, "not a git repository"));
         let b = real_builder(&m, &profile, &s.0);
-        assert_eq!(b.release_info().unwrap().git_rev, None);
+        let info = b.release_info().unwrap();
+        assert_eq!(info.git_rev, None);
+        // The mock's rustc printed nothing.
+        assert_eq!(info.rustc, None);
     }
 }

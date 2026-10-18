@@ -341,17 +341,19 @@ pub const AUTO_STEPS: &[(&str, &str, u64)] = &[
          ls /root/juanitos/crates",
         30,
     ),
+    // Only the builder: `jos-release all` builds the shipped binaries
+    // itself, with the path remapping that makes them comparable.
     (
-        "build the release binaries",
-        "cd /root/juanitos && cargo build --release --workspace",
-        240,
+        "build jos-release",
+        "cd /root/juanitos && cargo build --release -p jos-release",
+        120,
     ),
     // FreeBSD's rust package has no x86_64-unknown-uefi std, so the UEFI
     // applications come from the host (built on Linux, see
     // tools/docker-build.sh); `jos-release` itself warns and goes on when
     // they are absent.
     (
-        "jos-release all (fetch, rootfs, pack, iso)",
+        "jos-release all (fetch, bins, rootfs, pack, iso)",
         "cd /root/juanitos && extra=''; \
          [ -f /mnt/out/jos-boot.efi ] && extra=\"$extra --boot-efi /mnt/out/jos-boot.efi\"; \
          [ -f /mnt/out/jos-firewall.img ] && extra=\"$extra --firewall-image /mnt/out/jos-firewall.img\"; \

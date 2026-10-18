@@ -268,9 +268,18 @@ also makes hard-link order irrelevant) left exactly these differences:
   cargo would have rejected on stage 3. `vendored_cargo_config` is now
   idempotent, so this one disappears.
 
-So the system is self-hosting in substance. Making the comparison exact
-(build-path-independent binaries, reproducible tar ordering and mtimes)
-is the follow-up task tracked for this stage.
+So the system is self-hosting in substance. To make the binaries
+comparable, `bins` builds with `--remap-path-prefix` (passed as
+`cargo --config build.rustflags=[...]`): the checkout becomes
+`/usr/local/src/juanitos` and every crates.io registry directory
+`/usr/local/src/juanitos/vendor`, which `cargo vendor --versioned-dirs`
+fills with the same `<crate>-<version>` names. A stage-1 build in
+`/root/juanitos` against the registry and a stage-2 build in
+`/usr/local/src/juanitos` against `vendor/` then embed the same paths
+(checked with a `toml`-using crate: byte-identical binaries).
+`release.toml` records `rustc` (`rustc -V`), since only the same compiler
+can give the same bytes, and `built_at` follows `SOURCE_DATE_EPOCH` when
+it is set.
 
 ## Why not build FreeBSD from source?
 

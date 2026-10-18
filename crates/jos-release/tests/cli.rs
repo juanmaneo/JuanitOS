@@ -82,7 +82,9 @@ fn full_pipeline() {
 #[test]
 fn individual_steps() {
     let w = Work::new("steps");
-    assert!(w.ok(&["bins"]).contains("cargo build --release"));
+    let bins = w.ok(&["bins"]);
+    assert!(bins.contains("cargo build --release"));
+    assert!(bins.contains("--remap-path-prefix="), "{bins}");
     assert!(w.ok(&["rootfs"]).contains("release.toml"));
     assert!(w.ok(&["pack"]).contains("tar -C"));
     assert!(w.ok(&["iso"]).contains("Done:"));
@@ -131,7 +133,7 @@ fn builder_vm_commands() {
     }
     assert!(ok, "{out}");
     assert!(out.contains("qemu-img convert"));
-    assert!(out.contains("guest: build the release binaries"));
+    assert!(out.contains("guest: build jos-release"));
     assert!(out.contains("-smp 2 -m 2048"));
 }
 
