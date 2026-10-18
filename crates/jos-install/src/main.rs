@@ -159,6 +159,9 @@ fn main() {
     std::process::exit(code);
 }
 
+/// The `vt(4)` console the graphical installer needs.
+const FRAMEBUFFER_CONSOLE: &str = "/dev/ttyv0";
+
 fn run(cli: Cli) -> anyhow::Result<()> {
     if let Some(dir) = &cli.screenshots {
         for file in ui::screenshots(dir, ui::LOGICAL_W as u32, ui::LOGICAL_H as u32)? {
@@ -170,9 +173,22 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let dry = DryRunner::new();
     let real = RealRunner;
     let runner: &dyn Runner = if cli.dry_run { &dry } else { &real };
-    let interactive = !cli.non_interactive;
-
     banner();
+    let framebuffer = std::path::Path::new(FRAMEBUFFER_CONSOLE).exists();
+    let stdin = std::io::stdin();
+    let mut prompter = Prompter::new(stdin.lock(), std::io::stdout(), runner);
+    install(&cli, runner, framebuffer, &mut prompter)
+}
+
+/// Check the host, settle the plan and install, with the graphical
+/// wizard when `framebuffer` allows it, else with `p`'s questions.
+fn install(
+    cli: &Cli,
+    runner: &dyn Runner,
+    framebuffer: bool,
+    p: &mut Prompter<'_>,
+) -> anyhow::Result<()> {
+    let interactive = !cli.non_interactive;
 
     // 1. Doctor: this is the dom0 compatibility validation.
     let cfg = juanitos_core::GlobalConfig {
@@ -185,7 +201,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     // 2. Defaults for the plan, from the flags.
     let user = match (cli.user.clone(), cli.user_password.clone()) {
-        (Some(u), Some(p)) => Some((u, p)),
+        (Some(u), Some(pw)) => Some((u, pw)),
         (Some(u), None) if !interactive => bail!("--user {u} requires --user-password"),
         (Some(u), None) => Some((u, String::new())),
         (None, _) => None,
@@ -198,7 +214,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         gui: !cli.no_gui,
         serial_console: !cli.no_serial,
         gpu_module: gpu_module_from(&pci_devices),
-        pptdevs: passthrough_from(&cli, &pci_devices),
+        pptdevs: passthrough_from(cli, &pci_devices),
         root_password: cli.root_password.clone(),
         user,
         dist_dir: cli.dist.clone(),
@@ -220,19 +236,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         devices: pci::passthrough_candidates(&pci_devices),
     };
 
-    if interactive && wants_gui(cli.ui, cli.dry_run)? {
-        match run_graphical(&cli, runner, plan.clone(), &hw) {
-            Ok(()) => return Ok(()),
+    if interactive && wants_gui(cli.ui, cli.dry_run, framebuffer)? {
+        match run_graphical(cli, runner, plan.clone(), &hw) {
             Err(e) if cli.ui == Ui::Auto => {
                 eprintln!("jos-install: graphical installer unavailable ({e:#}); using text mode");
             }
-            Err(e) => return Err(e),
+            done => return done,
         }
     }
-
-    let stdin = std::io::stdin();
-    let mut prompter = Prompter::new(stdin.lock(), std::io::stdout(), runner);
-    text_install(&cli, runner, plan, &hw, &mut prompter)
+    text_install(cli, runner, plan, &hw, p)
 }
 
 /// Every PCI device; none where `pciconf` is missing (a development host).
@@ -266,8 +278,7 @@ fn gpu_module_from(devices: &[PciDevice]) -> Option<String> {
 }
 
 /// Should an interactive install use the graphical front end?
-fn wants_gui(ui: Ui, dry_run: bool) -> anyhow::Result<bool> {
-    let framebuffer = cfg!(target_os = "freebsd") && std::path::Path::new("/dev/ttyv0").exists();
+fn wants_gui(ui: Ui, dry_run: bool, framebuffer: bool) -> anyhow::Result<bool> {
     match ui {
         Ui::Text => Ok(false),
         Ui::Auto => Ok(framebuffer && !dry_run),
@@ -325,17 +336,17 @@ fn run_graphical(
     _plan: InstallPlan,
     _hw: &Detected,
 ) -> anyhow::Result<()> {
-    bail!("no framebuffer console on this host")
+    bail!("the graphical installer only runs on FreeBSD's vt(4) console")
 }
 
 /// The line-oriented installer (serial consoles, `--ui text`) and the
 /// unattended one (`--non-interactive`).
-fn text_install<R: std::io::BufRead, W: std::io::Write>(
+fn text_install(
     cli: &Cli,
     runner: &dyn Runner,
     mut plan: InstallPlan,
     hw: &Detected,
-    p: &mut Prompter<'_, R, W>,
+    p: &mut Prompter<'_>,
 ) -> anyhow::Result<()> {
     let interactive = !cli.non_interactive;
     let disks = &hw.disks;
@@ -444,7 +455,7 @@ fn render_checks(checks: &[Check]) -> String {
 mod tests {
     use super::*;
     use juanitos_core::doctor::Status;
-    use juanitos_core::sys::MockRunner;
+    use juanitos_core::sys::{CmdOutput, MockRunner};
 
     fn cli(args: &[&str]) -> Cli {
         let mut argv = vec!["jos-install"];
@@ -527,7 +538,6 @@ mod tests {
 
     #[test]
     fn gpu_detection_picks_the_first_kms_capable_card() {
-        use juanitos_core::sys::CmdOutput;
         let m = MockRunner::new().respond("pciconf", &["-l", "-v"], CmdOutput::ok(PCICONF));
         let devices = pci_devices(&m);
         assert_eq!(devices.len(), 4);
@@ -581,12 +591,131 @@ mod tests {
 
     #[test]
     fn ui_selection() {
-        assert!(!wants_gui(Ui::Text, false).unwrap());
-        if !cfg!(target_os = "freebsd") {
-            assert!(!wants_gui(Ui::Auto, false).unwrap());
-            assert!(wants_gui(Ui::Gui, false).is_err());
+        for fb in [false, true] {
+            assert!(!wants_gui(Ui::Text, false, fb).unwrap());
+            assert!(!wants_gui(Ui::Auto, true, fb).unwrap(), "dry runs use text");
+            assert_eq!(wants_gui(Ui::Auto, false, fb).unwrap(), fb);
         }
-        assert!(!wants_gui(Ui::Auto, true).unwrap());
+        assert!(wants_gui(Ui::Gui, true, true).unwrap());
+        let err = wants_gui(Ui::Gui, false, false).unwrap_err();
+        assert!(err.to_string().contains("--screenshots"), "{err}");
+    }
+
+    /// `install` with canned host answers: no disk, no PCI device, and
+    /// `input` for the questions. Returns the result and what was asked.
+    fn install_with(
+        args: &[&str],
+        m: &MockRunner,
+        framebuffer: bool,
+        input: &str,
+    ) -> (anyhow::Result<()>, String) {
+        let mut out = Vec::new();
+        let r = {
+            let mut p = Prompter::new(input.as_bytes(), &mut out, m);
+            install(&cli(args), m, framebuffer, &mut p)
+        };
+        (r, String::from_utf8_lossy(&out).into_owned())
+    }
+
+    #[test]
+    fn the_graphical_installer_is_tried_when_possible() {
+        let m = MockRunner::new();
+        // Asked for explicitly: its failure is the installer's failure.
+        let (r, out) = install_with(&["--dry-run", "--ui", "gui"], &m, true, "");
+        assert!(r.unwrap_err().to_string().contains("vt(4)"));
+        assert!(out.is_empty());
+        let (r, _) = install_with(&["--dry-run", "--ui", "gui"], &m, false, "");
+        assert!(r.unwrap_err().to_string().contains("--screenshots"));
+        // By default it falls back to the text questions.
+        let dist = std::env::temp_dir().join(format!("jos-install-auto-{}", std::process::id()));
+        std::fs::create_dir_all(&dist).unwrap();
+        for file in [
+            juanitos_core::dom0::DIST_TARBALL,
+            juanitos_core::dom0::DIST_MANIFEST,
+        ] {
+            std::fs::write(dist.join(file), "").unwrap();
+        }
+        let d = dist.to_string_lossy().into_owned();
+        let (r, out) = install_with(&["--dist", &d], &m, true, "");
+        assert!(out.starts_with("Host checks:"), "{out}");
+        assert!(r.is_err(), "no disk to install to");
+        let _ = std::fs::remove_dir_all(&dist);
+    }
+
+    #[test]
+    fn install_refusals_before_any_question() {
+        let m = MockRunner::new();
+        let (r, _) = install_with(
+            &["--non-interactive", "--dist", "/nonexistent"],
+            &m,
+            false,
+            "",
+        );
+        assert!(r.unwrap_err().to_string().contains("dom0 distribution"));
+        let flags = [
+            "--dry-run",
+            "--non-interactive",
+            "--user",
+            "alice",
+            "--disk",
+            "vtbd0",
+        ];
+        let (r, _) = install_with(&flags, &m, false, "");
+        assert!(r.unwrap_err().to_string().contains("--user-password"));
+        let m = MockRunner::new().missing("sysctl");
+        let (r, _) = install_with(&["--dry-run"], &m, false, "");
+        assert!(r.unwrap_err().to_string().contains("listing disks"));
+    }
+
+    #[test]
+    fn flag_users_get_asked_only_what_is_missing() {
+        let m = MockRunner::new();
+        let base = [
+            "--dry-run",
+            "--ignore-doctor",
+            "--disk",
+            "vtbd0",
+            "--root-password",
+            "r",
+        ];
+        // hostname; swap; desktop; alice's password twice; proceed.
+        let args = [&base[..], &["--user", "alice"]].concat();
+        let (r, out) = install_with(&args, &m, false, "\n\n\npw\npw\ny\n");
+        r.unwrap();
+        assert!(out.contains("Password for alice"), "{out}");
+        // With its password given too, nothing is asked about the user.
+        let args = [&args[..], &["--user-password", "pw"]].concat();
+        let (r, out) = install_with(&args, &m, false, "\n\n\ny\n");
+        r.unwrap();
+        assert!(!out.contains("Password for"), "{out}");
+        assert!(!out.contains("Create a user"), "{out}");
+    }
+
+    #[test]
+    fn unattended_install_from_flags_only() {
+        let target = std::env::temp_dir().join(format!("jos-install-flags-{}", std::process::id()));
+        let t = target.to_string_lossy().into_owned();
+        let flags = [
+            "--dry-run",
+            "--non-interactive",
+            "--ignore-doctor",
+            "--disk",
+            "vtbd0",
+            "--root-password",
+            "r",
+            "--user",
+            "alice",
+            "--user-password",
+            "pw",
+            "--target",
+            &t,
+        ];
+        let m = MockRunner::new();
+        let (r, out) = install_with(&flags, &m, true, "");
+        r.unwrap();
+        assert!(out.contains("user      alice"), "{out}");
+        assert!(m.calls().iter().any(|c| c.contains("useradd alice")));
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]
@@ -687,26 +816,57 @@ mod tests {
     }
 
     #[test]
-    fn screenshots_flag_writes_pngs() {
-        let dir =
-            std::env::temp_dir().join(format!("jos-install-cli-shots-{}", std::process::id()));
-        let d = dir.to_string_lossy().into_owned();
-        run(cli(&["--screenshots", &d])).unwrap();
-        assert!(dir.join("installer-1-welcome.png").is_file());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn every_text_dialogue_stops_on_io_errors() {
+        let m = MockRunner::new();
+        let devices = pci::passthrough_candidates(&pci::parse_pciconf(PCICONF));
+        // Failed checks, installed anyway; every question; reboot.
+        let c = cli(&["--dry-run", "--live"]);
+        let failed = hw(checks(Status::Fail), devices);
+        let input = "y\n1\nbox\n0\nn\n4\nr00t\nr00t\nalice\npw\npw\ny\ny\n";
+        prompt::tests::fails_on_every_io_error(input, &|p| {
+            text_install(&c, &m, plan_for(&c), &failed, p)
+        });
+        // Failed checks, ignored, nothing asked.
+        let c = cli(&[
+            "--dry-run",
+            "--non-interactive",
+            "--ignore-doctor",
+            "--disk",
+            "vtbd0",
+            "--root-password",
+            "r",
+        ]);
+        let failed = hw(checks(Status::Fail), vec![]);
+        prompt::tests::fails_on_every_io_error("", &|p| {
+            text_install(&c, &m, plan_for(&c), &failed, p)
+        });
+        // Passed checks, user from the flags without a password.
+        let c = cli(&["--dry-run", "--disk", "vtbd0", "--root-password", "r"]);
+        let plan = InstallPlan {
+            user: Some(("bob".into(), String::new())),
+            ..plan_for(&c)
+        };
+        let passed = hw(checks(Status::Ok), vec![]);
+        prompt::tests::fails_on_every_io_error("\n\n\nsecret\nsecret\ny\n", &|p| {
+            text_install(&c, &m, plan.clone(), &passed, p)
+        });
     }
 
     #[test]
-    fn user_without_password_is_rejected_non_interactively() {
-        let err = run(cli(&[
-            "--dry-run",
-            "--non-interactive",
-            "--user",
-            "alice",
-            "--disk",
-            "vtbd0",
-        ]))
-        .unwrap_err();
-        assert!(err.to_string().contains("--user-password"));
+    fn text_install_failures_after_the_questions() {
+        let c = cli(&["--dry-run", "--live"]);
+        let ok = checks(Status::Ok);
+        // `root` is not a user the plan accepts.
+        let m = MockRunner::new();
+        let (r, _) = text(&c, &m, &ok, "1\n\n\n\npw\npw\nroot\npw\npw\n");
+        assert!(r.unwrap_err().to_string().contains("invalid user name"));
+        // The installation itself fails.
+        let m = MockRunner::new().respond("gpart", &["create"], CmdOutput::failed(1, "busy"));
+        let (r, _) = text(&c, &m, &ok, "1\n\n\n\npw\npw\n\ny\n");
+        assert!(r.unwrap_err().to_string().contains("busy"));
+        // So does the reboot at the end.
+        let m = MockRunner::new().missing("shutdown");
+        let (r, _) = text(&c, &m, &ok, "1\n\n\n\npw\npw\n\ny\ny\n");
+        assert!(r.unwrap_err().to_string().contains("shutdown"));
     }
 }

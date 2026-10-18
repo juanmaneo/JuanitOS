@@ -1,5 +1,6 @@
 //! Line-oriented questions for the text installer, over any reader and
-//! writer so they are tested with in-memory input.
+//! writer so they are tested with in-memory input. Both are boxed: one
+//! compiled `Prompter` serves the console and the tests alike.
 
 use std::io::{BufRead, Write};
 
@@ -9,16 +10,20 @@ use juanitos_core::sys::Runner;
 
 use crate::disks::Disk;
 
-pub struct Prompter<'a, R, W> {
-    input: R,
-    out: W,
+pub struct Prompter<'a> {
+    input: Box<dyn BufRead + 'a>,
+    out: Box<dyn Write + 'a>,
     /// Used for `stty -echo` around passwords.
     runner: &'a dyn Runner,
 }
 
-impl<'a, R: BufRead, W: Write> Prompter<'a, R, W> {
-    pub fn new(input: R, out: W, runner: &'a dyn Runner) -> Self {
-        Prompter { input, out, runner }
+impl<'a> Prompter<'a> {
+    pub fn new(input: impl BufRead + 'a, out: impl Write + 'a, runner: &'a dyn Runner) -> Self {
+        Prompter {
+            input: Box::new(input),
+            out: Box::new(out),
+            runner,
+        }
     }
 
     pub fn say(&mut self, text: &str) -> anyhow::Result<()> {
@@ -186,14 +191,64 @@ impl<'a, R: BufRead, W: Write> Prompter<'a, R, W> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use juanitos_core::sys::MockRunner;
 
-    fn with<T>(
+    /// Output whose `n`-th operation (write or flush, 0-based) fails, as
+    /// does every one after it.
+    struct FailAt {
+        n: usize,
+        ops: usize,
+    }
+
+    impl FailAt {
+        fn op(&mut self) -> std::io::Result<()> {
+            self.ops += 1;
+            if self.ops > self.n {
+                return Err(std::io::Error::other("disk full"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Write for FailAt {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.op().map(|()| buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.op()
+        }
+    }
+
+    /// Run the dialogue `f`, which succeeds on `input`, with the output
+    /// breaking at each write or flush in turn and with the input ending
+    /// after each of its lines: every such run must fail with that error.
+    pub(crate) fn fails_on_every_io_error(
         input: &str,
-        f: impl FnOnce(&mut Prompter<'_, &[u8], &mut Vec<u8>>) -> T,
-    ) -> (T, String, Vec<String>) {
+        f: &dyn Fn(&mut Prompter<'_>) -> anyhow::Result<()>,
+    ) {
+        let m = MockRunner::new();
+        let mut n = 0;
+        loop {
+            let mut p = Prompter::new(input.as_bytes(), FailAt { n, ops: 0 }, &m);
+            match f(&mut p) {
+                Ok(()) => break,
+                Err(e) => assert_eq!(e.to_string(), "disk full", "at operation {n}"),
+            }
+            n += 1;
+        }
+        assert!(n > 0, "the dialogue wrote nothing");
+        let lines: Vec<&str> = input.split_inclusive('\n').collect();
+        for k in 0..lines.len() {
+            let cut = lines[..k].concat();
+            let mut p = Prompter::new(cut.as_bytes(), std::io::sink(), &m);
+            let err = f(&mut p).unwrap_err();
+            assert_eq!(err.to_string(), "end of input", "after {k} lines");
+        }
+    }
+
+    fn with<T>(input: &str, f: impl FnOnce(&mut Prompter<'_>) -> T) -> (T, String, Vec<String>) {
         let m = MockRunner::new();
         let mut out = Vec::new();
         let r = {
@@ -233,6 +288,41 @@ mod tests {
     fn end_of_input_is_an_error() {
         let (r, _, _) = with("", |p| p.ask_yes_no("Go?", true));
         assert!(r.unwrap_err().to_string().contains("end of input"));
+    }
+
+    #[test]
+    fn unreadable_input_is_an_error() {
+        let m = MockRunner::new();
+        let mut p = Prompter::new(&b"\xff\n"[..], std::io::sink(), &m);
+        let err = p.prompt_default("Name", "").unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn every_question_stops_on_io_errors() {
+        let disks = [Disk {
+            name: "ada0".into(),
+            size_bytes: 1 << 30,
+            description: "A".into(),
+        }];
+        let nics = [PciDevice {
+            addr: PciAddr::new(0, 20, 3),
+            driver: "none0".into(),
+            vendor: 0x8086,
+            device: 0x1234,
+            class: 0x028000,
+            description: None,
+        }];
+        // Each question answered wrong once (where it can be) first.
+        let input = "x\ny\nzz\nada0\n9\n1\n\n\na\nb\npw\npw\n";
+        fails_on_every_io_error(input, &|p| {
+            p.prompt_default("Name", "dflt")?;
+            p.ask_yes_no("Go?", true)?;
+            p.choose_disk(&disks)?;
+            p.choose_devices(&nics, &[nics[0].addr])?;
+            p.password("Root")?;
+            Ok(())
+        });
     }
 
     #[test]

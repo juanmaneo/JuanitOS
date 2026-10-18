@@ -423,12 +423,12 @@ impl<'a> Installer<'a> {
             &["/tmp/zpool.cache", &self.target("boot/zfs/zpool.cache")],
         )?;
 
-        let cfg = p.global_config();
-        let jos_toml = toml_pretty(&cfg)?;
-        self.fs.write(
-            &self.target_path("usr/local/etc/juanitos/jos.toml"),
-            &jos_toml,
-        )?;
+        toml_pretty(&p.global_config()).and_then(|jos_toml| {
+            self.fs.write(
+                &self.target_path("usr/local/etc/juanitos/jos.toml"),
+                &jos_toml,
+            )
+        })?;
         self.fs
             .mkdir_p(&self.target_path("usr/local/etc/juanitos/qubes"))?;
         self.fs.write(
@@ -531,7 +531,7 @@ impl<'a> Installer<'a> {
 }
 
 fn toml_pretty(cfg: &GlobalConfig) -> Result<String> {
-    Ok(toml::to_string_pretty(cfg)?)
+    toml::to_string_pretty(cfg).map_err(Error::from)
 }
 
 /// `/etc/fstab` for the installed system: swap and the ESP (FreeBSD 14
@@ -637,6 +637,15 @@ mod tests {
         );
         // The password itself never shows up in argv.
         assert!(calls.iter().all(|c| !c.contains("secret")));
+        // Without a root password (a plan from elsewhere), root is left alone.
+        let p = InstallPlan {
+            root_password: None,
+            ..plan()
+        };
+        let m = MockRunner::new();
+        Installer::new(&m, true, &p).accounts().unwrap();
+        assert_eq!(m.calls().len(), 1);
+        assert!(m.calls()[0].contains("useradd alice"));
     }
 
     #[test]
@@ -689,17 +698,142 @@ mod tests {
     fn failing_step_stops_the_run() {
         let p = plan();
         let m = MockRunner::new().respond("gpart", &["create"], CmdOutput::failed(1, "busy"));
-        let mut steps = 0;
+        let mut seen = Vec::new();
         let err = Installer::new(&m, true, &p)
-            .run_with("", &mut |e| {
-                if matches!(e, Progress::Step { .. }) {
-                    steps += 1
-                }
-            })
+            .run_with("", &mut |e| seen.push(e))
             .unwrap_err();
         assert!(err.to_string().contains("busy"), "{err}");
-        assert_eq!(steps, 2, "stopped in partitioning");
+        let titles: Vec<&str> = STEP_TITLES.iter().take(2).copied().collect();
+        let started: Vec<Progress> = titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| Progress::Step {
+                index,
+                total: STEP_TITLES.len(),
+                title: title.to_string(),
+            })
+            .collect();
+        assert_eq!(seen, started, "stopped in partitioning");
         assert!(!m.calls().iter().any(|c| c.starts_with("zpool")));
+    }
+
+    /// A scratch directory for one test, created empty.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jos-install-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A plan for a real (not dry) run: a verified dist directory and a
+    /// target root holding the boot loader the ESP gets.
+    fn real_plan(dir: &Path) -> InstallPlan {
+        let dist = dir.join("dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::write(dist.join(dom0::DIST_TARBALL), b"dom0").unwrap();
+        let mut manifest = DistManifest::default();
+        manifest.add(
+            juanitos_core::release::sha256_bytes(b"dom0"),
+            4,
+            dom0::DIST_TARBALL.to_string(),
+        );
+        std::fs::write(dist.join(dom0::DIST_MANIFEST), manifest.render()).unwrap();
+        let target = dir.join("target");
+        std::fs::create_dir_all(target.join("boot")).unwrap();
+        std::fs::write(target.join("boot/loader.efi"), b"efi").unwrap();
+        InstallPlan {
+            dist_dir: dist.to_string_lossy().into_owned(),
+            target: target.to_string_lossy().into_owned(),
+            ..plan()
+        }
+    }
+
+    #[test]
+    fn every_failing_command_stops_the_install() {
+        let dir = scratch("fail-each");
+        let p = real_plan(&dir);
+        // No dataset exists yet, so every one is created.
+        let mock = || MockRunner::new().respond("zfs", &["list"], CmdOutput::failed(1, ""));
+        let m = mock();
+        Installer::new(&m, false, &p).run("").unwrap();
+        let calls = m.calls();
+        // Failures the installer shrugs off: no partition table to destroy
+        // yet, the ESP already unmounted, no EFI variables, and existence
+        // queries answering "not there".
+        let tolerated = |c: &str| {
+            ["gpart destroy", "umount", "efibootmgr", "zfs list"]
+                .iter()
+                .any(|t| c.starts_with(t))
+        };
+        for (n, call) in calls.iter().enumerate() {
+            let m = mock().fail_call(n);
+            let r = Installer::new(&m, false, &p).run("");
+            if tolerated(call) {
+                assert!(r.is_ok(), "{call}: {r:?}");
+            } else {
+                let err = r.unwrap_err().to_string();
+                assert!(err.contains("mock failure"), "{call}: {err}");
+                assert_eq!(m.calls().len(), n + 1, "{call}: nothing runs after it");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_unwritable_file_stops_the_configuration() {
+        let blocked = [
+            "etc/rc.conf",
+            "boot/loader.conf",
+            "etc/fstab",
+            "boot/efi/",
+            "boot/zfs/",
+            "usr/local/etc/juanitos/jos.toml",
+            "usr/local/etc/juanitos/qubes/",
+            "usr/local/etc/juanitos/install-report.txt",
+        ];
+        for rel in blocked {
+            let dir = scratch("blocked");
+            let p = InstallPlan {
+                target: dir.to_string_lossy().into_owned(),
+                ..plan()
+            };
+            // A directory where a file goes, a file where a directory goes.
+            let path = dir.join(rel.trim_end_matches('/'));
+            if rel.ends_with('/') {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"").unwrap();
+            } else {
+                std::fs::create_dir_all(&path).unwrap();
+            }
+            let m = MockRunner::new();
+            assert!(
+                Installer::new(&m, false, &p).configure("").is_err(),
+                "{rel}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_broken_dist_or_root_is_reported() {
+        let dir = scratch("broken");
+        let p = real_plan(&dir);
+        let m = MockRunner::new();
+        // Not text at all.
+        std::fs::write(
+            Path::new(&p.dist_dir).join(dom0::DIST_MANIFEST),
+            b"\xff\xfe",
+        )
+        .unwrap();
+        let err = Installer::new(&m, false, &p).verify_dist().unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+        // No boot loader in the extracted root: nothing for the ESP, and
+        // the ESP is unmounted all the same.
+        std::fs::remove_file(Path::new(&p.target).join("boot/loader.efi")).unwrap();
+        assert!(Installer::new(&m, false, &p).install_bootloader().is_err());
+        let last = m.calls().pop().unwrap();
+        assert!(last.starts_with("umount "), "{last}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

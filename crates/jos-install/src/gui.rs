@@ -213,7 +213,10 @@ mod tests {
         let out = run(&mut d, &mut w, &m, true, "", opts()).unwrap();
         assert_eq!(out, Outcome::Exit);
         assert_eq!(w.page, Page::Finish);
-        assert!(matches!(&w.install, InstallState::Failed(e) if e.contains("no disk")));
+        let failed = InstallState::Failed(
+            "command `gpart create -s gpt nda0` failed (exit code Some(1)): no disk".into(),
+        );
+        assert_eq!(w.install, failed);
     }
 
     #[test]
@@ -227,6 +230,8 @@ mod tests {
         );
         assert!(m.calls().is_empty(), "nothing touched");
 
+        // Long idle once the script has run out: the loop only stops at
+        // its tick limit.
         let mut d = script(&[]);
         let err = run(
             &mut d,
@@ -236,11 +241,23 @@ mod tests {
             "",
             LoopOptions {
                 tick: Duration::from_millis(1),
-                max_ticks: Some(3),
+                max_ticks: Some(300),
             },
         )
         .unwrap_err();
-        assert!(err.to_string().contains("3 ticks"));
+        assert!(err.to_string().contains("300 ticks"));
         assert_eq!(LoopOptions::default().max_ticks, None);
+        d.restore_console().unwrap();
+        assert!(d.inner.restored);
+    }
+
+    #[test]
+    fn a_display_that_fails_ends_the_ui() {
+        let mut d = script(&[]);
+        d.inner.fail_after_frames = Some(0);
+        let m = MockRunner::new();
+        let err = run(&mut d, &mut sample_wizard(), &m, true, "", opts()).unwrap_err();
+        assert_eq!(err.to_string(), "framebuffer gone");
+        assert_eq!(d.inner.presented, 0);
     }
 }

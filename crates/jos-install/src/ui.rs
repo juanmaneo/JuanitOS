@@ -374,11 +374,12 @@ fn disk(c: &mut Canvas, w: &Wizard) {
             THEME.text_muted,
         );
     }
-    if let Some(d) = w.selected_disk() {
-        let y = BODY_Y + w.disks.len().min(8) as i32 * 64 + 20;
-        let warn = format!("Everything on /dev/{} will be erased.", d.name);
-        c.text(CONTENT_X, y, &warn, 2, THEME.accent);
-    }
+    let y = BODY_Y + w.disks.len().min(8) as i32 * 64 + 20;
+    let warn = w
+        .selected_disk()
+        .map(|d| format!("Everything on /dev/{} will be erased.", d.name))
+        .unwrap_or_default();
+    c.text(CONTENT_X, y, &warn, 2, THEME.accent);
 }
 
 fn field(c: &mut Canvas, w: &Wizard, widget: Widget, x: i32, y: i32, label: &str, note: &str) {
@@ -393,20 +394,19 @@ fn field(c: &mut Canvas, w: &Wizard, widget: Widget, x: i32, y: i32, label: &str
     let by = y + 24;
     let border = if focused { THEME.accent } else { THEME.dim };
     c.boxed(x, by, FIELD_W, FIELD_H, border, THEME.highlight);
-    if let Some(f) = w.field(widget) {
-        let (shown, before) = if widget.is_password() {
-            (
-                "*".repeat(f.len()),
-                "*".repeat(f.before_cursor().chars().count()),
-            )
-        } else {
-            (f.value.clone(), f.before_cursor().to_string())
-        };
-        c.text_clip(x + 14, by + 15, &shown, 2, FIELD_W - 28, THEME.text);
-        if focused {
-            let cx = x + 14 + font::text_width(&before, 2) + 1;
-            c.fill(cx.min(x + FIELD_W - 12), by + 11, 2, 22, THEME.accent);
-        }
+    let f = w.field(widget).cloned().unwrap_or_default();
+    let (shown, before) = if widget.is_password() {
+        (
+            "*".repeat(f.len()),
+            "*".repeat(f.before_cursor().chars().count()),
+        )
+    } else {
+        (f.value.clone(), f.before_cursor().to_string())
+    };
+    c.text_clip(x + 14, by + 15, &shown, 2, FIELD_W - 28, THEME.text);
+    if focused {
+        let cx = x + 14 + font::text_width(&before, 2) + 1;
+        c.fill(cx.min(x + FIELD_W - 12), by + 11, 2, 22, THEME.accent);
     }
     if !note.is_empty() {
         c.text_clip(
@@ -732,19 +732,25 @@ fn bottom_bar(c: &mut Canvas, w: &Wizard) {
         c.text_clip(CONTENT_X, BAR_Y - 36, e, 2, CONTENT_W, FAIL);
     }
     let widgets = w.widgets();
-    let buttons: Vec<Widget> = widgets.iter().copied().filter(|b| b.is_button()).collect();
+    // (widget, label, primary, enabled) of the page's buttons.
+    let buttons: Vec<(Widget, &str, bool, bool)> = widgets
+        .iter()
+        .filter_map(|&b| {
+            let (label, primary, enabled) = match b {
+                Widget::Next => (w.next_label(), true, w.can_advance()),
+                Widget::Back => ("Back", false, true),
+                Widget::Quit => ("Quit", false, true),
+                Widget::Console => ("Exit to console", false, true),
+                Widget::Reboot => ("Reboot", true, true),
+                _ => return None,
+            };
+            Some((b, label, primary, enabled))
+        })
+        .collect();
     let n = buttons.len() as i32;
-    for (i, b) in buttons.iter().enumerate() {
+    for (i, (b, label, primary, enabled)) in buttons.into_iter().enumerate() {
         let x = CONTENT_R - (n - i as i32) * (BUTTON_W + 16) + 16;
-        let (label, primary, enabled) = match b {
-            Widget::Next => (w.next_label(), true, w.can_advance()),
-            Widget::Back => ("Back", false, true),
-            Widget::Quit => ("Quit", false, true),
-            Widget::Console => ("Exit to console", false, true),
-            Widget::Reboot => ("Reboot", true, true),
-            _ => ("", false, false),
-        };
-        button(c, x, label, w.focused() == Some(*b), primary, enabled);
+        button(c, x, label, w.focused() == Some(b), primary, enabled);
     }
     if !widgets.is_empty() {
         c.text(
@@ -760,30 +766,35 @@ fn bottom_bar(c: &mut Canvas, w: &Wizard) {
 /// Render every page with sample data into `dir` (PNG), for the
 /// documentation and for eyeballing the layout on any host.
 pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Result<Vec<String>> {
+    std::fs::create_dir_all(dir)?;
+    sample_pages()
+        .iter()
+        .map(|(name, w)| {
+            let file = dir.join(format!("{name}.png"));
+            jos_gfx::png::write(&render(w, width, height), &file)?;
+            Ok(file.display().to_string())
+        })
+        .collect()
+}
+
+/// [`sample_wizard`] on every page, walked through as a user would.
+fn sample_pages() -> Vec<(&'static str, Wizard)> {
     use jos_fb::keys::Key;
 
-    std::fs::create_dir_all(dir)?;
     let mut w = sample_wizard();
-    let mut written = Vec::new();
-    let mut shot = |w: &Wizard, name: &str| -> anyhow::Result<()> {
-        let file = dir.join(format!("{name}.png"));
-        jos_gfx::png::write(&render(w, width, height), &file)?;
-        written.push(file.display().to_string());
-        Ok(())
-    };
-    shot(&w, "installer-1-welcome")?;
+    let mut pages = vec![("installer-1-welcome", w.clone())];
     w.handle(Key::Enter);
-    shot(&w, "installer-2-hardware")?;
+    pages.push(("installer-2-hardware", w.clone()));
     w.handle(Key::Enter);
     w.handle(Key::Down);
-    shot(&w, "installer-3-disk")?;
+    pages.push(("installer-3-disk", w.clone()));
     w.handle(Key::Enter);
-    shot(&w, "installer-4-system")?;
+    pages.push(("installer-4-system", w.clone()));
     for _ in 0..4 {
         w.handle(Key::Tab);
     }
     w.handle(Key::Enter);
-    shot(&w, "installer-5-passthrough")?;
+    pages.push(("installer-5-passthrough", w.clone()));
     w.handle(Key::Enter);
     for (text, enter) in [
         ("secret", true),
@@ -798,14 +809,14 @@ pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Re
             w.handle(Key::Enter);
         }
     }
-    shot(&w, "installer-6-users")?;
+    pages.push(("installer-6-users", w.clone()));
     w.handle(Key::Enter);
     for ch in "pw".chars() {
         w.handle(Key::Char(ch));
     }
     w.handle(Key::Enter);
     w.handle(Key::Char(' '));
-    shot(&w, "installer-7-summary")?;
+    pages.push(("installer-7-summary", w.clone()));
     w.handle(Key::Tab);
     w.handle(Key::Tab);
     w.handle(Key::Enter);
@@ -816,10 +827,10 @@ pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Re
             title: (*t).to_string(),
         });
     }
-    shot(&w, "installer-8-install")?;
+    pages.push(("installer-8-install", w.clone()));
     w.finished(Ok(()));
-    shot(&w, "installer-9-finish")?;
-    Ok(written)
+    pages.push(("installer-9-finish", w));
+    pages
 }
 
 /// A wizard filled with plausible hardware, for screenshots and tests.
@@ -1043,6 +1054,42 @@ mod tests {
         for f in &files {
             assert!(std::fs::metadata(f).unwrap().len() > 100, "{f}");
         }
+        // A file in the way of the directory, a directory in the way of
+        // a picture.
+        let first = dir.join("installer-1-welcome.png");
+        std::fs::remove_file(&first).unwrap();
+        std::fs::create_dir(&first).unwrap();
+        assert!(screenshots(&dir, 640, 400).is_err());
+        assert!(screenshots(&dir.join("installer-2-hardware.png"), 640, 400).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lists_show_the_selection_without_focus() {
+        let mut w = sample_wizard();
+        for page in [Page::Disk, Page::Passthrough] {
+            w.page = page;
+            w.focus = 0;
+            let focused = render(&w, 1280, 800);
+            w.handle(Key::Tab);
+            assert!(differs(&focused, &render(&w, 1280, 800)), "{page:?}");
+        }
+        w.page = Page::Disk;
+        let described = render(&w, 1280, 800);
+        w.disks[0].description.clear();
+        assert!(differs(&described, &render(&w, 1280, 800)));
+    }
+
+    #[test]
+    fn the_install_page_before_the_first_step() {
+        let mut w = sample_wizard();
+        w.page = Page::Install;
+        let waiting = render(&w, 1280, 800);
+        w.on_progress(crate::install::Progress::Step {
+            index: 0,
+            total: 8,
+            title: "Verifying".into(),
+        });
+        assert!(differs(&waiting, &render(&w, 1280, 800)));
     }
 }

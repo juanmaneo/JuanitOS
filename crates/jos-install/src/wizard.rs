@@ -341,14 +341,8 @@ impl Wizard {
 
     fn move_focus(&mut self, forward: bool) {
         let n = self.widgets().len();
-        if n == 0 {
-            return;
-        }
-        self.focus = if forward {
-            (self.focus + 1) % n
-        } else {
-            (self.focus + n - 1) % n
-        };
+        let step = if forward { 1 } else { n.saturating_sub(1) };
+        self.focus = (self.focus + step).checked_rem(n).unwrap_or(0);
     }
 
     pub fn field(&self, w: Widget) -> Option<&TextField> {
@@ -383,15 +377,6 @@ impl Wizard {
             Widget::Desktop => self.desktop,
             Widget::ConfirmErase => self.confirm_erase,
             _ => false,
-        }
-    }
-
-    fn toggle(&mut self, w: Widget) {
-        match w {
-            Widget::AcceptChecks => self.accept_checks = !self.accept_checks,
-            Widget::Desktop => self.desktop = !self.desktop,
-            Widget::ConfirmErase => self.confirm_erase = !self.confirm_erase,
-            _ => {}
         }
     }
 
@@ -535,10 +520,9 @@ impl Wizard {
             }
             Widget::Quit | Widget::Console => Action::Exit,
             Widget::Reboot => Action::Reboot,
-            _ if w.is_checkbox() => {
-                self.toggle(w);
-                Action::None
-            }
+            Widget::AcceptChecks => toggled(&mut self.accept_checks),
+            Widget::Desktop => toggled(&mut self.desktop),
+            Widget::ConfirmErase => toggled(&mut self.confirm_erase),
             // Enter in a field or the disk list: on to the next widget, or
             // the next page from the last input.
             _ => {
@@ -558,10 +542,7 @@ impl Wizard {
 
     /// Handle one key press.
     pub fn handle(&mut self, key: Key) -> Action {
-        if self.page == Page::Install {
-            // Nothing to do while the disk is being written.
-            return Action::None;
-        }
+        // Nothing has focus while the disk is being written.
         let Some(w) = self.focused() else {
             return Action::None;
         };
@@ -585,8 +566,7 @@ impl Wizard {
             Key::Up => self.move_focus(false),
             Key::Down => self.move_focus(true),
             Key::Left | Key::Right if w.is_button() => self.move_focus(key == Key::Right),
-            Key::Char(' ') if w.is_checkbox() => self.toggle(w),
-            Key::Char(' ') if w.is_button() => return self.activate(w),
+            Key::Char(' ') if w.is_checkbox() || w.is_button() => return self.activate(w),
             Key::Char(c) if Self::accepts(w, c) => {
                 if let Some(f) = self.field_mut(w) {
                     f.insert(c);
@@ -705,6 +685,12 @@ impl Wizard {
         let count = |s: Status| self.checks.iter().filter(|c| c.status == s).count();
         (count(Status::Fail), count(Status::Warn))
     }
+}
+
+/// Flip a checkbox.
+fn toggled(flag: &mut bool) -> Action {
+    *flag = !*flag;
+    Action::None
 }
 
 /// Move a list selection one row up or down, staying within `len` rows.
@@ -917,9 +903,9 @@ mod tests {
         assert!(w.can_advance());
         w.handle(Key::Tab);
         w.handle(Key::Tab);
-        let Action::Start(plan) = w.handle(Key::Enter) else {
-            panic!("expected Start")
-        };
+        let action = w.handle(Key::Enter);
+        let plan = w.plan();
+        assert_eq!(action, Action::Start(Box::new(plan.clone())));
         assert_eq!(plan.disk, "nda0");
         assert_eq!(plan.root_password.as_deref(), Some("rootpw"));
         assert_eq!(plan.user, Some(("alice".into(), "pw".into())));
@@ -952,6 +938,51 @@ mod tests {
         assert_eq!(w.handle(Key::Enter), Action::Reboot);
         w.handle(Key::Left);
         assert_eq!(w.handle(Key::Char(' ')), Action::Exit);
+    }
+
+    #[test]
+    fn keys_that_do_little() {
+        let mut w = wizard();
+        w.handle(Key::Enter);
+        w.handle(Key::Enter);
+        w.handle(Key::Enter); // Disk -> System, on the hostname
+        assert_eq!(w.focused(), Some(Widget::Hostname));
+        typ(&mut w, "ab");
+        w.handle(Key::Left);
+        w.handle(Key::Left);
+        w.handle(Key::Right);
+        typ(&mut w, "-");
+        assert_eq!(w.hostname.value, "juanitosa-b");
+        // Down leaves a field like Tab does.
+        w.handle(Key::Down);
+        assert_eq!(w.focused(), Some(Widget::Swap));
+        for _ in 0..2 {
+            w.handle(Key::Tab);
+        }
+        // Typing or erasing on a button changes nothing.
+        assert_eq!(w.focused(), Some(Widget::Back));
+        let before = w.clone().plan();
+        typ(&mut w, "x");
+        w.handle(Key::Backspace);
+        assert_eq!(w.plan(), before);
+        // Enter on Back goes back.
+        assert_eq!(w.handle(Key::Enter), Action::None);
+        assert_eq!(w.page, Page::Disk);
+    }
+
+    #[test]
+    fn progress_outside_an_installation_is_harmless() {
+        let mut w = wizard();
+        assert_eq!(w.progress_permille(), 0);
+        w.on_progress(Progress::Done);
+        assert!(w.log.is_empty());
+        w.on_progress(Progress::Step {
+            index: 1,
+            total: 2,
+            title: "two".into(),
+        });
+        assert!(w.log.is_empty());
+        assert_eq!(w.progress_permille(), 500);
     }
 
     #[test]
@@ -1236,9 +1267,13 @@ mod tests {
             .any(|(k, v)| *k == "Passthrough" && v == "1/0/0 1/0/1"));
         w.swap = TextField::new("0");
         w.user_name = TextField::default();
+        w.desktop = false;
         let rows = w.summary_rows();
         assert!(rows.iter().any(|(_, v)| v.contains("no swap")));
         assert!(rows.iter().any(|(k, v)| *k == "User" && v == "(none)"));
+        assert!(rows
+            .iter()
+            .any(|(k, v)| *k == "Desktop" && v == "console only"));
     }
 
     #[test]

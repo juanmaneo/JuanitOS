@@ -236,6 +236,8 @@ pub struct MockRunner {
     responses: HashMap<String, Vec<(Vec<String>, CmdOutput)>>,
     /// Programs that cannot be started at all (not installed).
     missing: Vec<String>,
+    /// Index of the call that exits with status 1 ([`MockRunner::fail_call`]).
+    fail_call: Option<usize>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -261,6 +263,14 @@ impl MockRunner {
         self
     }
 
+    /// Make the `n`-th command (0-based, in call order) exit with status 1
+    /// and stderr `mock failure`, whatever its canned response: walking
+    /// `n` over a sequence reaches the error path after every step.
+    pub fn fail_call(mut self, n: usize) -> Self {
+        self.fail_call = Some(n);
+        self
+    }
+
     /// Every command executed, as shell-joined strings.
     pub fn calls(&self) -> Vec<String> {
         lock_log(&self.calls).clone()
@@ -269,9 +279,16 @@ impl MockRunner {
 
 impl Runner for MockRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput> {
-        lock_log(&self.calls).push(shell_join(program, args));
+        let index = {
+            let mut calls = lock_log(&self.calls);
+            calls.push(shell_join(program, args));
+            calls.len() - 1
+        };
         if self.missing.iter().any(|m| m == program) {
             return Err(io_error(program)(std::io::ErrorKind::NotFound.into()));
+        }
+        if self.fail_call == Some(index) {
+            return Ok(CmdOutput::failed(1, "mock failure"));
         }
 
         let best = self
@@ -343,6 +360,22 @@ mod tests {
         assert_eq!(m.run("zfs", &["list"]).unwrap().stdout, "generic");
         assert_eq!(m.run("zfs", &["get"]).unwrap().stdout, "");
         assert_eq!(m.calls().len(), 3);
+    }
+
+    #[test]
+    fn mock_runner_fails_the_chosen_call_only() {
+        let m = MockRunner::new()
+            .respond("zfs", &[], CmdOutput::ok("canned"))
+            .fail_call(1);
+        let outs: Vec<CmdOutput> = (0..3).map(|_| m.run("zfs", &[]).unwrap()).collect();
+        assert_eq!(
+            outs,
+            [
+                CmdOutput::ok("canned"),
+                CmdOutput::failed(1, "mock failure"),
+                CmdOutput::ok("canned")
+            ]
+        );
     }
 
     #[test]

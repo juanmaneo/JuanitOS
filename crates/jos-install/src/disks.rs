@@ -256,6 +256,28 @@ mod tests {
             None
         );
         assert_eq!(parse_root_device("tmpfs /tmp tmpfs rw 0 0\n"), None);
+        assert_eq!(parse_root_device("\n/dev/ada0p2\n"), None);
+    }
+
+    #[test]
+    fn listing_with_missing_or_failing_tools() {
+        use juanitos_core::sys::{CmdOutput, MockRunner};
+        assert!(list_disks(&MockRunner::new().missing("sysctl")).is_err());
+        let no_disks = MockRunner::new().respond("sysctl", &[], CmdOutput::failed(1, ""));
+        assert_eq!(list_disks(&no_disks).unwrap(), []);
+        // No root in `mount -p`: no boot disk to hide. A disk `diskinfo`
+        // cannot open is listed without size or description.
+        let m = MockRunner::new()
+            .respond("sysctl", &["-n", "kern.disks"], CmdOutput::ok("ada0\n"))
+            .respond("mount", &[], CmdOutput::ok("tmpfs /tmp tmpfs rw 0 0\n"))
+            .respond("diskinfo", &[], CmdOutput::failed(1, ""));
+        assert_eq!(boot_disk(&m), None);
+        let unknown = Disk {
+            name: "ada0".into(),
+            size_bytes: 0,
+            description: String::new(),
+        };
+        assert_eq!(list_disks(&m).unwrap(), [unknown]);
     }
 
     #[test]
