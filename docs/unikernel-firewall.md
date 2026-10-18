@@ -69,7 +69,9 @@ Everything is single-threaded and poll-driven; after 2 ms without traffic
 the CPU halts until the next firmware timer tick so an idle firewall does
 not burn a host core. Stats and the DHCP state go to `com1` (`jos console
 sys-firewall`); a fatal error or panic resets the VM after 5 s and the
-`jos` supervisor restarts it.
+`jos` supervisor restarts it. Since it never leaves boot services, it
+turns off the firmware's five-minute boot watchdog first, which would
+otherwise reset it on schedule.
 
 Build and package:
 

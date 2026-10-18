@@ -304,7 +304,7 @@ with `--dry-run` and unit tests on the development host; on Linux,
 `tools/uefi-test.sh` boots the UEFI pieces under QEMU + OVMF:
 `jos-boot.efi` draws the card and chain-loads the genuine FreeBSD
 `loader.efi`, and `jos-firewall.efi` serves DHCP, answers ARP and NATs a
-ping end to end (untested on bhyve itself).
+ping end to end.
 
 Stage 1 is done from a Linux host: `jos-release builder --auto` builds
 the ISO inside FreeBSD's official 15.1 VM image under QEMU/KVM (about 10
@@ -342,8 +342,21 @@ second per command, 2 MB of output included, and `jos copy` and
 `jos-copy` ride on it. The channel's second port is the qube's doorbell:
 `jos-copy` rings it and `jos serve` answers at once instead of on its
 next poll (0.4 s end to end with the poll set to 60 s; both templates
-updated). The test suite reaches 96.7% line coverage, gated per crate
+updated). The test suite reaches 96.9% line coverage, gated per crate
 in CI (see `coverage.toml` for the per-crate floors).
+
+`jos setup` was then run for real on that dom0 (`--nic` on the
+emulated-IOMMU NIC, no GPU): it built `fbsd15-net`, `sys-net` and
+`sys-firewall` and started them. The bugs it exposed are fixed:
+two supervisors racing to create the same bridge, qubes asking for more
+vCPUs than `vmm` allows (now capped at `hw.vmm.maxcpu` with a note),
+FreeBSD's `nuageinit` dropping the agent files (its `write_files` stops
+at the first missing directory), dry runs writing qube files outside
+`JOS_CONFIG_DIR`, and the firmware watchdog resetting `sys-firewall`
+every five minutes. On top of it `fbsd15-dev` and a clone `work` were
+installed; `work` reaches the Internet through `sys-firewall` →
+`sys-net`, runs Podman, takes `jos copy` from dom0, and `jos stop
+--all` powers the agents' qubes off through them, tier by tier.
 
 Stage 2 is done too: the stage-1 ISO was installed headless (`qemu -vga
 none`, text installer on the serial port) and the installed JuanitOS
@@ -388,9 +401,8 @@ the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
 Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
 but has not been booted), a display for Redox qubes (until `pci_types`
 is fixed upstream), a COSMIC session on real hardware (the packages
-install; the desktop has not been seen running yet), and a `jos setup`
-run on a real dom0 (it chains commands verified there one by one, but
-as a whole it is only verified with `--dry-run` and unit tests).
+install; the desktop has not been seen running yet), and `jos setup` on
+real hardware (the nested run above covers it without a GPU).
 
 ## License
 

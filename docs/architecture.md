@@ -114,7 +114,10 @@ way the QubesOS firstboot does after Anaconda:
 The plan is a pure function of the host (PCI devices, uplink, IOMMU,
 `pptdevs`) and of the qubes already defined: whatever exists is skipped,
 so `jos setup` resumes after a failure and is harmless once done.
-`--dry-run` prints the plan and the host commands. A dom0 whose only
+No qube gets more vCPUs than the host's `vmm` allows (`hw.vmm.maxcpu`):
+defaults are lowered with a note, an explicit `--gpu-cpus` that is too
+large fails the plan. `--dry-run` prints the plan, the host commands
+and the qube files it would write, and writes none of them. A dom0 whose only
 network card was reserved at install time has nothing to download
 through, so the templates have to come from local images
 (`jos template install --image --checksums`) before `jos setup`.
