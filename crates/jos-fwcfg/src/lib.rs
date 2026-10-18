@@ -70,10 +70,6 @@ impl Ipv4Net {
         Ipv4Net { addr, prefix }
     }
 
-    pub const fn host(addr: Ipv4Addr) -> Self {
-        Ipv4Net { addr, prefix: 32 }
-    }
-
     /// Host bits; a prefix above 32 is treated as 32.
     fn host_bits(&self) -> u32 {
         32 - u32::from(self.prefix.min(32))
@@ -373,9 +369,22 @@ impl serde::Serialize for Rule {
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Rule {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
-        let s = <String as serde::Deserialize>::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
+        from_string(d)
     }
+}
+
+/// Deserialize a string and parse it. One straight path, with no early
+/// return: llvm reports a generic function's coverage from its best
+/// single instantiation, and a test deserializer that cannot produce a
+/// string is a different instantiation from the one that can.
+#[cfg(feature = "serde")]
+fn from_string<'de, T, D>(d: D) -> core::result::Result<T, D::Error>
+where
+    T: FromStr<Err = ParseError>,
+    D: serde::Deserializer<'de>,
+{
+    <String as serde::Deserialize>::deserialize(d)
+        .and_then(|s| s.parse().map_err(serde::de::Error::custom))
 }
 
 #[cfg(feature = "serde")]
@@ -388,8 +397,7 @@ impl serde::Serialize for Action {
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Action {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
-        let s = <String as serde::Deserialize>::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
+        from_string(d)
     }
 }
 
@@ -479,11 +487,7 @@ impl Remainder for core::str::SplitWhitespace<'_> {
             let end = rest.find(char::is_whitespace)?;
             rest = rest[end..].trim_start();
         }
-        if rest.is_empty() {
-            None
-        } else {
-            Some(rest)
-        }
+        Some(rest).filter(|r| !r.is_empty())
     }
 }
 
@@ -509,6 +513,7 @@ mod tests {
         assert!(h.contains(Ipv4Addr::new(1, 1, 1, 1)));
         assert!(!h.contains(Ipv4Addr::new(1, 1, 1, 2)));
         assert!("1.1.1.1/33".parse::<Ipv4Net>().is_err());
+        assert!("1.1.1.1/x".parse::<Ipv4Net>().is_err());
         assert!("foo".parse::<Ipv4Net>().is_err());
         let all: Ipv4Net = "0.0.0.0/0".parse().unwrap();
         assert!(all.contains(Ipv4Addr::new(8, 8, 8, 8)));
@@ -527,6 +532,7 @@ mod tests {
         assert!("02:4a:5b:98:d2".parse::<MacAddr>().is_err());
         assert!("02:4a:5b:98:d2:60:00".parse::<MacAddr>().is_err());
         assert!("zz:4a:5b:98:d2:60".parse::<MacAddr>().is_err());
+        assert!("2:4a:5b:98:d2:60".parse::<MacAddr>().is_err());
     }
 
     #[test]
@@ -562,6 +568,54 @@ mod tests {
         assert!("allow tcp 100-50".parse::<Rule>().is_err());
         assert!("".parse::<Rule>().is_err());
         assert!("allow tcp bogus".parse::<Rule>().is_err());
+        assert!("allow tcp 1.2.3/99".parse::<Rule>().is_err());
+        assert!("allow tcp -5".parse::<Rule>().is_err());
+        assert!("allow tcp 8-".parse::<Rule>().is_err());
+        for text in ["allow icmp 10.0.0.0/8", "deny udp any 60000-61000"] {
+            assert_eq!(format!("{}", text.parse::<Rule>().unwrap()), text);
+        }
+    }
+
+    /// A formatter target that refuses to take more than `room` bytes.
+    struct Cramped {
+        room: usize,
+    }
+
+    impl fmt::Write for Cramped {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            self.room = self.room.checked_sub(s.len()).ok_or(fmt::Error)?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rule_display_stops_at_the_first_write_error() {
+        use core::fmt::Write as _;
+        for text in ["allow tcp 1.1.1.1/32 443", "deny any any"] {
+            let rule: Rule = text.parse().unwrap();
+            for room in 0..text.len() {
+                let mut w = Cramped { room };
+                assert!(write!(w, "{rule}").is_err(), "{text} in {room} bytes");
+            }
+            assert!(write!(Cramped { room: text.len() }, "{rule}").is_ok());
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn rules_and_actions_deserialize_from_strings_only() {
+        use serde::de::value::{Error, StrDeserializer, U32Deserializer};
+        use serde::Deserialize;
+        let s = |text| StrDeserializer::<Error>::new(text);
+        assert_eq!(
+            Rule::deserialize(s("deny")).unwrap(),
+            Rule::new(Action::Deny)
+        );
+        assert!(Rule::deserialize(s("permit")).is_err());
+        assert!(Rule::deserialize(U32Deserializer::<Error>::new(1)).is_err());
+        assert_eq!(Action::deserialize(s("drop")).unwrap(), Action::Deny);
+        assert!(Action::deserialize(s("maybe")).is_err());
+        assert!(Action::deserialize(U32Deserializer::<Error>::new(1)).is_err());
     }
 
     #[test]
@@ -593,6 +647,8 @@ mod tests {
             Action::Allow
         );
         assert_eq!(Proto::from_ip_protocol(6), Some(Proto::Tcp));
+        assert_eq!(Proto::from_ip_protocol(17), Some(Proto::Udp));
+        assert_eq!(Proto::from_ip_protocol(1), Some(Proto::Icmp));
         assert_eq!(Proto::from_ip_protocol(2), None);
     }
 
@@ -625,9 +681,26 @@ mod tests {
                 policy: Action::Deny
             }
         );
-        assert!(parse_line("bogus line").is_err());
-        assert!(parse_line("client work").is_err());
-        assert!(parse_line("rule work").is_err());
+        // Every directive with a word missing or wrong.
+        for bad in [
+            "bogus line",
+            "firewall",
+            "gateway",
+            "gateway nowhere",
+            "upstream",
+            "client",
+            "client work",
+            "client work 10.0.0.1",
+            "client work 10.0.0.1 zz",
+            "rule",
+            "rule work",
+            "rule work permit",
+            "policy",
+            "policy work",
+            "policy work maybe",
+        ] {
+            assert!(parse_line(bad).is_err(), "{bad}");
+        }
         assert_eq!(parse_line("   ").unwrap(), None);
         assert!(directives("nonsense\n").next().unwrap().is_err());
     }
