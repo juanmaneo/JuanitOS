@@ -7,7 +7,7 @@ use core::net::Ipv4Addr;
 use jos_fwcfg::MacAddr;
 
 use crate::config::Config;
-use crate::packet::{be16, be32, ipv4_at, mac_at, put_be16, put_be32, put_bytes, put_ipv4};
+use crate::packet::{chunk, field, ip_field};
 
 pub const SERVER_PORT: u16 = 67;
 pub const CLIENT_PORT: u16 = 68;
@@ -35,6 +35,8 @@ const OPT_PAD: u8 = 0;
 const MAGIC: [u8; 4] = [0x63, 0x82, 0x53, 0x63];
 const OPTIONS_OFFSET: usize = 240;
 const FLAG_BROADCAST: u16 = 0x8000;
+/// One option carries at most 255 bytes, i.e. 63 addresses.
+const MAX_DNS: usize = 63;
 
 /// Lease handed to client qubes (their addresses are fixed anyway).
 pub const CLIENT_LEASE_SECS: u32 = 86400;
@@ -83,55 +85,53 @@ impl Default for Message {
 impl Message {
     /// `payload` is the UDP payload.
     pub fn parse(payload: &[u8]) -> Option<Self> {
-        if payload.get(236..OPTIONS_OFFSET)? != MAGIC {
-            return None;
+        let (h, mut opts) = payload.split_at_checked(OPTIONS_OFFSET)?;
+        if field(h, 236) != MAGIC || field(h, 1) != [1, 6] {
+            return None; // not DHCP over Ethernet
         }
-        if *payload.get(1)? != 1 || *payload.get(2)? != 6 {
-            return None; // not Ethernet
-        }
+        let [op] = field(h, 0);
         let mut m = Message {
-            op: *payload.first()?,
-            xid: be32(payload, 4)?,
-            flags: be16(payload, 10)?,
-            ciaddr: ipv4_at(payload, 12)?,
-            yiaddr: ipv4_at(payload, 16)?,
-            siaddr: ipv4_at(payload, 20)?,
-            chaddr: mac_at(payload, 28)?,
+            op,
+            xid: u32::from_be_bytes(field(h, 4)),
+            flags: u16::from_be_bytes(field(h, 10)),
+            ciaddr: ip_field(h, 12),
+            yiaddr: ip_field(h, 16),
+            siaddr: ip_field(h, 20),
+            chaddr: MacAddr(field(h, 28)),
             ..Message::default()
         };
-        let mut off = OPTIONS_OFFSET;
+        let ip = |data: &[u8]| chunk(data, 0).map(Ipv4Addr::from);
         loop {
-            let code = *payload.get(off)?;
-            match code {
-                OPT_END => break,
-                OPT_PAD => {
-                    off = off.checked_add(1)?;
+            let (code, data) = match opts {
+                [OPT_END, ..] => break,
+                [OPT_PAD, rest @ ..] => {
+                    opts = rest;
                     continue;
                 }
-                _ => {}
-            }
-            let len = usize::from(*payload.get(off.checked_add(1)?)?);
-            let start = off.checked_add(2)?;
-            let end = start.checked_add(len)?;
-            let data = payload.get(start..end)?;
+                [code, len, rest @ ..] => {
+                    let (data, rest) = rest.split_at_checked(usize::from(*len))?;
+                    opts = rest;
+                    (*code, data)
+                }
+                _ => return None,
+            };
             match code {
                 OPT_MSG_TYPE => m.msg_type = data.first().copied(),
-                OPT_REQUESTED_IP => m.requested_ip = ipv4_at(data, 0),
-                OPT_SERVER_ID => m.server_id = ipv4_at(data, 0),
-                OPT_SUBNET_MASK => m.subnet_mask = ipv4_at(data, 0),
-                OPT_ROUTER => m.router = ipv4_at(data, 0),
-                OPT_LEASE_TIME => m.lease_secs = be32(data, 0),
+                OPT_REQUESTED_IP => m.requested_ip = ip(data),
+                OPT_SERVER_ID => m.server_id = ip(data),
+                OPT_SUBNET_MASK => m.subnet_mask = ip(data),
+                OPT_ROUTER => m.router = ip(data),
+                OPT_LEASE_TIME => m.lease_secs = chunk(data, 0).map(u32::from_be_bytes),
                 OPT_DNS => {
                     m.dns = data
-                        .as_chunks::<4>()
+                        .as_chunks()
                         .0
                         .iter()
-                        .map(|c| Ipv4Addr::from(*c))
-                        .collect();
+                        .map(|&c| Ipv4Addr::from(c))
+                        .collect()
                 }
                 _ => {}
             }
-            off = end;
         }
         Some(m)
     }
@@ -147,39 +147,49 @@ struct Builder {
 }
 
 impl Builder {
-    fn new(op: u8, xid: u32, flags: u16, chaddr: MacAddr) -> Option<Self> {
-        let mut buf = alloc::vec![0u8; OPTIONS_OFFSET];
-        put_bytes(&mut buf, 0, &[op, 1, 6, 0])?;
-        put_be32(&mut buf, 4, xid)?;
-        put_be16(&mut buf, 10, flags)?;
-        put_bytes(&mut buf, 28, &chaddr.0)?;
-        put_bytes(&mut buf, 236, &MAGIC)?;
-        Some(Builder { buf })
+    /// The fixed BOOTP header; `ciaddr` and `giaddr` stay zero.
+    fn new(
+        op: u8,
+        xid: u32,
+        flags: u16,
+        chaddr: MacAddr,
+        yiaddr: Ipv4Addr,
+        siaddr: Ipv4Addr,
+    ) -> Self {
+        let zero = [0u8; 4];
+        let buf = [
+            [op, 1, 6, 0].as_slice(),
+            &xid.to_be_bytes(),
+            &[0, 0], // secs
+            &flags.to_be_bytes(),
+            &zero,
+            &yiaddr.octets(),
+            &siaddr.octets(),
+            &zero,
+            &chaddr.0,
+            &[0; 10 + 64 + 128], // chaddr padding, sname, file
+            &MAGIC,
+        ]
+        .concat();
+        Builder { buf }
     }
 
-    fn addr(mut self, off: usize, ip: Ipv4Addr) -> Option<Self> {
-        put_ipv4(&mut self.buf, off, ip)?;
-        Some(self)
+    /// Append an option, truncating `data` to the 255 bytes it can hold.
+    fn opt(mut self, code: u8, data: &[u8]) -> Self {
+        let len = u8::try_from(data.len()).unwrap_or(u8::MAX);
+        self.buf.extend_from_slice(&[code, len]);
+        self.buf.extend(data.iter().take(usize::from(len)));
+        self
     }
 
-    fn opt(mut self, code: u8, data: &[u8]) -> Option<Self> {
-        let len = u8::try_from(data.len()).ok()?;
-        self.buf.push(code);
-        self.buf.push(len);
-        self.buf.extend_from_slice(data);
-        Some(self)
-    }
-
-    fn opt_ip(self, code: u8, ip: Ipv4Addr) -> Option<Self> {
+    fn opt_ip(self, code: u8, ip: Ipv4Addr) -> Self {
         self.opt(code, &ip.octets())
     }
 
     fn finish(mut self) -> Vec<u8> {
         self.buf.push(OPT_END);
         // BOOTP minimum size keeps picky clients happy.
-        if self.buf.len() < 300 {
-            self.buf.resize(300, 0);
-        }
+        self.buf.resize(self.buf.len().max(300), 0);
         self.buf
     }
 }
@@ -199,71 +209,74 @@ pub fn serve(cfg: &Config, params: &ServerParams, req: &Message) -> Option<(u8, 
         return None;
     }
     let client = cfg.client_by_mac(req.chaddr)?;
-    let base = |kind: u8| {
-        Builder::new(BOOTREPLY, req.xid, req.flags, req.chaddr)?
-            .opt(OPT_MSG_TYPE, &[kind])?
+    let kind = match req.msg_type? {
+        DISCOVER => OFFER,
+        // Talking to another server.
+        REQUEST if req.server_id.is_some_and(|s| s != cfg.gateway) => return None,
+        REQUEST if req.requested_ip.unwrap_or(req.ciaddr) == client.ip => ACK,
+        REQUEST => NAK,
+        _ => return None,
+    };
+    let reply = |yiaddr, siaddr| {
+        Builder::new(BOOTREPLY, req.xid, req.flags, req.chaddr, yiaddr, siaddr)
+            .opt(OPT_MSG_TYPE, &[kind])
             .opt_ip(OPT_SERVER_ID, cfg.gateway)
     };
-    match req.msg_type? {
-        DISCOVER => Some((OFFER, lease(base(OFFER)?, cfg, params, client.ip)?.finish())),
-        REQUEST => {
-            if req.server_id.is_some_and(|s| s != cfg.gateway) {
-                return None; // talking to another server
-            }
-            let wanted = req.requested_ip.unwrap_or(req.ciaddr);
-            if wanted == client.ip {
-                Some((ACK, lease(base(ACK)?, cfg, params, client.ip)?.finish()))
-            } else {
-                Some((NAK, base(NAK)?.finish()))
-            }
-        }
-        _ => None,
-    }
+    let b = if kind == NAK {
+        reply(Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
+    } else {
+        lease(reply(client.ip, cfg.gateway), cfg, params)
+    };
+    Some((kind, b.finish()))
 }
 
-fn lease(b: Builder, cfg: &Config, params: &ServerParams, ip: Ipv4Addr) -> Option<Builder> {
-    let mut b = b
-        .addr(16, ip)?
-        .addr(20, cfg.gateway)?
-        .opt(OPT_LEASE_TIME, &CLIENT_LEASE_SECS.to_be_bytes())?
-        .opt_ip(OPT_SUBNET_MASK, CLIENT_MASK)?
-        .opt_ip(OPT_ROUTER, cfg.gateway)?;
-    if !params.dns.is_empty() {
-        let bytes: Vec<u8> = params.dns.iter().flat_map(|d| d.octets()).collect();
-        b = b.opt(OPT_DNS, &bytes)?;
+fn lease(b: Builder, cfg: &Config, params: &ServerParams) -> Builder {
+    let b = b
+        .opt(OPT_LEASE_TIME, &CLIENT_LEASE_SECS.to_be_bytes())
+        .opt_ip(OPT_SUBNET_MASK, CLIENT_MASK)
+        .opt_ip(OPT_ROUTER, cfg.gateway);
+    if params.dns.is_empty() {
+        return b;
     }
-    Some(b)
+    let dns: Vec<u8> = params
+        .dns
+        .iter()
+        .take(MAX_DNS)
+        .flat_map(|d| d.octets())
+        .collect();
+    b.opt(OPT_DNS, &dns)
 }
 
 // ---------------------------------------------------------------- client
 
 const PARAMS: [u8; 3] = [OPT_SUBNET_MASK, OPT_ROUTER, OPT_DNS];
 
-pub fn discover(xid: u32, mac: MacAddr) -> Option<Vec<u8>> {
-    Some(
-        Builder::new(BOOTREQUEST, xid, FLAG_BROADCAST, mac)?
-            .opt(OPT_MSG_TYPE, &[DISCOVER])?
-            .opt(OPT_PARAM_REQUEST, &PARAMS)?
-            .finish(),
-    )
+fn client_builder(xid: u32, mac: MacAddr, kind: u8) -> Builder {
+    let none = Ipv4Addr::UNSPECIFIED;
+    Builder::new(BOOTREQUEST, xid, FLAG_BROADCAST, mac, none, none).opt(OPT_MSG_TYPE, &[kind])
 }
 
-pub fn request(xid: u32, mac: MacAddr, offered: Ipv4Addr, server: Ipv4Addr) -> Option<Vec<u8>> {
-    Some(
-        Builder::new(BOOTREQUEST, xid, FLAG_BROADCAST, mac)?
-            .opt(OPT_MSG_TYPE, &[REQUEST])?
-            .opt_ip(OPT_REQUESTED_IP, offered)?
-            .opt_ip(OPT_SERVER_ID, server)?
-            .opt(OPT_PARAM_REQUEST, &PARAMS)?
-            .finish(),
-    )
+pub fn discover(xid: u32, mac: MacAddr) -> Vec<u8> {
+    client_builder(xid, mac, DISCOVER)
+        .opt(OPT_PARAM_REQUEST, &PARAMS)
+        .finish()
+}
+
+pub fn request(xid: u32, mac: MacAddr, offered: Ipv4Addr, server: Ipv4Addr) -> Vec<u8> {
+    client_builder(xid, mac, REQUEST)
+        .opt_ip(OPT_REQUESTED_IP, offered)
+        .opt_ip(OPT_SERVER_ID, server)
+        .opt(OPT_PARAM_REQUEST, &PARAMS)
+        .finish()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::tests::parsing_prefixes;
 
     const WORK_MAC: MacAddr = MacAddr([2, 0x4a, 0x5b, 0x98, 0xd2, 0x60]);
+    const WORK_IP: Ipv4Addr = Ipv4Addr::new(10, 137, 0, 3);
 
     fn cfg() -> Config {
         Config::parse(
@@ -272,23 +285,25 @@ mod tests {
         .unwrap()
     }
 
+    /// What `serve` answers to `msg`, by message type.
+    fn kind_of(params: &ServerParams, msg: &Message) -> Option<u8> {
+        serve(&cfg(), params, msg).map(|(kind, _)| kind)
+    }
+
     #[test]
     fn client_messages_parse_back() {
-        let d = Message::parse(&discover(0xabcd, WORK_MAC).unwrap()).unwrap();
+        let d = Message::parse(&discover(0xabcd, WORK_MAC)).unwrap();
         assert_eq!(d.op, BOOTREQUEST);
         assert_eq!(d.xid, 0xabcd);
         assert_eq!(d.msg_type, Some(DISCOVER));
         assert_eq!(d.chaddr, WORK_MAC);
         assert!(d.wants_broadcast());
-        let r = Message::parse(
-            &request(
-                1,
-                WORK_MAC,
-                Ipv4Addr::new(192, 168, 1, 7),
-                Ipv4Addr::new(192, 168, 1, 1),
-            )
-            .unwrap(),
-        )
+        let r = Message::parse(&request(
+            1,
+            WORK_MAC,
+            Ipv4Addr::new(192, 168, 1, 7),
+            Ipv4Addr::new(192, 168, 1, 1),
+        ))
         .unwrap();
         assert_eq!(r.msg_type, Some(REQUEST));
         assert_eq!(r.requested_ip, Some(Ipv4Addr::new(192, 168, 1, 7)));
@@ -301,13 +316,14 @@ mod tests {
         let params = ServerParams {
             dns: alloc::vec![Ipv4Addr::new(9, 9, 9, 9), Ipv4Addr::new(1, 1, 1, 1)],
         };
-        let d = Message::parse(&discover(7, WORK_MAC).unwrap()).unwrap();
+        let d = Message::parse(&discover(7, WORK_MAC)).unwrap();
         let (kind, payload) = serve(&cfg, &params, &d).unwrap();
         assert_eq!(kind, OFFER);
         let offer = Message::parse(&payload).unwrap();
         assert_eq!(offer.op, BOOTREPLY);
         assert_eq!(offer.xid, 7);
-        assert_eq!(offer.yiaddr, Ipv4Addr::new(10, 137, 0, 3));
+        assert_eq!(offer.yiaddr, WORK_IP);
+        assert_eq!(offer.siaddr, cfg.gateway);
         assert_eq!(offer.server_id, Some(cfg.gateway));
         assert_eq!(offer.router, Some(cfg.gateway));
         assert_eq!(offer.subnet_mask, Some(CLIENT_MASK));
@@ -315,38 +331,114 @@ mod tests {
         assert_eq!(offer.lease_secs, Some(CLIENT_LEASE_SECS));
         assert!(payload.len() >= 300);
 
-        let r = Message::parse(&request(7, WORK_MAC, offer.yiaddr, cfg.gateway).unwrap()).unwrap();
-        let (kind, _) = serve(&cfg, &params, &r).unwrap();
-        assert_eq!(kind, ACK);
+        let r = Message::parse(&request(7, WORK_MAC, offer.yiaddr, cfg.gateway)).unwrap();
+        assert_eq!(kind_of(&params, &r), Some(ACK));
 
-        // Asking for the wrong address is refused.
-        let bad = Message::parse(
-            &request(7, WORK_MAC, Ipv4Addr::new(10, 137, 0, 9), cfg.gateway).unwrap(),
-        )
+        // Asking for the wrong address is refused, and the refusal
+        // carries no lease.
+        let bad = Message::parse(&request(
+            7,
+            WORK_MAC,
+            Ipv4Addr::new(10, 137, 0, 9),
+            cfg.gateway,
+        ))
         .unwrap();
-        assert_eq!(serve(&cfg, &params, &bad).map(|(k, _)| k), Some(NAK));
+        let (kind, payload) = serve(&cfg, &params, &bad).unwrap();
+        assert_eq!(kind, NAK);
+        let nak = Message::parse(&payload).unwrap();
+        assert_eq!(nak.yiaddr, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(nak.siaddr, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(nak.server_id, Some(cfg.gateway));
+        assert_eq!(nak.lease_secs, None);
         // Requests meant for another server are ignored.
-        let other = Message::parse(
-            &request(7, WORK_MAC, offer.yiaddr, Ipv4Addr::new(192, 168, 1, 1)).unwrap(),
-        )
+        let other = Message::parse(&request(
+            7,
+            WORK_MAC,
+            offer.yiaddr,
+            Ipv4Addr::new(192, 168, 1, 1),
+        ))
         .unwrap();
         assert_eq!(serve(&cfg, &params, &other), None);
+        // A REQUEST without a server id (renewal) is judged on ciaddr.
+        let renew = Message {
+            ciaddr: WORK_IP,
+            server_id: None,
+            requested_ip: None,
+            ..r
+        };
+        assert_eq!(kind_of(&params, &renew), Some(ACK));
     }
 
     #[test]
-    fn unknown_mac_is_ignored() {
-        let cfg = cfg();
-        let d = Message::parse(&discover(1, MacAddr([2, 0, 0, 0, 0, 0x99])).unwrap()).unwrap();
-        assert_eq!(serve(&cfg, &ServerParams::default(), &d), None);
+    fn only_discover_and_request_from_known_clients_are_answered() {
+        let params = ServerParams::default();
+        let d = Message::parse(&discover(1, WORK_MAC)).unwrap();
+        let stranger = Message {
+            chaddr: MacAddr([2, 0, 0, 0, 0, 0x99]),
+            ..d.clone()
+        };
+        let reply = Message {
+            op: BOOTREPLY,
+            ..d.clone()
+        };
+        let untyped = Message {
+            msg_type: None,
+            ..d.clone()
+        };
+        let release = Message {
+            msg_type: Some(7),
+            ..d.clone()
+        };
+        for m in [&stranger, &reply, &untyped, &release] {
+            assert_eq!(kind_of(&params, m), None, "{m:?}");
+        }
+        // Without upstream DNS servers the lease simply has no DNS option.
+        let (_, offer) = serve(&cfg(), &params, &d).unwrap();
+        assert!(Message::parse(&offer).unwrap().dns.is_empty());
     }
 
     #[test]
-    fn malformed_options_do_not_panic() {
-        let mut p = discover(1, WORK_MAC).unwrap();
-        p.truncate(OPTIONS_OFFSET + 1); // option code without length
-        assert!(Message::parse(&p).is_none());
-        let mut q = discover(1, WORK_MAC).unwrap();
-        q[OPTIONS_OFFSET + 1] = 200; // length overruns the buffer
-        assert!(Message::parse(&q).is_none());
+    fn the_dns_option_holds_at_most_63_servers() {
+        let params = ServerParams {
+            dns: (0..64).map(|i| Ipv4Addr::new(10, 0, 0, i)).collect(),
+        };
+        let d = Message::parse(&discover(1, WORK_MAC)).unwrap();
+        let (_, offer) = serve(&cfg(), &params, &d).unwrap();
+        assert_eq!(Message::parse(&offer).unwrap().dns, params.dns[..63]);
+    }
+
+    #[test]
+    fn pad_options_are_skipped() {
+        let p = discover(1, WORK_MAC);
+        let padded = [
+            &p[..OPTIONS_OFFSET],
+            &[OPT_PAD, OPT_PAD],
+            &p[OPTIONS_OFFSET..],
+        ]
+        .concat();
+        assert_eq!(Message::parse(&padded), Message::parse(&p));
+    }
+
+    #[test]
+    fn malformed_messages_do_not_panic() {
+        let p = discover(1, WORK_MAC);
+        // Parsing needs the whole header and options up to END.
+        let end = OPTIONS_OFFSET + 3 + 2 + PARAMS.len();
+        assert_eq!(p[end], OPT_END);
+        assert_eq!(
+            parsing_prefixes(&p, &|b| Message::parse(b).is_some()),
+            (end + 1..=p.len()).collect::<Vec<_>>()
+        );
+        let mut long = p.clone();
+        long[OPTIONS_OFFSET + 1] = 200; // length overruns the buffer
+        let mut magic = p.clone();
+        magic[236] = 0;
+        let mut htype = p.clone();
+        htype[1] = 6; // IEEE 802
+        let mut hlen = p.clone();
+        hlen[2] = 8;
+        for bad in [long, magic, htype, hlen] {
+            assert_eq!(Message::parse(&bad), None);
+        }
     }
 }

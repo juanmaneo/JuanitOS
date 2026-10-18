@@ -142,6 +142,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     const TEXT: &str = "# rendered by jos\n\
 firewall sys-firewall\n\
@@ -182,28 +183,41 @@ client personal 10.137.0.4 02:4a:00:00:00:04\n\
     }
 
     #[test]
-    fn errors_are_located() {
+    fn errors_are_located_and_explained() {
+        let unknown = ConfigError::UnknownClient {
+            line: 2,
+            client: String::from("nobody"),
+        };
         assert_eq!(
             Config::parse("gateway 10.0.0.1\nrule nobody allow\n"),
-            Err(ConfigError::UnknownClient {
-                line: 2,
-                client: String::from("nobody")
-            })
+            Err(unknown.clone())
+        );
+        assert_eq!(
+            Config::parse("gateway 10.0.0.1\npolicy nobody deny\n"),
+            Err(unknown.clone())
+        );
+        assert_eq!(
+            unknown.to_string(),
+            "line 2: rule for unknown client `nobody`"
         );
         assert_eq!(
             Config::parse("client a 1.2.3.4 00:00:00:00:00:01\n"),
             Err(ConfigError::MissingGateway)
         );
-        assert!(matches!(
-            Config::parse("gateway 1.2.3.4\nbogus line\n"),
-            Err(ConfigError::Parse { line: 2, .. })
-        ));
         assert_eq!(
-            Config::parse(
-                "gateway 1.2.3.4\nclient a 1.2.3.5 00:00:00:00:00:01\nclient a 1.2.3.6 00:00:00:00:00:02\n"
-            ),
-            Err(ConfigError::DuplicateClient(String::from("a")))
+            ConfigError::MissingGateway.to_string(),
+            "config has no `gateway` line"
         );
+        let error = jos_fwcfg::parse_line("bogus line").unwrap_err();
+        let bogus = Config::parse("gateway 1.2.3.4\nbogus line\n").unwrap_err();
+        assert_eq!(bogus.to_string(), alloc::format!("line 2: {error}"));
+        assert_eq!(bogus, ConfigError::Parse { line: 2, error });
+        let twice = Config::parse(
+            "gateway 1.2.3.4\nclient a 1.2.3.5 00:00:00:00:00:01\nclient a 1.2.3.6 00:00:00:00:00:02\n",
+        )
+        .unwrap_err();
+        assert_eq!(twice, ConfigError::DuplicateClient(String::from("a")));
+        assert_eq!(twice.to_string(), "client `a` listed twice");
     }
 
     #[test]

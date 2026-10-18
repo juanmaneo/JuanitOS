@@ -11,7 +11,7 @@
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
-use crate::packet::{IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP};
+use crate::packet::{IPPROTO_ICMP, IPPROTO_TCP};
 
 pub const PORT_MIN: u16 = 10000;
 pub const PORT_MAX: u16 = 65535;
@@ -37,7 +37,6 @@ impl Flow {
     fn timeout(&self) -> u64 {
         match self.proto {
             IPPROTO_TCP => TCP_TIMEOUT_MS,
-            IPPROTO_UDP => UDP_TIMEOUT_MS,
             IPPROTO_ICMP => ICMP_TIMEOUT_MS,
             _ => UDP_TIMEOUT_MS,
         }
@@ -107,7 +106,7 @@ impl Nat {
                 return None;
             }
         }
-        let public_port = self.allocate_port(proto)?;
+        let public_port = self.allocate_port(proto);
         self.flows.push(Flow {
             proto,
             client,
@@ -149,33 +148,81 @@ impl Nat {
         self.flows.retain(|f| !f.expired(now_ms));
     }
 
-    fn allocate_port(&mut self, proto: u8) -> Option<u16> {
-        let span = u32::from(PORT_MAX - PORT_MIN) + 1;
-        for _ in 0..span {
-            let candidate = self.next_port;
-            self.next_port = if candidate == PORT_MAX {
-                PORT_MIN
-            } else {
-                candidate.saturating_add(1)
-            };
-            if !self
-                .flows
+    /// The first port from `next_port` on (wrapping) that no `proto` flow
+    /// uses. `outbound` calls it with fewer than [`MAX_FLOWS`] flows, each
+    /// holding its own port, so one is always free.
+    fn allocate_port(&mut self, proto: u8) -> u16 {
+        let start = self.next_port;
+        let in_use = |p: u16| {
+            self.flows
                 .iter()
-                .any(|f| f.proto == proto && f.public_port == candidate)
-            {
-                return Some(candidate);
-            }
-        }
-        None
+                .any(|f| f.proto == proto && f.public_port == p)
+        };
+        let port = (start..=PORT_MAX)
+            .chain(PORT_MIN..start)
+            .find(|&p| !in_use(p))
+            .unwrap_or(start);
+        self.next_port = port.checked_add(1).unwrap_or(PORT_MIN);
+        port
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::packet::IPPROTO_UDP;
 
     const C: Ipv4Addr = Ipv4Addr::new(10, 137, 0, 3);
     const R: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+
+    fn flow(proto: u8, port: u16, now_ms: u64) -> Flow {
+        Flow {
+            proto,
+            client: C,
+            client_port: port,
+            remote: R,
+            remote_port: 53,
+            public_port: port,
+            last_seen_ms: now_ms,
+        }
+    }
+
+    /// A table whose UDP flows, last seen at `now_ms`, hold every public
+    /// port (built directly: going through `outbound` is quadratic).
+    pub(crate) fn full(now_ms: u64) -> Nat {
+        let flows = (PORT_MIN..=PORT_MAX)
+            .map(|port| flow(IPPROTO_UDP, port, now_ms))
+            .collect::<Vec<_>>();
+        assert_eq!(flows.len(), MAX_FLOWS);
+        Nat {
+            flows,
+            next_port: PORT_MIN,
+        }
+    }
+
+    #[test]
+    fn a_full_table_refuses_new_flows_until_some_expire() {
+        let mut nat = full(0);
+        assert_eq!(nat.outbound(1, IPPROTO_UDP, C, 1, R, 1), None);
+        // Existing flows keep working.
+        assert_eq!(nat.outbound(1, IPPROTO_UDP, C, 20000, R, 53), Some(20000));
+        // Once the idle flows are gone there is room again.
+        let later = UDP_TIMEOUT_MS + 1;
+        assert_eq!(nat.outbound(later, IPPROTO_UDP, C, 1, R, 1), Some(PORT_MIN));
+        assert_eq!(nat.len(), 2);
+    }
+
+    #[test]
+    fn timeouts_depend_on_the_protocol() {
+        for (proto, timeout) in [
+            (IPPROTO_TCP, TCP_TIMEOUT_MS),
+            (IPPROTO_UDP, UDP_TIMEOUT_MS),
+            (IPPROTO_ICMP, ICMP_TIMEOUT_MS),
+            (47, UDP_TIMEOUT_MS),
+        ] {
+            assert_eq!(flow(proto, PORT_MIN, 0).timeout(), timeout, "{proto}");
+        }
+    }
 
     #[test]
     fn outbound_is_stable_and_inbound_is_restricted() {
