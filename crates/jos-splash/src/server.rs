@@ -136,6 +136,41 @@ impl<D: Display> Splash<D> {
     }
 }
 
+/// One turn of the server loop: what `recv` returned (a datagram, or the
+/// error), then the keyboard, then a redraw. `Some` ends the loop. Kept
+/// apart from the socket so every outcome is tested directly; whether a
+/// real `recv` times out depends on scheduling.
+pub fn step<D: Display>(
+    splash: &mut Splash<D>,
+    received: std::io::Result<&[u8]>,
+) -> anyhow::Result<Option<Flow>> {
+    match received {
+        Ok(data) => match Message::parse(&String::from_utf8_lossy(data)) {
+            Ok(msg) => {
+                let flow = splash.handle(msg);
+                if flow != Flow::Continue {
+                    return Ok(Some(flow));
+                }
+            }
+            Err(e) => eprintln!("jos-splash: {e}"),
+        },
+        Err(e) if is_idle(e.kind()) => {}
+        Err(e) => return Err(e).context("reading splash socket"),
+    }
+    let flow = splash.handle_keys();
+    if flow != Flow::Continue {
+        return Ok(Some(flow));
+    }
+    splash.redraw()?;
+    Ok(None)
+}
+
+/// A `recv` that only means "nothing arrived within the tick".
+fn is_idle(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind::{Interrupted, TimedOut, WouldBlock};
+    matches!(kind, WouldBlock | TimedOut | Interrupted)
+}
+
 /// Serve on a Unix datagram socket until a `finish` message or Esc.
 #[cfg(unix)]
 pub fn serve<D: Display>(
@@ -157,30 +192,10 @@ pub fn serve<D: Display>(
     splash.redraw()?;
     let mut buf = [0u8; 512];
     let flow = loop {
-        match sock.recv(&mut buf) {
-            Ok(n) => {
-                let text = String::from_utf8_lossy(buf.get(..n).unwrap_or(&[]));
-                match Message::parse(&text) {
-                    Ok(msg) => {
-                        let flow = splash.handle(msg);
-                        if flow != Flow::Continue {
-                            break flow;
-                        }
-                    }
-                    Err(e) => eprintln!("jos-splash: {e}"),
-                }
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e).context("reading splash socket"),
-        }
-        let flow = splash.handle_keys();
-        if flow != Flow::Continue {
+        let received = sock.recv(&mut buf).map(|n| buf.get(..n).unwrap_or(&[]));
+        if let Some(flow) = step(&mut splash, received)? {
             break flow;
         }
-        splash.redraw()?;
     };
     splash.finish(flow)?;
     let _ = std::fs::remove_file(socket_path);
@@ -279,6 +294,44 @@ mod tests {
         assert_eq!(s.handle_keys(), Flow::Continue);
     }
 
+    #[test]
+    fn every_loop_outcome() {
+        use std::io::{Error, ErrorKind};
+        let mut s = Splash::new(NullDisplay::new(320, 200), None);
+        // A message that changes the scene is drawn in the same turn.
+        assert_eq!(step(&mut s, Ok(b"stage network")).unwrap(), None);
+        assert_eq!(s.frames, 1);
+        // Garbage is reported and ignored.
+        assert_eq!(step(&mut s, Ok(b"\xffnonsense")).unwrap(), None);
+        for kind in [
+            ErrorKind::WouldBlock,
+            ErrorKind::TimedOut,
+            ErrorKind::Interrupted,
+        ] {
+            assert_eq!(step(&mut s, Err(Error::from(kind))).unwrap(), None);
+        }
+        assert_eq!(s.frames, 1, "nothing changed, nothing redrawn");
+        let err = step(&mut s, Err(Error::from(ErrorKind::PermissionDenied))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading splash socket"),
+            "{err:#}"
+        );
+        assert_eq!(
+            step(&mut s, Ok(b"finish console")).unwrap(),
+            Some(Flow::ExitConsole)
+        );
+
+        // Esc ends the loop even when nothing arrived.
+        let mut d = NullDisplay::new(320, 200);
+        d.type_bytes(b"\x1b");
+        let mut s = Splash::new(d, None);
+        let idle = Err(Error::from(ErrorKind::WouldBlock));
+        assert_eq!(step(&mut s, idle).unwrap(), Some(Flow::ExitConsole));
+        // Leaving with nothing to finish does nothing.
+        s.finish(Flow::Continue).unwrap();
+        assert!(!s.display().restored);
+    }
+
     #[cfg(unix)]
     #[test]
     fn socket_roundtrip_ends_the_server() {
@@ -290,18 +343,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("jos-splash-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.sock");
+        // A crashed daemon's socket is replaced; until then nobody listens.
+        drop(std::os::unix::net::UnixDatagram::bind(&path).unwrap());
+        assert!(!send(&Message::Status("early".into()), &path).unwrap());
         let path2 = path.clone();
         let server = std::thread::spawn(move || {
             serve(Splash::new(NullDisplay::new(320, 200), None), &path2)
         });
-        // Wait for the socket to appear.
-        for _ in 0..100 {
-            if path.exists() {
-                break;
-            }
+        // Wait for the server to replace the stale socket.
+        while !send(&Message::Stage(Stage::Network), &path).unwrap() {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(send(&Message::Stage(Stage::Network), &path).unwrap());
         assert!(send(&Message::Finish(Finish::Keep), &path).unwrap());
         let display = server.join().unwrap().unwrap();
         assert!(display.presented >= 2);
