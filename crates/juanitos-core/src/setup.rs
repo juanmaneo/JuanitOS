@@ -47,6 +47,8 @@ pub struct Host {
     pub iommu: bool,
     /// `pptdevs` in `/boot/loader.conf` ([`loader_pptdevs`]).
     pub pptdevs: Vec<PciAddr>,
+    /// [`crate::bhyve::max_vcpus`].
+    pub max_vcpus: Option<u32>,
 }
 
 /// The operator's choices (`jos setup` flags).
@@ -58,7 +60,9 @@ pub struct SetupOptions {
     pub nic: Option<PciAddr>,
     /// Create the `gpu` qube when an NVIDIA card is reserved.
     pub gpu: bool,
-    pub gpu_cpus: u32,
+    /// vCPUs of the `gpu` qube, chosen by the operator; else [`GPU_CPUS`]
+    /// capped to what the host runs.
+    pub gpu_cpus: Option<u32>,
     pub gpu_memory_mb: u64,
     /// Unikernel image for `sys-firewall`, when installed.
     pub firewall_image: Option<String>,
@@ -70,7 +74,7 @@ impl Default for SetupOptions {
             uplink: None,
             nic: None,
             gpu: true,
-            gpu_cpus: GPU_CPUS,
+            gpu_cpus: None,
             gpu_memory_mb: GPU_MEMORY_MB,
             firewall_image: None,
         }
@@ -167,6 +171,16 @@ pub fn plan(host: &Host, existing: &[Qube], opts: &SetupOptions) -> Result<Plan>
             ));
         } else {
             qubes.push(gpu_qube(addrs, opts));
+        }
+    }
+
+    for q in &mut qubes {
+        if q.name == GPU && opts.gpu_cpus.is_some() {
+            crate::bhyve::check_vcpus(q, host.max_vcpus)?;
+        } else {
+            let (cpus, note) = crate::bhyve::fit_vcpus(&q.name, q.cpus, host.max_vcpus);
+            q.cpus = cpus;
+            notes.extend(note);
         }
     }
 
@@ -308,7 +322,7 @@ fn sys_firewall(image: Option<&str>) -> Qube {
 
 fn gpu_qube(addrs: Vec<PciAddr>, opts: &SetupOptions) -> Qube {
     let mut q = clone_of(GPU, QubeKind::Gpu, GPU_TEMPLATE);
-    q.cpus = opts.gpu_cpus;
+    q.cpus = opts.gpu_cpus.unwrap_or(GPU_CPUS);
     q.memory_mb = opts.gpu_memory_mb;
     q.pci_passthrough = addrs;
     q
@@ -399,6 +413,7 @@ mod tests {
             uplink: Some("em0".into()),
             iommu: true,
             pptdevs: vec!["1/0/0".parse().unwrap(), "1/0/1".parse().unwrap()],
+            max_vcpus: Some(16),
         }
     }
 
@@ -493,6 +508,39 @@ mod tests {
             .filter(|s| matches!(s, Step::InstallTemplate { .. }))
             .count();
         assert_eq!(installs, 1);
+    }
+
+    #[test]
+    fn default_vcpus_are_capped_to_the_host_but_chosen_ones_are_not() {
+        let small = Host {
+            max_vcpus: Some(1),
+            ..host()
+        };
+        let p = plan(&small, &[], &SetupOptions::default()).unwrap();
+        assert!(created(&p).iter().all(|q| q.cpus == 1));
+        assert!(p
+            .notes
+            .iter()
+            .any(|n| n == "gpu: 4 vCPUs capped to 1, the most this host runs (hw.vmm.maxcpu)"));
+
+        let opts = SetupOptions {
+            gpu_cpus: Some(2),
+            ..Default::default()
+        };
+        let e = plan(&small, &[], &opts).unwrap_err().to_string();
+        assert!(
+            e.contains("gpu has 2 vCPUs but this host runs at most 1"),
+            "{e}"
+        );
+        let gpu = get(&created(&plan(&host(), &[], &opts).unwrap()), GPU).clone();
+        assert_eq!(gpu.cpus, 2);
+
+        let unknown = Host {
+            max_vcpus: None,
+            ..host()
+        };
+        let p = plan(&unknown, &[], &SetupOptions::default()).unwrap();
+        assert_eq!(get(&created(&p), GPU).cpus, GPU_CPUS);
     }
 
     #[test]

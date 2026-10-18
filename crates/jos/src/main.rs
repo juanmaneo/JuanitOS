@@ -187,8 +187,9 @@ struct SetupArgs {
     /// Do not create the gpu qube.
     #[arg(long)]
     no_gpu: bool,
-    #[arg(long, default_value_t = setup::GPU_CPUS)]
-    gpu_cpus: u32,
+    /// vCPUs of the gpu qube [default: 4, or fewer on a smaller host].
+    #[arg(long, value_name = "N")]
+    gpu_cpus: Option<u32>,
     #[arg(long, default_value_t = setup::GPU_MEMORY_MB)]
     gpu_memory_mb: u64,
     /// Unikernel image for sys-firewall (default: the installed one, if
@@ -716,6 +717,7 @@ impl App {
             }
         }
         firewall::assign_address(&mut q, &existing, self.cfg.default_netvm.as_deref())?;
+        bhyve::check_vcpus(&q, bhyve::max_vcpus(self.runner.as_ref()))?;
 
         if let Some(t) = &q.template {
             let tq = self.store.get(t).context("looking up template")?;
@@ -1186,6 +1188,7 @@ impl App {
             uplink: setup::default_route_iface(runner),
             iommu: doctor::iommu_enabled(runner),
             pptdevs: setup::loader_pptdevs(runner)?,
+            max_vcpus: bhyve::max_vcpus(runner),
         };
         let firewall_image = match a.firewall_image {
             Some(p) if p.is_file() => Some(p.display().to_string()),

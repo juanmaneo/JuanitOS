@@ -433,7 +433,12 @@ impl<'a> TemplateInstaller<'a> {
         }
         let mut q = Qube::new(&name, QubeKind::Template, r.os);
         q.disk_gb = opts.disk_gb.unwrap_or(r.disk_gb);
-        q.cpus = r.cpus;
+        let (cpus, capped) =
+            crate::bhyve::fit_vcpus(&name, r.cpus, crate::bhyve::max_vcpus(self.runner));
+        if let Some(note) = capped {
+            self.step(&note);
+        }
+        q.cpus = cpus;
         q.memory_mb = r.memory_mb;
         q.label = Some(format!("recipe:{}", r.name));
         q.uplink = opts.uplink.clone();
@@ -836,6 +841,7 @@ mod tests {
         .unwrap();
         let m = MockRunner::new()
             .respond("zfs", &["list"], CmdOutput::failed(1, ""))
+            .respond("sysctl", &["-n", "hw.vmm.maxcpu"], CmdOutput::ok("3\n"))
             .respond("bhyve", &[], CmdOutput::failed(1, "")); // guest powered off
         let inst = TemplateInstaller {
             runner: &m,
@@ -852,11 +858,15 @@ mod tests {
         let q = inst.install(r, &opts).unwrap();
         assert_eq!(q.name, "podman");
         assert_eq!(q.disk_gb, 60);
+        // The recipe's vCPUs, shrunk to what this host runs.
+        assert!(r.cpus > 3);
+        assert_eq!(q.cpus, 3);
         let calls = m.calls();
         // Cached image: only the checksum list was fetched.
         assert_eq!(calls.iter().filter(|c| c.starts_with("fetch")).count(), 1);
         let boot = calls.iter().find(|c| c.starts_with("bhyve ")).unwrap();
         assert!(boot.contains("29,ahci,cd:"), "{boot}");
+        assert!(boot.starts_with("bhyve -c 3 "), "{boot}");
         assert!(boot.contains("3,virtio-net,tap-podman"), "{boot}");
         assert!(calls.contains(&"ifconfig bru-vtnet0 addm vtnet0".to_string()));
         assert_eq!(q.uplink.as_deref(), Some("vtnet0"));

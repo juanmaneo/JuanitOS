@@ -101,6 +101,45 @@ pub fn has_config_disk(q: &Qube) -> bool {
     q.is_unikernel() && q.kind == crate::config::QubeKind::Firewall
 }
 
+/// Most vCPUs a guest can have on this host: `hw.vmm.maxcpu` (above it
+/// bhyve fails in `vm_set_topology`), else `hw.ncpu` while vmm.ko is not
+/// loaded. `None` when neither can be read.
+pub fn max_vcpus(runner: &dyn Runner) -> Option<u32> {
+    ["hw.vmm.maxcpu", "hw.ncpu"].iter().find_map(|oid| {
+        let out = runner.run("sysctl", &["-n", oid]).ok()?;
+        if !out.success() {
+            return None;
+        }
+        out.stdout.trim().parse().ok().filter(|n| *n > 0)
+    })
+}
+
+/// Error unless `q`'s vCPU count fits `max` (from [`max_vcpus`]).
+pub fn check_vcpus(q: &Qube, max: Option<u32>) -> Result<()> {
+    match max {
+        Some(max) if q.cpus > max => Err(Error::Other(format!(
+            "{} has {} vCPUs but this host runs at most {max} (hw.vmm.maxcpu): \
+             lower `cpus` in its definition",
+            q.name, q.cpus
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// `cpus` reduced to what the host runs (`max`), with a note saying so
+/// when it had to shrink: for counts the operator did not choose.
+pub fn fit_vcpus(name: &str, cpus: u32, max: Option<u32>) -> (u32, Option<String>) {
+    match max {
+        Some(max) if cpus > max => (
+            max,
+            Some(format!(
+                "{name}: {cpus} vCPUs capped to {max}, the most this host runs (hw.vmm.maxcpu)"
+            )),
+        ),
+        _ => (cpus, None),
+    }
+}
+
 /// Build the `bhyve` invocation for `q`. `taps` are the host tap interfaces
 /// to attach as virtio-net devices, in slot order (upstream first); empty
 /// for an isolated qube. The upstream NIC gets the qube's fixed MAC.
@@ -344,6 +383,7 @@ impl<'a> Vm<'a> {
                 q.name
             )));
         }
+        check_vcpus(q, max_vcpus(self.runner))?;
         let taps = self.setup_taps(q)?;
         let tap_refs: Vec<&str> = taps.iter().map(String::as_str).collect();
         self.stage_kernel(q)?;
@@ -432,6 +472,7 @@ impl<'a> Vm<'a> {
     /// Set up the taps and build the command [`Vm::maintain`] runs (a dry
     /// run prints it instead of waiting for a guest that never boots).
     pub fn maintenance_command(&self, q: &Qube, seed: Option<&str>) -> Result<BhyveCommand> {
+        check_vcpus(q, max_vcpus(self.runner))?;
         let taps = self.setup_taps(q)?;
         let tap_refs: Vec<&str> = taps.iter().map(String::as_str).collect();
         self.share().prepare(q)?;
@@ -742,6 +783,49 @@ mod tests {
         assert_eq!(calls.last().unwrap(), "bhyvectl --destroy --vm=work");
         // Default netvm applies: the upstream tap was created.
         assert!(calls.contains(&"ifconfig br-sys-firewall addm tap-work".to_string()));
+    }
+
+    #[test]
+    fn vcpu_limit_comes_from_vmm_then_ncpu() {
+        use crate::sys::{CmdOutput, MockRunner};
+        let vmm = MockRunner::new()
+            .respond("sysctl", &["-n", "hw.vmm.maxcpu"], CmdOutput::ok("3\n"))
+            .respond("sysctl", &["-n", "hw.ncpu"], CmdOutput::ok("8\n"));
+        assert_eq!(max_vcpus(&vmm), Some(3));
+        let no_vmm = MockRunner::new()
+            .respond("sysctl", &["-n", "hw.vmm.maxcpu"], CmdOutput::failed(1, ""))
+            .respond("sysctl", &["-n", "hw.ncpu"], CmdOutput::ok("8\n"));
+        assert_eq!(max_vcpus(&no_vmm), Some(8));
+        // Unmatched mock commands print nothing: unknown, nothing checked.
+        assert_eq!(max_vcpus(&MockRunner::new()), None);
+
+        let mut q = Qube::new("dev", QubeKind::App, OsType::Freebsd);
+        q.cpus = 4;
+        assert!(check_vcpus(&q, None).is_ok());
+        assert!(check_vcpus(&q, Some(4)).is_ok());
+        let e = check_vcpus(&q, Some(3)).unwrap_err().to_string();
+        assert!(
+            e.contains("dev has 4 vCPUs but this host runs at most 3"),
+            "{e}"
+        );
+
+        assert_eq!(fit_vcpus("dev", 4, None), (4, None));
+        assert_eq!(fit_vcpus("dev", 2, Some(3)), (2, None));
+        let (cpus, note) = fit_vcpus("dev", 4, Some(3));
+        assert_eq!(cpus, 3);
+        assert!(note.unwrap().contains("4 vCPUs capped to 3"));
+
+        // Refused before anything is set up for the guest.
+        let cfg = GlobalConfig::default();
+        let e = Vm::new(&vmm, &cfg).run_once(&q).unwrap_err().to_string();
+        assert!(e.contains("at most 3"), "{e}");
+        let mut t = Qube::new("tpl", QubeKind::Template, OsType::Freebsd);
+        t.cpus = 4;
+        assert!(Vm::new(&vmm, &cfg).maintenance_command(&t, None).is_err());
+        assert!(!vmm
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("ifconfig") || c.starts_with("bhyve ")));
     }
 
     #[test]

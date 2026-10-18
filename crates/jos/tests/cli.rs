@@ -1456,6 +1456,49 @@ fn setup_creates_the_system_qubes_and_resumes() {
     assert!(again.contains("nothing to do"));
 }
 
+/// bhyve cannot run more vCPUs than `hw.vmm.maxcpu`: `jos create` says so
+/// instead of saving a qube that never boots.
+#[cfg(unix)]
+#[test]
+fn qubes_never_get_more_vcpus_than_the_host_runs() {
+    let e = Env::new("vcpus");
+    let bin = fake_host(
+        &e,
+        &[(
+            "sysctl",
+            r#"case "$*" in "-n hw.vmm.maxcpu") echo 2 ;; *) exit 1 ;; esac"#,
+        )],
+    );
+    let jos = |cpus: &str| {
+        Command::new(env!("CARGO_BIN_EXE_jos"))
+            .args([
+                "--dry-run",
+                "create",
+                "big",
+                "--kind",
+                "app",
+                "--os",
+                "freebsd",
+            ])
+            .args(["--netvm", "none", "--cpus", cpus])
+            .env("JOS_CONFIG_DIR", &e.dir)
+            .env("PATH", &bin)
+            .output()
+            .unwrap()
+    };
+    let out = jos("4");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("big has 4 vCPUs but this host runs at most 2"),
+        "{stderr}"
+    );
+    assert!(!e.qube_file("big").exists());
+    let out = jos("2");
+    assert!(out.status.success(), "{out:?}");
+    assert!(e.qube_file("big").exists());
+}
+
 /// A stand-in FreeBSD host: shell scripts named after the host tools, in
 /// a directory meant to be the whole `PATH` (nothing of the development
 /// machine is ever run). Returns the directory.
