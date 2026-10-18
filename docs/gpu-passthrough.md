@@ -11,7 +11,10 @@ device. The host keeps a separate (integrated or secondary) GPU for COSMIC.
   and on AMD also `hw.vmm.amdvi.enable=1` (vmm picks its IOMMU driver by
   CPU vendor and AMD-Vi stays off unless asked; the symptom is `jos start`
   failing with `vm_assign_pptdev: Device not configured`). `jos doctor`
-  checks both; the installer writes both.
+  checks both; the installer writes both. Those settings only ask for the
+  IOMMU: `jos doctor` also warns (`iommu hardware`) when the firmware
+  exposes none, i.e. `acpidump -t` lists no DMAR (Intel) or IVRS (AMD)
+  table, which usually means it is switched off in the setup.
 - The GPU and its companion functions (HDMI audio, USB-C controller on newer
   cards) in an IOMMU group that is not shared with devices the host needs.
 - `edk2-bhyve` package: NVIDIA guests must boot UEFI; bhyve's legacy

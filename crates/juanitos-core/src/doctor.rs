@@ -161,6 +161,62 @@ pub fn cpu_virt_check(dmesg: Option<&str>) -> Check {
     }
 }
 
+/// Signatures of the ACPI tables in `acpidump -t` output, whose headers
+/// read `  DMAR: Length=80, Revision=1, ...`.
+pub fn acpi_signatures(acpidump: &str) -> Vec<String> {
+    acpidump
+        .lines()
+        .filter_map(|l| l.trim_start().split_once(": Length="))
+        .map(|(sig, _)| sig)
+        .filter(|sig| sig.len() == 4 && sig.chars().all(|c| c.is_ascii_alphanumeric()))
+        .map(String::from)
+        .collect()
+}
+
+/// Whether the firmware exposes the IOMMU vmm will use: an ACPI DMAR table
+/// on Intel (VT-d), IVRS on AMD (AMD-Vi). `hw.vmm.iommu.enable=1` is only
+/// a request; with the IOMMU switched off in the firmware setup vmm finds
+/// no table and passthrough fails when the qube starts. A warning, not a
+/// failure: qubes without passthrough still run.
+pub fn firmware_iommu_check(acpidump: Option<&str>, amd_cpu: bool) -> Check {
+    const NAME: &str = "iommu hardware";
+    let Some(acpidump) = acpidump else {
+        return Check::new(
+            NAME,
+            Status::Warn,
+            "could not run `acpidump -t` (run as root); cannot tell whether the firmware exposes an IOMMU",
+        );
+    };
+    let (want, other, vendor, feature) = if amd_cpu {
+        ("IVRS", "DMAR", "AMD", "AMD-Vi")
+    } else {
+        ("DMAR", "IVRS", "Intel", "VT-d")
+    };
+    let tables = acpi_signatures(acpidump);
+    let has = |sig: &str| tables.iter().any(|t| t == sig);
+    if has(want) {
+        Check::new(NAME, Status::Ok, format!("{feature} (ACPI {want} table)"))
+    } else if has(other) {
+        Check::new(
+            NAME,
+            Status::Warn,
+            format!(
+                "the firmware has an ACPI {other} table but the CPU is {vendor}: vmm uses {feature} \
+                 ({want}), so PCI passthrough will fail"
+            ),
+        )
+    } else {
+        Check::new(
+            NAME,
+            Status::Warn,
+            format!(
+                "no ACPI {want} table: enable {feature} (often \"VT-d\" or \"IOMMU\") in the BIOS/UEFI \
+                 setup, or PCI passthrough (sys-net's NIC, the gpu qube) will fail"
+            ),
+        )
+    }
+}
+
 /// Kernel modules a dom0 needs. Checked by *module* name (`kldstat -q -m`,
 /// as rc.subr's `load_kld` does), which also finds modules compiled into
 /// GENERIC such as `if_tap` (part of `if_tuntap`), unlike the file names a
@@ -231,7 +287,8 @@ pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
     // and amdvi refuses to initialise ("use hw.vmm.amdvi.enable=1") unless
     // asked, so on AMD `hw.vmm.iommu.enable=1` alone leaves `jos start`
     // failing with `vm_assign_pptdev: Device not configured`.
-    if is_amd_cpu(runner) {
+    let amd = is_amd_cpu(runner);
+    if amd {
         match runner.run("sysctl", &["hw.vmm.amdvi.enable"]) {
             Ok(out) if out.success() && parse_sysctl_value(&out.stdout) == "1" => {
                 checks.push(Check::new("amd-vi", Status::Ok, "hw.vmm.amdvi.enable=1"));
@@ -243,6 +300,11 @@ pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
             )),
         }
     }
+    let acpidump = match runner.run("acpidump", &["-t"]) {
+        Ok(out) if out.success() => Some(out.stdout),
+        _ => None,
+    };
+    checks.push(firmware_iommu_check(acpidump.as_deref(), amd));
 
     // /dev/vmm
     if Path::new("/dev/vmm").exists() {
@@ -477,5 +539,73 @@ mod tests {
         assert!(!is_amd_cpu(&intel));
         let checks = run_host_checks(&intel, &cfg);
         assert!(checks.iter().all(|c| c.name != "amd-vi"));
+    }
+
+    /// `acpidump -t` of the nested dom0 (QEMU q35 with an AMD vIOMMU).
+    const ACPI_AMD: &str = "/*\n  RSD PTR: OEM=BOCHS, ACPI_Rev=2.0x (2)\n\tXSDT=0x7fb7d0e8, length=36, cksum=213\n */\n\
+/*\n  XSDT: Length=92, Revision=1, Checksum=131,\n\tOEMID=BOCHS, OEM Table ID=BXPC\n */\n\
+/*\n  APIC: Length=136, Revision=3, Checksum=96,\n */\n\
+/*\n  IVRS: Length=200, Revision=1, Checksum=40,\n */\n";
+
+    #[test]
+    fn acpi_table_signatures() {
+        assert_eq!(acpi_signatures(ACPI_AMD), vec!["XSDT", "APIC", "IVRS"]);
+        assert!(acpi_signatures("").is_empty());
+        // Only four-character signatures count.
+        assert!(acpi_signatures("  PCI devices: Length=1\n").is_empty());
+    }
+
+    #[test]
+    fn the_firmware_must_expose_the_iommu_of_the_cpu_vendor() {
+        let ok = firmware_iommu_check(Some(ACPI_AMD), true);
+        assert_eq!(ok.status, Status::Ok);
+        assert_eq!(ok.detail, "AMD-Vi (ACPI IVRS table)");
+        let intel = ACPI_AMD.replace("IVRS", "DMAR");
+        assert_eq!(
+            firmware_iommu_check(Some(&intel), false).detail,
+            "VT-d (ACPI DMAR table)"
+        );
+
+        // VT-d switched off in the setup: no DMAR table at all.
+        let off = firmware_iommu_check(Some("  APIC: Length=136, Revision=3,\n"), false);
+        assert_eq!(off.status, Status::Warn);
+        assert!(off.detail.contains("no ACPI DMAR table"), "{}", off.detail);
+        assert!(off.detail.contains("BIOS/UEFI"));
+
+        let mixed = firmware_iommu_check(Some(ACPI_AMD), false);
+        assert_eq!(mixed.status, Status::Warn);
+        assert!(mixed.detail.contains("IVRS table but the CPU is Intel"));
+
+        let unknown = firmware_iommu_check(None, true);
+        assert_eq!(unknown.status, Status::Warn);
+        assert!(unknown.detail.contains("run as root"));
+    }
+
+    #[test]
+    fn host_checks_read_the_acpi_tables() {
+        let cfg = GlobalConfig::default();
+        let get = |m: &MockRunner| {
+            run_host_checks(m, &cfg)
+                .into_iter()
+                .find(|c| c.name == "iommu hardware")
+                .unwrap()
+        };
+        let m = MockRunner::new().respond(
+            "acpidump",
+            &["-t"],
+            CmdOutput::ok(ACPI_AMD.replace("IVRS", "DMAR")),
+        );
+        assert_eq!(get(&m).status, Status::Ok);
+        assert!(m.calls().iter().any(|c| c == "acpidump -t"));
+        let m = MockRunner::new().respond(
+            "acpidump",
+            &[],
+            CmdOutput::failed(1, "/dev/mem: Permission denied"),
+        );
+        let c = get(&m);
+        assert_eq!(c.status, Status::Warn);
+        assert!(c.detail.contains("run as root"));
+        // A warning: the host can still run qubes without passthrough.
+        assert!(all_passed(&[c]));
     }
 }

@@ -11,8 +11,9 @@ In the firmware (BIOS/UEFI) setup:
 - **Secure Boot: off.** `jos-boot.efi` and FreeBSD's loader are not
   signed.
 - **Intel Virtualization Technology (VT-x) and VT-d: on** (AMD: SVM and
-  IOMMU/AMD-Vi). Without them the doctor fails `cpu virtualization` and
-  `iommu`, and no qube can start.
+  IOMMU/AMD-Vi). Without VT-x the doctor fails `cpu virtualization` and
+  no qube can start; without VT-d it warns on `iommu hardware` (no ACPI
+  DMAR table) and only passthrough (`sys-net`'s NIC, `gpu`) fails.
 - **Graphics on a hybrid laptop:** keep the hybrid mode in which the
   internal panel is driven by the integrated GPU (Intel Arc on the Lenovo
   16P). The dom0 desktop runs on that GPU; the discrete NVIDIA card is

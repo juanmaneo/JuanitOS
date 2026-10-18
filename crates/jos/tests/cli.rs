@@ -1579,6 +1579,10 @@ esac"#,
                 r#"case "$*" in *' -n '*) echo '1/0/0 1/0/1' ;; *) exit 1 ;; esac"#,
             ),
             ("zpool", "echo zroot"),
+            (
+                "acpidump",
+                "echo '  DMAR: Length=80, Revision=1, Checksum=9,'",
+            ),
         ],
     );
     let run_dir = e.dir.join("run");
@@ -1603,6 +1607,7 @@ esac"#,
 
     let doctor = ok(&["doctor"]);
     assert!(doctor.contains("hw.vmm.iommu.enable=1"), "{doctor}");
+    assert!(doctor.contains("VT-d (ACPI DMAR table)"), "{doctor}");
     assert!(doctor.contains("pool zroot online"), "{doctor}");
     assert!(doctor.contains("1/0/0 1/0/1"), "{doctor}");
 

@@ -890,6 +890,7 @@ pub fn sample_wizard() -> Wizard {
             check("kernel module if_bridge", Status::Ok, "loaded"),
             check("kernel module if_tap", Status::Ok, "loaded"),
             check("iommu", Status::Ok, "hw.vmm.iommu.enable=1"),
+            check("iommu hardware", Status::Ok, "VT-d (ACPI DMAR table)"),
             check(
                 "/dev/vmm",
                 Status::Warn,
