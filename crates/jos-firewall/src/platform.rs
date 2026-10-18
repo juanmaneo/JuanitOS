@@ -73,6 +73,14 @@ pub fn read_config_disk(slot: u32) -> Result<String, String> {
     String::from_utf8(buf).map_err(|_| String::from("config disk: not UTF-8"))
 }
 
+/// Turn off the boot-services watchdog. The firmware arms it for five
+/// minutes before starting a boot option and resets the machine when it
+/// fires, unless the application exits boot services, which this one
+/// never does.
+pub fn disable_watchdog() -> Result<(), String> {
+    boot::set_watchdog_timer(0, 0x10000, None).map_err(|e| format!("disabling the watchdog: {e}"))
+}
+
 /// Log, wait so the console can be read, then cold-reset the VM. bhyve
 /// reports the reset as a reboot and the `jos` supervisor restarts us.
 pub fn reboot_after(delay: Duration) -> ! {

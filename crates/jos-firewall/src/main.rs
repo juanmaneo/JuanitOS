@@ -54,6 +54,9 @@ fn main() -> Status {
         return Status::LOAD_ERROR;
     }
     info!("jos-firewall {} starting", env!("CARGO_PKG_VERSION"));
+    if let Err(e) = platform::disable_watchdog() {
+        warn!("{e}: the firmware will reset this qube in five minutes");
+    }
     match run() {
         Ok(()) => Status::SUCCESS,
         Err(e) => {
