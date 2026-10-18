@@ -214,20 +214,16 @@ mod tests {
         assert!(find_partition(&vec![0u8; GPT_HEAD_LEN], &ESP_TYPE_GUID).is_err());
     }
 
-    /// A GPT disk with one 4 MB FAT12 ESP, built with mformat.
+    /// A GPT disk with one 4 MB FAT12 ESP, built with mformat. Needs mtools.
     #[test]
     fn writes_a_file_into_the_esp() {
-        if Command::new("mformat").arg("--help").output().is_err() {
-            eprintln!("skipped: mtools not installed");
-            return;
-        }
         let dir = std::env::temp_dir().join(format!("jos-disk-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let esp = dir.join("esp.img");
         let st = Command::new("mformat")
             .args(["-C", "-i", &esp.to_string_lossy(), "-T", "8192", "::"])
             .status()
-            .unwrap();
+            .expect("this test needs mtools (mformat) on PATH");
         assert!(st.success());
         let esp_bytes = std::fs::read(&esp).unwrap();
         let first = 2048u64;
@@ -253,7 +249,7 @@ mod tests {
         let got = Command::new("mtype")
             .args(["-i", &out.to_string_lossy(), "::/efi/freebsd/loader.env"])
             .output()
-            .unwrap();
+            .expect("this test needs mtools (mtype) on PATH");
         assert_eq!(
             String::from_utf8_lossy(&got.stdout),
             "boot_serial=YES\nx=1\n"

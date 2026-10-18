@@ -241,21 +241,17 @@ fn compare_reports_and_fails_on_differences() {
             .arg("-cf")
             .arg(&p)
             .arg(".")
-            .status();
-        match st {
-            Ok(st) if st.success() => Some(p.to_string_lossy().into_owned()),
-            _ => None,
-        }
+            .status()
+            .expect("this test needs tar on PATH");
+        assert!(st.success());
+        p.to_string_lossy().into_owned()
     };
-    let Some(a) = tar("a.tar") else {
-        eprintln!("skipped: no tar");
-        return;
-    };
+    let a = tar("a.tar");
     let work = w.0.join("work").to_string_lossy().into_owned();
     let (ok, out) = real(&repo_root(), &["--work", &work, "compare", &a, &a]);
     assert!(ok, "{out}");
     std::fs::write(src.join("etc/rc.conf"), "b\n").unwrap();
-    let b = tar("b.tar").unwrap();
+    let b = tar("b.tar");
     let (ok, out) = real(&repo_root(), &["--work", &work, "compare", &a, &b]);
     assert!(!ok);
     assert!(out.contains("DIFFERS   contents: /etc/rc.conf"), "{out}");

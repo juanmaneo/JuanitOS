@@ -14,18 +14,18 @@ functions = 3
 regions = 109
 
 [files."crates/jos-release/src/compare.rs"]
-lines = 7
+lines = 5
 functions = 2
-regions = 22
+regions = 20
 
 [files."crates/jos-release/src/console.rs"]
 lines = 4
 regions = 17
 
 [files."crates/jos-release/src/disk.rs"]
-lines = 10
+lines = 8
 functions = 2
-regions = 40
+regions = 38
 
 [files."crates/jos-release/src/main.rs"]
 lines = 8

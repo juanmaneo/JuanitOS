@@ -25,9 +25,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-audit,cargo-deny
-      # Host tools some tests need; without them they skip and coverage
-      # drops below the floors. OVMF: jos-release QEMU tests; mtools:
-      # writing into a disk image's ESP (jos-release disk.rs).
+      # Host tools some jos-release tests need (they fail without them).
+      # OVMF: the QEMU tests; mtools: writing into a disk image's ESP
+      # (disk.rs); tar comes with the image.
       - run: sudo apt-get update && sudo apt-get install -y ovmf mtools
       - uses: Swatinem/rust-cache@v2
         with:

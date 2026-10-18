@@ -468,18 +468,11 @@ mod tests {
     }
 
     /// Two archives of the same tree differ in member order and mtimes; the
-    /// comparison sees through both, and through to a real change.
+    /// comparison sees through both, and through to a real change. Needs
+    /// the host's `tar`.
     #[cfg(unix)]
     #[test]
     fn real_tarballs_compare_by_contents() {
-        if std::process::Command::new("tar")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipped: no tar");
-            return;
-        }
         let s = Scratch::new("tar");
         s.put("root/etc/rc.conf", b"hostname=x\n");
         s.put("root/usr/local/bin/jos", b"\x7fELF");
@@ -497,7 +490,7 @@ mod tests {
                 .arg(&out)
                 .args(members)
                 .status()
-                .unwrap();
+                .expect("this test needs tar on PATH");
             assert!(st.success());
             out
         };

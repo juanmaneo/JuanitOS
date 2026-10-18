@@ -244,7 +244,9 @@ target is 100 % of lines, functions and regions in every file.
 a file it does not list (a new one, for instance) must be fully covered.
 The counts are exact, with no slack: coverage has to be deterministic, so
 tests never depend on timing or on which tools the host has (host
-programs are fake ones on `PATH`). `--ratchet` lowers the allowances to
+programs are fake ones on `PATH`; the few tests that exercise a real
+tool (`tar` and mtools, in `jos-release`) fail rather than skip when it
+is missing). `--ratchet` lowers the allowances to
 what was just measured and drops files that reach zero. The toolchain is
 pinned in `rust-toolchain.toml`, because another compiler version counts
 regions differently. The same `cargo xtask ci` runs in GitHub Actions
