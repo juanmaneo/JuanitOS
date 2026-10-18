@@ -861,7 +861,7 @@ mod tests {
         w.handle(Key::Enter);
         typ(w, "rootpw");
         w.handle(Key::Enter);
-        typ(w, "juan");
+        typ(w, "alice");
         w.handle(Key::Enter);
         typ(w, "pw");
         w.handle(Key::Enter);
@@ -922,7 +922,7 @@ mod tests {
         };
         assert_eq!(plan.disk, "nda0");
         assert_eq!(plan.root_password.as_deref(), Some("rootpw"));
-        assert_eq!(plan.user, Some(("juan".into(), "pw".into())));
+        assert_eq!(plan.user, Some(("alice".into(), "pw".into())));
         assert_eq!(w.page, Page::Install);
         assert!(w.widgets().is_empty());
         assert_eq!(w.focused(), None);
@@ -1131,13 +1131,13 @@ mod tests {
         assert!(validate_users("a", "a", "toor", "p", "p")
             .unwrap_err()
             .contains("system account"));
-        assert!(validate_users("a", "a", "juan", "", "")
+        assert!(validate_users("a", "a", "alice", "", "")
             .unwrap_err()
             .contains("Choose a password"));
-        assert!(validate_users("a", "a", "juan", "p", "q")
+        assert!(validate_users("a", "a", "alice", "p", "q")
             .unwrap_err()
             .contains("do not match"));
-        assert!(validate_users("a", "a", "juan", "p", "p").is_ok());
+        assert!(validate_users("a", "a", "alice", "p", "p").is_ok());
         assert!(validate_users("a", "a", &"j".repeat(33), "p", "p").is_err());
 
         let mut w = wizard();
@@ -1228,7 +1228,7 @@ mod tests {
         assert!(get("Layout").unwrap().contains("4 GiB swap"));
         assert_eq!(get("Desktop").unwrap(), "COSMIC");
         assert_eq!(get("Passthrough").unwrap(), "none");
-        assert!(get("User").unwrap().contains("juan"));
+        assert!(get("User").unwrap().contains("alice"));
         w.reserved = vec![PciAddr::new(1, 0, 1), PciAddr::new(1, 0, 0)];
         let rows = w.summary_rows();
         assert!(rows

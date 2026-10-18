@@ -207,7 +207,7 @@ install is:
 
 ```sh
 jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
-    --root-password '...' --user juan --user-password '...' \
+    --root-password '...' --user alice --user-password '...' \
     --pci 1/0/0 --pci 1/0/1     # or --no-pci; default: as on the Passthrough page
 ```
 

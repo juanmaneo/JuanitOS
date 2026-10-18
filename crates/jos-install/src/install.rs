@@ -561,7 +561,7 @@ mod tests {
             disk: "vtbd0".into(),
             hostname: "box".into(),
             root_password: Some("secret".into()),
-            user: Some(("juan".into(), "pw".into())),
+            user: Some(("alice".into(), "pw".into())),
             dist_dir: "/nonexistent".into(),
             pptdevs: vec![PciAddr::new(1, 0, 0), PciAddr::new(1, 0, 1)],
             ..Default::default()
@@ -633,7 +633,7 @@ mod tests {
         assert_eq!(calls[0], "chroot /mnt pw usermod root -h 0");
         assert_eq!(
             calls[1],
-            "chroot /mnt pw useradd juan -m -G wheel,video -s /bin/sh -h 0"
+            "chroot /mnt pw useradd alice -m -G wheel,video -s /bin/sh -h 0"
         );
         // The password itself never shows up in argv.
         assert!(calls.iter().all(|c| !c.contains("secret")));
@@ -821,7 +821,7 @@ mod tests {
         let s = plan().summary();
         assert!(s.contains("/dev/vtbd0"));
         assert!(s.contains("COSMIC"));
-        assert!(s.contains("juan"));
+        assert!(s.contains("alice"));
         assert!(s.contains("passthru  1/0/0 1/0/1\n"), "{s}");
         let none = InstallPlan {
             pptdevs: Vec::new(),

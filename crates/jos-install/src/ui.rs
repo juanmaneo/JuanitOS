@@ -788,7 +788,7 @@ pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Re
     for (text, enter) in [
         ("secret", true),
         ("secret", true),
-        ("juan", true),
+        ("alice", true),
         ("pw", false),
     ] {
         for ch in text.chars() {

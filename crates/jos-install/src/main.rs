@@ -633,7 +633,7 @@ mod tests {
         let m = MockRunner::new();
         // failed checks: install anyway; disk 1; hostname; swap; desktop;
         // root password twice; user; user password twice; proceed; reboot.
-        let input = "y\n1\nbox\n0\nn\nr00t\nr00t\njuan\npw\npw\ny\ny\n";
+        let input = "y\n1\nbox\n0\nn\nr00t\nr00t\nalice\npw\npw\ny\ny\n";
         let (r, out) = text(&c, &m, &checks(Status::Fail), input);
         r.unwrap();
         assert!(out.contains("vtbd0"));
@@ -642,7 +642,7 @@ mod tests {
         let calls = m.calls();
         assert!(calls
             .iter()
-            .any(|c| c.starts_with("chroot") && c.contains("useradd juan")));
+            .any(|c| c.starts_with("chroot") && c.contains("useradd alice")));
         assert!(!calls.iter().any(|c| c.contains("freebsd-swap")));
         assert_eq!(calls.last().map(String::as_str), Some("shutdown -r now"));
     }
@@ -672,10 +672,10 @@ mod tests {
             "--root-password",
             "r",
             "--user",
-            "ana",
+            "bob",
         ]);
         let mut p = plan_for(&c);
-        p.user = Some(("ana".into(), String::new()));
+        p.user = Some(("bob".into(), String::new()));
         let mut out = Vec::new();
         let input: &[u8] = b"\n\n\nsecret\nsecret\ny\n";
         let r = {
@@ -683,7 +683,7 @@ mod tests {
             text_install(&c, &m, p, &hw(checks(Status::Ok), vec![]), &mut pr)
         };
         r.unwrap();
-        assert!(String::from_utf8_lossy(&out).contains("Password for ana"));
+        assert!(String::from_utf8_lossy(&out).contains("Password for bob"));
     }
 
     #[test]
@@ -702,7 +702,7 @@ mod tests {
             "--dry-run",
             "--non-interactive",
             "--user",
-            "juan",
+            "alice",
             "--disk",
             "vtbd0",
         ]))
