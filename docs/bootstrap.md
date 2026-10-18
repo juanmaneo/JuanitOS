@@ -295,6 +295,25 @@ The four `pkg`/stamp files above are reported as expected, each with its
 reason (`EXPECTED` in `crates/jos-release/src/compare.rs`); anything else
 is printed as `DIFFERS` and the command exits non-zero.
 
+The whole round runs unattended under QEMU on a Linux (or FreeBSD) host:
+
+```sh
+jos-release selfhost --iso release/out/builder/JuanitOS-0.1.0-amd64.iso
+```
+
+It boots the ISO on a blank disk with no display device (so `jos-boot`,
+the live installer and the login all use the serial console), ends the
+live installer with ^D, installs with `jos-install --non-interactive
+--ignore-doctor --disk vtbd0`, reboots into the installed dom0 (the disk
+has boot priority, the ISO stays attached as `cd0`), gives it a temporary
+uplink, runs `jos-release fetch`, `bins`, `rootfs` and `pack` in
+`/usr/local/src/juanitos` (no ISO: only the tarball is compared), copies
+the new tarball, `MANIFEST` and both `release.toml` files to `<work>/selfhost`, and
+finally runs `jos-release compare` between the tarball on the ISO and the
+one it just built, as root, so owners are compared too. `compare.txt` and
+`console.log` end up next to them; the exit status is the comparison's.
+It is not part of `cargo xtask ci` (it needs KVM and 30-60 minutes).
+
 ## Why not build FreeBSD from source?
 
 It would be a faithful LFS, but it buys nothing yet: the dom0 is not

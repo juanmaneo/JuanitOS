@@ -175,15 +175,7 @@ pub fn qemu_args(o: &QemuOptions) -> Vec<String> {
 /// print the command.
 pub fn run_qemu(o: &QemuOptions, dry_run: bool) -> anyhow::Result<()> {
     if !o.disk.is_file() {
-        let size = format!("{}G", o.disk_size_gb);
-        let args = ["create", "-f", "qcow2", &o.disk.to_string_lossy(), &size];
-        println!("+ qemu-img {}", args.join(" "));
-        if !dry_run {
-            let st = Command::new("qemu-img").args(args).status()?;
-            if !st.success() {
-                bail!("qemu-img failed");
-            }
-        }
+        create_qcow2(&o.disk, o.disk_size_gb, dry_run)?;
     }
     if !o.vars.is_file() {
         // Fresh variable store: an empty file sized like the code image is
@@ -212,6 +204,23 @@ pub fn run_qemu(o: &QemuOptions, dry_run: bool) -> anyhow::Result<()> {
         .context("running qemu-system-x86_64 (is QEMU installed?)")?;
     if !st.success() {
         bail!("qemu exited with {st}");
+    }
+    Ok(())
+}
+
+/// An empty (sparse) qcow2 disk.
+fn create_qcow2(disk: &Path, size_gb: u64, dry_run: bool) -> anyhow::Result<()> {
+    let size = format!("{size_gb}G");
+    let args = ["create", "-f", "qcow2", &disk.to_string_lossy(), &size];
+    println!("+ qemu-img {}", args.join(" "));
+    if !dry_run {
+        let st = Command::new("qemu-img")
+            .args(args)
+            .status()
+            .context("running qemu-img")?;
+        if !st.success() {
+            bail!("qemu-img failed");
+        }
     }
     Ok(())
 }
@@ -420,8 +429,6 @@ pub fn auto_builder_args(
 }
 
 pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
-    use crate::console::Console;
-    use std::process::Stdio;
     use std::time::Duration;
 
     std::fs::create_dir_all(&b.out)?;
@@ -503,37 +510,283 @@ pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
     if dry_run {
         return Ok(());
     }
+    let mut con = spawn_console(&args, &b.out)?;
+    con.expect("login:", Duration::from_secs(20 * 60))?;
+    root_shell(&mut con, None)?;
+    run_steps(&mut con, "builder", AUTO_STEPS.iter().copied())?;
+    power_off(&mut con, "builder")?;
+    println!("\nDone: results in {}", b.out.display());
+    Ok(())
+}
+
+/// Start QEMU with its serial console on a pipe we drive, logged to
+/// `<out>/console.log`.
+fn spawn_console(args: &[String], out: &Path) -> anyhow::Result<crate::console::Console> {
+    use std::process::Stdio;
     if accel() == "tcg" {
         println!("note: no usable /dev/kvm, running under TCG (slow; hours rather than minutes)");
     }
-    let log = std::fs::File::create(b.out.join("console.log"))?;
+    let log = std::fs::File::create(out.join("console.log"))?;
     let child = Command::new("qemu-system-x86_64")
-        .args(&args)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .context("running qemu-system-x86_64")?;
-    let mut con = Console::attach(child, Some(log))?;
+    crate::console::Console::attach(child, Some(log))
+}
 
-    con.expect("login:", Duration::from_secs(20 * 60))?;
+/// Log in as root at a `login:` prompt that has just been seen, and make
+/// the shell quiet and predictable.
+fn root_shell(con: &mut crate::console::Console, password: Option<&str>) -> anyhow::Result<()> {
+    use std::time::Duration;
     con.send_line("root")?;
+    if let Some(pw) = password {
+        con.expect("Password:", Duration::from_secs(60))?;
+        con.send_line(pw)?;
+    }
     con.expect("# ", Duration::from_secs(120))?;
-    // A quiet, predictable shell.
     con.run(
         "export ASSUME_ALWAYS_YES=yes TERM=dumb; stty -echo 2>/dev/null; true",
         Duration::from_secs(30),
-    )?;
-    for (what, cmd, minutes) in AUTO_STEPS {
-        println!("\n==> builder: {what}");
-        con.run(cmd, Duration::from_secs(minutes * 60))
-            .with_context(|| format!("builder step failed: {what}"))?;
+    )
+}
+
+/// Run `(what, command, timeout in minutes)` steps in order; the first
+/// failure stops the run.
+fn run_steps<'s>(
+    con: &mut crate::console::Console,
+    who: &str,
+    steps: impl IntoIterator<Item = (&'s str, &'s str, u64)>,
+) -> anyhow::Result<()> {
+    for (what, cmd, minutes) in steps {
+        println!("\n==> {who}: {what}");
+        con.run(cmd, std::time::Duration::from_secs(minutes * 60))
+            .with_context(|| format!("{who} step failed: {what}"))?;
     }
-    println!("\n==> builder: powering off");
-    con.send_line("poweroff")?;
-    con.wait_exit(Duration::from_secs(10 * 60))?;
-    println!("\nDone: results in {}", b.out.display());
     Ok(())
+}
+
+fn power_off(con: &mut crate::console::Console, who: &str) -> anyhow::Result<()> {
+    println!("\n==> {who}: powering off");
+    con.send_line("poweroff")?;
+    con.wait_exit(std::time::Duration::from_secs(10 * 60))
+}
+
+/// Unattended bootstrap round (stage N → N+1, `docs/bootstrap.md`): boot
+/// the stage-N ISO, install it, reboot into the installed dom0, rebuild
+/// JuanitOS there and compare the new dom0 tarball with the one the ISO
+/// carried.
+#[derive(Debug, Clone)]
+pub struct SelfHost {
+    pub iso: PathBuf,
+    /// Working disk, console log, and what the guest copies out.
+    pub out: PathBuf,
+    pub disk_size_gb: u64,
+    pub memory_mb: u64,
+    pub cpus: u32,
+}
+
+/// Root password of the throwaway installed system.
+pub const SELFHOST_PASSWORD: &str = "jos";
+
+/// The unattended install from the live medium. The VM has no IOMMU, hence
+/// `--ignore-doctor`; nothing is reserved for passthrough and the desktop
+/// stays off so the reboot lands on the serial login.
+pub fn selfhost_install() -> String {
+    format!(
+        "jos-install --non-interactive --ignore-doctor --disk vtbd0 --no-gui --no-pci \
+         --root-password {SELFHOST_PASSWORD}"
+    )
+}
+
+/// Steps run in the installed dom0. `/mnt/out` is [`SelfHost::out`]; the
+/// install medium stays attached as `cd0`, so the stage-N tarball is read
+/// from it rather than copied through the host.
+pub fn selfhost_steps() -> Vec<(&'static str, String, u64)> {
+    use crate::builder::INSTALLED_SOURCE;
+    use juanitos_core::dom0::{DIST_DIR, DIST_TARBALL, RELEASE_INFO_PATH};
+    let previous = format!("/mnt/cd{DIST_DIR}/{DIST_TARBALL}");
+    let built = format!("{INSTALLED_SOURCE}/release/out/{DIST_TARBALL}");
+    vec![
+        (
+            "temporary uplink (the dom0 has no network by design)",
+            "dhclient vtnet0 >/dev/null && route -n get default | grep gateway".to_string(),
+            5,
+        ),
+        (
+            "mount the results share and the install medium",
+            format!(
+                "kldload -n virtio_p9fs && mkdir -p /mnt/out /mnt/cd && \
+                 mount -t p9fs -o trans=virtio out /mnt/out && \
+                 mount_cd9660 /dev/cd0 /mnt/cd && ls -l {previous}"
+            ),
+            5,
+        ),
+        // The tarball is what is compared; the ISO (8 GB with COSMIC) would
+        // only cost disk and time.
+        (
+            "build the stage N+1 dom0 tarball (fetch, bins, rootfs, pack)",
+            format!(
+                "cd {INSTALLED_SOURCE} && jos-release fetch && jos-release bins && \
+                 jos-release rootfs && jos-release pack"
+            ),
+            300,
+        ),
+        (
+            "copy the results to the host",
+            format!(
+                "cd {INSTALLED_SOURCE}/release/out && \
+                 cp -v {DIST_TARBALL} MANIFEST /mnt/out/ && \
+                 cp -v rootfs{RELEASE_INFO_PATH} /mnt/out/ && \
+                 cp -v {RELEASE_INFO_PATH} /mnt/out/release-previous.toml"
+            ),
+            30,
+        ),
+        (
+            "compare stage N with stage N+1",
+            format!(
+                "jos-release --repo {INSTALLED_SOURCE} compare {previous} {built} \
+                 > /mnt/out/compare.txt 2>&1; s=$?; tail -n 40 /mnt/out/compare.txt; [ $s -eq 0 ]"
+            ),
+            60,
+        ),
+    ]
+}
+
+/// The disk boots first (`bootindex`): while it is blank OVMF falls through
+/// to the ISO, and once installed the reboot lands in the new dom0 with the
+/// ISO still attached. No display device at all: without a Graphics Output
+/// Protocol `jos-boot` hands over to the serial console, where both the
+/// live installer and the login prompt then run.
+pub fn selfhost_args(s: &SelfHost, disk: &Path, firmware: &Path, vars: &Path) -> Vec<String> {
+    vec![
+        "-machine".into(),
+        format!("q35,accel={}", accel()),
+        "-cpu".into(),
+        "max".into(),
+        "-smp".into(),
+        s.cpus.to_string(),
+        "-m".into(),
+        s.memory_mb.to_string(),
+        "-drive".into(),
+        format!(
+            "if=pflash,format=raw,readonly=on,file={}",
+            firmware.display()
+        ),
+        "-drive".into(),
+        format!("if=pflash,format=raw,file={}", vars.display()),
+        "-drive".into(),
+        format!("file={},if=none,id=hd,format=qcow2", disk.display()),
+        "-device".into(),
+        "virtio-blk-pci,drive=hd,bootindex=0".into(),
+        "-drive".into(),
+        format!(
+            "file={},if=none,id=cd,media=cdrom,readonly=on",
+            s.iso.display()
+        ),
+        "-device".into(),
+        "ide-cd,drive=cd,bootindex=1".into(),
+        "-virtfs".into(),
+        format!(
+            "local,path={},mount_tag=out,security_model=none,id=out",
+            s.out.display()
+        ),
+        "-nic".into(),
+        "user,model=virtio-net-pci".into(),
+        "-vga".into(),
+        "none".into(),
+        "-display".into(),
+        "none".into(),
+        "-monitor".into(),
+        "none".into(),
+        "-serial".into(),
+        "stdio".into(),
+    ]
+}
+
+/// What the live installer may show first on the serial console: the
+/// failed host checks' question, or the disk list. ^D (end of input) at
+/// either ends it, and the live medium goes on to its login prompt.
+pub const LIVE_INSTALLER_PROMPTS: &[&str] = &["Install anyway?", "Disks:"];
+
+pub fn run_selfhost(s: &SelfHost, dry_run: bool) -> anyhow::Result<()> {
+    if !s.iso.is_file() && !dry_run {
+        bail!("{} does not exist; build it first", s.iso.display());
+    }
+    std::fs::create_dir_all(&s.out)?;
+    // Always a blank disk: an installed one would boot instead of the ISO.
+    let disk = s.out.join("selfhost.qcow2");
+    let vars = s.out.join("OVMF_VARS.fd");
+    for stale in [&disk, &vars] {
+        if stale.exists() {
+            println!("+ rm {}", stale.display());
+            if !dry_run {
+                std::fs::remove_file(stale)?;
+            }
+        }
+    }
+    create_qcow2(&disk, s.disk_size_gb, dry_run)?;
+    let firmware = find_ovmf().context("OVMF firmware not found; install the ovmf/edk2 package")?;
+    if !dry_run {
+        create_vars(&firmware, &vars)?;
+    }
+    let args = selfhost_args(s, &disk, &firmware, &vars);
+    println!("+ qemu-system-x86_64 {}", args.join(" "));
+    println!(
+        "   live: ^D at the installer, log in as root\n      {}",
+        selfhost_install()
+    );
+    let steps = selfhost_steps();
+    for (what, cmd, minutes) in &steps {
+        println!("   dom0: {what} (timeout {minutes} min)\n      {cmd}");
+    }
+    if dry_run {
+        return Ok(());
+    }
+
+    let mut con = spawn_console(&args, &s.out)?;
+    drive_selfhost(&mut con, &selfhost_install(), &steps)?;
+    println!(
+        "\nSelf-hosting: stage N+1 matches stage N ({})",
+        s.out.join("compare.txt").display()
+    );
+    Ok(())
+}
+
+/// The console side of [`run_selfhost`]: live medium, install, reboot,
+/// `steps` in the installed dom0, power off (also after a failed step, so
+/// the disk and the results stay consistent).
+fn drive_selfhost(
+    con: &mut crate::console::Console,
+    install: &str,
+    steps: &[(&str, String, u64)],
+) -> anyhow::Result<()> {
+    use std::time::Duration;
+    println!("\n==> selfhost: booting the live medium");
+    let first = con.expect_any(
+        &[LIVE_INSTALLER_PROMPTS, &["login:"]].concat(),
+        Duration::from_secs(20 * 60),
+    )?;
+    if first < LIVE_INSTALLER_PROMPTS.len() {
+        con.send_raw(b"\x04")?;
+        con.expect("login:", Duration::from_secs(10 * 60))?;
+    }
+    root_shell(con, None)?;
+    run_steps(con, "selfhost", [("install to vtbd0", install, 30)])?;
+
+    println!("\n==> selfhost: rebooting into the installed dom0");
+    con.send_line("reboot")?;
+    con.expect("login:", Duration::from_secs(20 * 60))?;
+    root_shell(con, Some(SELFHOST_PASSWORD))?;
+    let result = run_steps(
+        con,
+        "selfhost",
+        steps.iter().map(|(w, c, m)| (*w, c.as_str(), *m)),
+    );
+    power_off(con, "selfhost")?;
+    result
 }
 
 #[cfg(test)]
@@ -663,6 +916,128 @@ mod tests {
         assert!(all.contains("--exclude ./target"));
         assert!(all.contains("s/^local_repo *= *\"\\(.*\\)\"/\\1/p"));
         assert!(all.contains("tar -C \"/root/juanitos/$r\" -xf -"));
+    }
+
+    #[test]
+    fn selfhost_boots_the_disk_first_with_the_iso_attached() {
+        let s = SelfHost {
+            iso: PathBuf::from("/w/JuanitOS.iso"),
+            out: PathBuf::from("/w/selfhost"),
+            disk_size_gb: 40,
+            memory_mb: 6144,
+            cpus: 4,
+        };
+        let a = selfhost_args(
+            &s,
+            Path::new("/w/selfhost/selfhost.qcow2"),
+            Path::new("/f/OVMF_CODE.fd"),
+            Path::new("/w/selfhost/vars.fd"),
+        )
+        .join(" ");
+        assert!(a.contains("file=/w/selfhost/selfhost.qcow2,if=none,id=hd,format=qcow2"));
+        assert!(a.contains("-device virtio-blk-pci,drive=hd,bootindex=0"));
+        assert!(a.contains("file=/w/JuanitOS.iso,if=none,id=cd,media=cdrom,readonly=on"));
+        assert!(a.contains("-device ide-cd,drive=cd,bootindex=1"));
+        assert!(a.contains("path=/w/selfhost,mount_tag=out,security_model=none,id=out"));
+        // Serial only: no GOP, so jos-boot and the installer use the console.
+        assert!(a.contains("-vga none -display none -monitor none -serial stdio"));
+        assert!(a.contains("-smp 4 -m 6144"));
+
+        let install = selfhost_install();
+        assert!(install.contains("--non-interactive --ignore-doctor --disk vtbd0"));
+        assert!(install.ends_with(&format!("--root-password {SELFHOST_PASSWORD}")));
+
+        let steps = selfhost_steps();
+        let all: String = steps.iter().map(|s| s.1.as_str()).collect();
+        assert!(all.contains("mount -t p9fs -o trans=virtio out /mnt/out"));
+        assert!(all.contains("mount_cd9660 /dev/cd0 /mnt/cd"));
+        assert!(all.contains("cd /usr/local/src/juanitos && jos-release fetch && "));
+        assert!(all.contains("jos-release rootfs && jos-release pack"));
+        assert!(!all.contains("jos-release all"), "no ISO needed");
+        // The new tarball against the one the ISO installed from; the
+        // comparison's status is the step's.
+        let (what, compare, _) = steps.last().unwrap();
+        assert!(what.starts_with("compare"));
+        assert!(compare.contains(
+            "compare /mnt/cd/usr/local/share/juanitos/dist/juanitos-dom0.txz \
+             /usr/local/src/juanitos/release/out/juanitos-dom0.txz"
+        ));
+        assert!(compare.ends_with("[ $s -eq 0 ]"));
+        // Results leave the guest before the comparison can fail.
+        let copy = steps.iter().position(|s| s.0.starts_with("copy")).unwrap();
+        assert_eq!(copy, steps.len() - 2);
+        assert!(steps.iter().all(|s| s.2 > 0));
+    }
+
+    /// A guest played by `sh`: the live installer's disk list (ended by
+    /// one byte, the ^D), a password-less live login, `reboot` to a login
+    /// with a password, `poweroff`.
+    #[cfg(unix)]
+    fn fake_guest() -> crate::console::Console {
+        use std::process::Stdio;
+        let script = r#"
+            reboot() { printf 'booting\nlogin: '; read u; printf 'Password:'; read p; printf '# '; }
+            poweroff() { exit 0; }
+            printf 'Disks:\n'; dd bs=1 count=1 >/dev/null 2>&1
+            printf 'login: '; read u; printf '# '
+            while read -r line; do eval "$line"; done
+        "#;
+        let child = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        crate::console::Console::attach(child, None).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selfhost_dialogue_with_a_guest() {
+        let mut con = fake_guest();
+        let steps = vec![
+            ("first", "true".to_string(), 1),
+            ("second", "echo hi".to_string(), 1),
+        ];
+        drive_selfhost(&mut con, "true", &steps).unwrap();
+
+        // A failing step is reported, after the guest was powered off.
+        let mut con = fake_guest();
+        let steps = vec![("compare", "false".to_string(), 1)];
+        let err = drive_selfhost(&mut con, "true", &steps).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("selfhost step failed: compare"),
+            "{err:#}"
+        );
+
+        // So is a failed install, before any reboot.
+        let mut con = fake_guest();
+        let err = drive_selfhost(&mut con, "false", &steps).unwrap_err();
+        assert!(format!("{err:#}").contains("install to vtbd0"), "{err:#}");
+    }
+
+    #[test]
+    fn selfhost_dry_run_starts_from_a_blank_disk() {
+        let dir = std::env::temp_dir().join(format!("jos-selfhost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = SelfHost {
+            iso: dir.join("missing.iso"),
+            out: dir.clone(),
+            disk_size_gb: 40,
+            memory_mb: 2048,
+            cpus: 2,
+        };
+        // A previous run's disk is left alone by a dry run.
+        std::fs::write(dir.join("selfhost.qcow2"), b"old").unwrap();
+        match run_selfhost(&s, true) {
+            Ok(()) => assert!(dir.join("selfhost.qcow2").is_file()),
+            Err(e) => assert!(format!("{e:#}").contains("OVMF"), "{e:#}"),
+        }
+        let err = run_selfhost(&s, false).unwrap_err();
+        assert!(err.to_string().contains("build it first"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

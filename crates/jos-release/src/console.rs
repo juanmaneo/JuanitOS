@@ -83,22 +83,48 @@ impl Console {
     /// Wait until `pattern` appears in the output, consuming through it.
     /// Returns what preceded the match (since the previous `expect`).
     pub fn expect(&mut self, pattern: &str, timeout: Duration) -> anyhow::Result<String> {
+        self.wait_for(&[pattern], timeout).map(|(_, before)| before)
+    }
+
+    /// Wait for whichever of `patterns` appears first in the output and
+    /// return its index, consuming through it.
+    pub fn expect_any(&mut self, patterns: &[&str], timeout: Duration) -> anyhow::Result<usize> {
+        self.wait_for(patterns, timeout).map(|(i, _)| i)
+    }
+
+    fn wait_for(
+        &mut self,
+        patterns: &[&str],
+        timeout: Duration,
+    ) -> anyhow::Result<(usize, String)> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(pos) = find(&self.buf, pattern.as_bytes()) {
-                let before: Vec<u8> = self.buf.drain(..pos + pattern.len()).collect();
+            let first = patterns
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| find(&self.buf, p.as_bytes()).map(|pos| (pos, i, p.len())))
+                .min();
+            if let Some((pos, i, len)) = first {
+                let before: Vec<u8> = self.buf.drain(..pos + len).collect();
                 let before = before.get(..pos).unwrap_or(&[]);
-                return Ok(String::from_utf8_lossy(before).into_owned());
+                return Ok((i, String::from_utf8_lossy(before).into_owned()));
             }
             let now = Instant::now();
             if now >= deadline {
                 bail!(
-                    "timed out after {}s waiting for {pattern:?}",
+                    "timed out after {}s waiting for {patterns:?}",
                     timeout.as_secs()
                 );
             }
             self.pump((deadline - now).min(Duration::from_millis(500)))?;
         }
+    }
+
+    /// Send bytes as they are (control characters such as ^D included).
+    pub fn send_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.stdin.write_all(data)?;
+        self.stdin.flush()?;
+        Ok(())
     }
 
     /// Send a line, paced: written in one burst, a line longer than a few
@@ -240,6 +266,23 @@ mod tests {
         assert!(err.to_string().contains("qemu exited with"), "{err}");
         let err = c.expect("x", Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("console closed"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_first_of_several_patterns_wins() {
+        let mut c = shell(None);
+        c.send_line("echo two; echo one").unwrap();
+        let t = Duration::from_secs(5);
+        assert_eq!(c.expect_any(&["one", "two"], t).unwrap(), 1);
+        assert_eq!(c.expect_any(&["one", "two"], t).unwrap(), 0);
+        let err = c
+            .expect_any(&["a", "b"], Duration::from_millis(200))
+            .unwrap_err();
+        assert!(err.to_string().contains(r#"["a", "b"]"#), "{err}");
+        // Raw bytes go through as they are, no newline added.
+        c.send_raw(b"printf 'raw\\n'\n").unwrap();
+        c.expect("raw", t).unwrap();
     }
 
     #[cfg(unix)]

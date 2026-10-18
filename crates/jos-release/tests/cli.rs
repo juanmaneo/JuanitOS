@@ -137,6 +137,25 @@ fn builder_vm_commands() {
     assert!(out.contains("-smp 2 -m 2048"));
 }
 
+#[test]
+fn selfhost_installs_rebuilds_and_compares() {
+    let w = Work::new("selfhost");
+    let out_dir = w.0.join("s").to_string_lossy().into_owned();
+    let (ok, out) = w.run(&["selfhost", "--iso", "/x/stage1.iso", "--out", &out_dir]);
+    if !ok && out.contains("OVMF") {
+        eprintln!("skipped: no OVMF firmware on this host");
+        return;
+    }
+    assert!(ok, "{out}");
+    assert!(out.contains("+ qemu-img create -f qcow2"), "{out}");
+    assert!(out.contains("file=/x/stage1.iso,if=none,id=cd"), "{out}");
+    assert!(out.contains("jos-install --non-interactive"), "{out}");
+    assert!(
+        out.contains("dom0: compare stage N with stage N+1"),
+        "{out}"
+    );
+}
+
 /// `jos-release` without `--dry-run`, from `cwd`. Only for paths that stop
 /// before running anything on the host.
 fn real(cwd: &std::path::Path, args: &[&str]) -> (bool, String) {

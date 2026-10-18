@@ -69,6 +69,25 @@ enum Cmd {
     /// Compare two dom0 tarballs by contents (bootstrap stage 3): exits
     /// non-zero on any difference not known to be harmless.
     Compare(CompareArgs),
+    /// Unattended bootstrap round under QEMU: install the ISO, rebuild
+    /// JuanitOS on the installed dom0, compare the two dom0 tarballs.
+    Selfhost(SelfhostArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct SelfhostArgs {
+    /// Stage-N ISO (default: the one this profile produces).
+    #[arg(long)]
+    iso: Option<PathBuf>,
+    /// Working disk, console.log and results (default <work>/selfhost).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    #[arg(long, default_value_t = 40)]
+    disk_size_gb: u64,
+    #[arg(long, default_value_t = 6144)]
+    memory_mb: u64,
+    #[arg(long, default_value_t = 4)]
+    cpus: u32,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -277,6 +296,16 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli.dry_run,
         ),
         Cmd::Builder(a) => qemu::run_builder(&a.image, &repo, cli.dry_run),
+        Cmd::Selfhost(a) => qemu::run_selfhost(
+            &qemu::SelfHost {
+                iso: a.iso.unwrap_or_else(|| work.join(profile.iso_name())),
+                out: a.out.unwrap_or_else(|| work.join("selfhost")),
+                disk_size_gb: a.disk_size_gb,
+                memory_mb: a.memory_mb,
+                cpus: a.cpus,
+            },
+            cli.dry_run,
+        ),
         Cmd::Compare(a) => {
             let report = compare::compare_tarballs(
                 runner,
