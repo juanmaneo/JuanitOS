@@ -83,10 +83,8 @@ enum Step {
 
 fn decode(buf: &[u8]) -> Step {
     match buf {
-        [] => Step::Incomplete,
-        [0x1b] => Step::Incomplete,
-        [0x1b, b'[' | b'O'] => Step::Incomplete,
-        [0x1b, b'[' | b'O', rest @ ..] => csi(rest),
+        [] | [0x1b] | [0x1b, b'[' | b'O'] => Step::Incomplete,
+        [0x1b, b'[' | b'O', params @ .., last] => csi(params, *last),
         // ESC followed by something else: Alt+key, treated as Esc then
         // dropped (the installer has no Alt bindings).
         [0x1b, _] => Step::Key(Key::Esc),
@@ -107,12 +105,15 @@ fn single(b: u8) -> Step {
     }
 }
 
+/// A multi-byte character in progress. `first` is a lead byte
+/// (`0xc0..=0xf7`): any other byte was settled by [`single`] already.
 fn utf8(buf: &[u8], first: u8) -> Step {
-    let need = match first {
-        0xc0..=0xdf => 2,
-        0xe0..=0xef => 3,
-        0xf0..=0xf7 => 4,
-        _ => return Step::Invalid,
+    let need = if first >= 0xf0 {
+        4
+    } else if first >= 0xe0 {
+        3
+    } else {
+        2
     };
     if buf.len() < need {
         return Step::Incomplete;
@@ -123,13 +124,10 @@ fn utf8(buf: &[u8], first: u8) -> Step {
     }
 }
 
-/// After `ESC [` (or `ESC O`): parameters then a final byte.
-fn csi(rest: &[u8]) -> Step {
-    let Some((&last, params)) = rest.split_last() else {
-        return Step::Incomplete;
-    };
+/// After `ESC [` (or `ESC O`): parameters then the byte seen last.
+fn csi(params: &[u8], last: u8) -> Step {
     if last.is_ascii_digit() || last == b';' {
-        return if rest.len() > 8 {
+        return if params.len() >= 8 {
             Step::Invalid
         } else {
             Step::Incomplete
@@ -283,5 +281,14 @@ mod tests {
         assert_eq!(keys(b"\x1b[1;5Xc"), vec![Key::Char('c')]);
         assert_eq!(keys(b"\x1b[123456789d"), vec![Key::Char('d')]);
         assert_eq!(keys(&[0x1c, b'e']), vec![Key::Char('e')]);
+        // Eight parameter bytes still wait for a final byte; the ninth
+        // gives up.
+        let mut d = Decoder::new();
+        for &b in b"\x1b[12345678" {
+            assert_eq!(d.feed(b), None);
+        }
+        assert_eq!(d.pending.len(), 10, "still collecting");
+        assert_eq!(d.feed(b'9'), None);
+        assert!(d.pending.is_empty(), "dropped");
     }
 }

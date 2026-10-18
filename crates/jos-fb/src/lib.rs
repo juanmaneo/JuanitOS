@@ -158,6 +158,14 @@ mod tests {
     fn ioctl_numbers_match_freebsd_headers() {
         // Values as the C headers evaluate them on amd64.
         assert_eq!(ioc::FBIOGTYPE, 0x4018_4600);
+        // The constants are computed at compile time; the encoder also
+        // works at run time, and masks an oversized length.
+        let len = std::hint::black_box(ioc::FBTYPE_LEN);
+        assert_eq!(ioc::ioc(ioc::IOC_OUT, b'F', 0, len), ioc::FBIOGTYPE);
+        assert_eq!(
+            ioc::ioc(ioc::IOC_VOID, b'v', 5, std::hint::black_box(4 | 1 << 13)),
+            ioc::VT_ACTIVATE
+        );
         assert_eq!(ioc::FBIO_GETLINEWIDTH, 0x4004_466f);
         assert_eq!(ioc::FBIO_GETRGBOFFS, 0x400c_4674);
         assert_eq!(ioc::KDSETMODE, 0x2004_4b0a);

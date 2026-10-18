@@ -8,15 +8,6 @@
 # measured values and drops files that reach zero (never raises).
 # Commit the updated file together with the tests that earned it.
 
-[files."crates/jos-fb/src/keys.rs"]
-lines = 2
-regions = 3
-
-[files."crates/jos-fb/src/lib.rs"]
-lines = 3
-functions = 1
-regions = 3
-
 [files."crates/jos-fwcfg/src/lib.rs"]
 lines = 9
 functions = 1
