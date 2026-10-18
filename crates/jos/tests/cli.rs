@@ -26,11 +26,17 @@ impl Env {
         Env { dir }
     }
 
+    /// `jos --dry-run`. Dry runs still execute read-only queries (`zpool
+    /// list`, `pgrep`, ...), so `PATH` is an empty directory: the answers
+    /// must not depend on which tools the machine running the tests has.
     fn jos(&self, args: &[&str]) -> Output {
+        let empty = self.dir.join("empty-path");
+        std::fs::create_dir_all(&empty).unwrap();
         Command::new(env!("CARGO_BIN_EXE_jos"))
             .arg("--dry-run")
             .args(args)
             .env("JOS_CONFIG_DIR", &self.dir)
+            .env("PATH", &empty)
             .output()
             .unwrap()
     }
@@ -621,14 +627,14 @@ fn unknown_qubes_and_host_only_commands() {
     ] {
         assert!(e.err(args).contains("ghost"), "{args:?}");
     }
-    // `jos doctor` runs the read-only checks for real; on a development
-    // machine they fail, which is reported rather than hidden.
+    // `jos doctor` runs the read-only checks for real; on a host without
+    // any of the tools they fail, which is reported rather than hidden.
     let out = e.jos(&["doctor"]);
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("kernel module vmm"));
-    if !out.status.success() {
-        assert!(String::from_utf8_lossy(&out.stderr).contains("some checks failed"));
-    }
+    assert!(text.contains("could not run zpool"), "{text}");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("some checks failed"));
     let nowhere = e.dir.join("missing").join("report.txt");
     let err = e.err(&["doctor", "--report", nowhere.to_str().unwrap()]);
     assert!(err.contains("writing the report to"), "{err}");

@@ -643,6 +643,8 @@ mod tests {
         drop_request(&f, "work", "c.tmp", "");
         drop_request(&f, "web", "bad id", "copy x work\n");
         std::fs::create_dir_all(Path::new(&f.cfg.share_dir).join("Not-A-Qube")).unwrap();
+        // A qube whose guest never made a request has no req/ yet.
+        std::fs::create_dir_all(Path::new(&f.cfg.share_dir).join("vault")).unwrap();
         let found = broker.scan().unwrap();
         let ids: Vec<(&str, &str)> = found
             .iter()

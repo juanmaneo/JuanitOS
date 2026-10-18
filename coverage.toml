@@ -1,25 +1,256 @@
-# Line-coverage floors (%) checked by `cargo xtask coverage`.
+# Coverage allowances checked by `cargo xtask coverage`.
 #
-# The gate fails when the total or a crate drops below its floor.
-# `cargo xtask coverage --ratchet` raises the floors to the measured
-# values (rounded down, never lowered): coverage only goes up.
+# The target is 100 % of lines, functions and regions in every file.
+# Each entry below says how many of them a file may still leave
+# uncovered; a file that is not listed must be fully covered.
+# Counts are exact: coverage has to be deterministic.
+# `cargo xtask coverage --ratchet` lowers the allowances to the
+# measured values and drops files that reach zero (never raises).
 # Commit the updated file together with the tests that earned it.
 
-[gate]
-total = 96.2
-# Floor for a crate that is not listed below yet.
-new_crate = 60.0
-# Points kept below the measurement when ratcheting (host variance).
-slack = 0.5
+[files."crates/jos-fb/src/keys.rs"]
+lines = 2
+regions = 3
 
-[crates]
-jos = 95.5
-jos-fb = 97.7
-jos-fwcfg = 96.9
-jos-fwnet = 91.7
-jos-gfx = 96.2
-jos-greet = 98.8
-jos-install = 96.4
-jos-release = 94.3
-jos-splash = 91.6
-juanitos-core = 97.6
+[files."crates/jos-fb/src/lib.rs"]
+lines = 3
+functions = 1
+regions = 3
+
+[files."crates/jos-fwcfg/src/lib.rs"]
+lines = 9
+functions = 1
+regions = 31
+
+[files."crates/jos-fwnet/src/arp.rs"]
+lines = 3
+regions = 22
+
+[files."crates/jos-fwnet/src/config.rs"]
+lines = 8
+functions = 1
+regions = 19
+
+[files."crates/jos-fwnet/src/dhcp.rs"]
+lines = 7
+regions = 53
+
+[files."crates/jos-fwnet/src/engine.rs"]
+lines = 68
+functions = 2
+regions = 118
+
+[files."crates/jos-fwnet/src/nat.rs"]
+lines = 8
+regions = 11
+
+[files."crates/jos-fwnet/src/packet.rs"]
+lines = 17
+regions = 102
+
+[files."crates/jos-gfx/src/color.rs"]
+lines = 4
+functions = 1
+regions = 4
+
+[files."crates/jos-gfx/src/icons.rs"]
+lines = 3
+regions = 3
+
+[files."crates/jos-gfx/src/image.rs"]
+lines = 11
+functions = 3
+regions = 17
+
+[files."crates/jos-gfx/src/png.rs"]
+lines = 7
+functions = 5
+regions = 17
+
+[files."crates/jos-gfx/src/scene.rs"]
+lines = 4
+functions = 1
+regions = 4
+
+[files."crates/jos-greet/src/greeter.rs"]
+lines = 1
+regions = 8
+
+[files."crates/jos-greet/src/gui.rs"]
+regions = 8
+
+[files."crates/jos-greet/src/main.rs"]
+lines = 6
+functions = 1
+regions = 11
+
+[files."crates/jos-greet/src/ui.rs"]
+regions = 4
+
+[files."crates/jos-install/src/disks.rs"]
+lines = 2
+regions = 6
+
+[files."crates/jos-install/src/gui.rs"]
+lines = 3
+functions = 1
+regions = 6
+
+[files."crates/jos-install/src/install.rs"]
+lines = 19
+regions = 36
+
+[files."crates/jos-install/src/main.rs"]
+lines = 61
+functions = 2
+regions = 124
+
+[files."crates/jos-install/src/prompt.rs"]
+lines = 2
+regions = 23
+
+[files."crates/jos-install/src/ui.rs"]
+lines = 6
+regions = 19
+
+[files."crates/jos-install/src/wizard.rs"]
+lines = 13
+regions = 20
+
+[files."crates/jos-release/src/builder.rs"]
+lines = 31
+functions = 3
+regions = 109
+
+[files."crates/jos-release/src/compare.rs"]
+lines = 7
+functions = 2
+regions = 22
+
+[files."crates/jos-release/src/console.rs"]
+lines = 4
+regions = 17
+
+[files."crates/jos-release/src/disk.rs"]
+lines = 10
+functions = 2
+regions = 40
+
+[files."crates/jos-release/src/main.rs"]
+lines = 8
+functions = 4
+regions = 17
+
+[files."crates/jos-release/src/profile.rs"]
+lines = 1
+functions = 1
+regions = 3
+
+[files."crates/jos-release/src/qemu.rs"]
+lines = 86
+functions = 1
+regions = 178
+
+[files."crates/jos-release/src/ventoy.rs"]
+lines = 2
+functions = 2
+regions = 16
+
+[files."crates/jos-splash/src/main.rs"]
+lines = 2
+regions = 8
+
+[files."crates/jos-splash/src/server.rs"]
+lines = 7
+functions = 3
+regions = 25
+
+[files."crates/jos/src/main.rs"]
+lines = 32
+functions = 12
+regions = 115
+
+[files."crates/juanitos-core/src/agent.rs"]
+lines = 2
+regions = 13
+
+[files."crates/juanitos-core/src/bhyve.rs"]
+lines = 14
+functions = 1
+regions = 44
+
+[files."crates/juanitos-core/src/config.rs"]
+lines = 6
+regions = 27
+
+[files."crates/juanitos-core/src/console.rs"]
+lines = 4
+regions = 33
+
+[files."crates/juanitos-core/src/doctor.rs"]
+lines = 22
+regions = 38
+
+[files."crates/juanitos-core/src/events.rs"]
+lines = 2
+regions = 10
+
+[files."crates/juanitos-core/src/firewall.rs"]
+lines = 3
+functions = 2
+regions = 8
+
+[files."crates/juanitos-core/src/fsops.rs"]
+lines = 13
+functions = 1
+regions = 39
+
+[files."crates/juanitos-core/src/net.rs"]
+lines = 4
+functions = 1
+regions = 33
+
+[files."crates/juanitos-core/src/pci.rs"]
+lines = 12
+functions = 3
+regions = 18
+
+[files."crates/juanitos-core/src/release.rs"]
+lines = 5
+regions = 13
+
+[files."crates/juanitos-core/src/report.rs"]
+lines = 3
+functions = 1
+regions = 6
+
+[files."crates/juanitos-core/src/requests.rs"]
+lines = 11
+regions = 42
+
+[files."crates/juanitos-core/src/setup.rs"]
+lines = 1
+functions = 1
+regions = 11
+
+[files."crates/juanitos-core/src/share.rs"]
+lines = 4
+functions = 3
+regions = 22
+
+[files."crates/juanitos-core/src/supervisor.rs"]
+lines = 3
+regions = 7
+
+[files."crates/juanitos-core/src/sys.rs"]
+lines = 3
+regions = 9
+
+[files."crates/juanitos-core/src/template.rs"]
+lines = 8
+functions = 2
+regions = 43
+
+[files."crates/juanitos-core/src/zfs.rs"]
+lines = 7
+regions = 24

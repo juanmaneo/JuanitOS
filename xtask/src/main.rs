@@ -260,6 +260,12 @@ fn coverage(ctx: &Ctx, ratchet: bool, html: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)?;
     let lcov_path = out_dir.join("lcov.info");
     let lcov_s = lcov_path.to_string_lossy().into_owned();
+    let summary_path = out_dir.join("summary.json");
+    let summary_s = summary_path.to_string_lossy().into_owned();
+    // Run the tests once, then write both reports: lcov for the CI
+    // artifact, the JSON summary (lines, functions, regions) for the gate.
+    // `--no-report` merges with earlier profiles, so start clean.
+    cargo(ctx, &ctx.root, &["llvm-cov", "clean", "--workspace"])?;
     cargo(
         ctx,
         &ctx.root,
@@ -268,9 +274,24 @@ fn coverage(ctx: &Ctx, ratchet: bool, html: bool) -> anyhow::Result<()> {
             "--workspace",
             "--exclude",
             "xtask",
-            "--lcov",
+            "--no-report",
+        ],
+    )?;
+    cargo(
+        ctx,
+        &ctx.root,
+        &["llvm-cov", "report", "--lcov", "--output-path", &lcov_s],
+    )?;
+    cargo(
+        ctx,
+        &ctx.root,
+        &[
+            "llvm-cov",
+            "report",
+            "--json",
+            "--summary-only",
             "--output-path",
-            &lcov_s,
+            &summary_s,
         ],
     )?;
     if html {
@@ -278,11 +299,11 @@ fn coverage(ctx: &Ctx, ratchet: bool, html: bool) -> anyhow::Result<()> {
         println!("HTML report: target/llvm-cov/html/index.html");
     }
 
-    let lcov = std::fs::read_to_string(&lcov_path)
-        .with_context(|| format!("reading {}", lcov_path.display()))?;
-    let per_crate = coverage::parse_lcov(&lcov);
+    let summary = std::fs::read_to_string(&summary_path)
+        .with_context(|| format!("reading {}", summary_path.display()))?;
+    let per_crate = coverage::parse_summary(&summary, &ctx.root)?;
     if per_crate.is_empty() {
-        bail!("{} has no workspace sources", lcov_path.display());
+        bail!("{} has no workspace sources", summary_path.display());
     }
     let floors_path = ctx.root.join("coverage.toml");
     let mut floors = match std::fs::read_to_string(&floors_path) {

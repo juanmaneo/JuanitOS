@@ -1,6 +1,9 @@
 [toolchain]
-channel = "stable"
-components = ["rustfmt", "clippy"]
+# Pinned: the coverage gate counts lines and regions exactly, and two
+# compiler versions instrument the same code differently. Moving to a new
+# release is a commit of its own (with `cargo xtask coverage --ratchet`).
+channel = "1.99.1"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
 # UEFI: jos-boot and jos-firewall. FreeBSD: cross-checking the dom0 tools
 # (`cargo clippy --target x86_64-unknown-freebsd`) from any host.
 targets = ["x86_64-unknown-uefi", "x86_64-unknown-freebsd"]

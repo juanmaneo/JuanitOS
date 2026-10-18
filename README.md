@@ -56,7 +56,7 @@ crates/jos-splash      boot splash daemon on the vt(4) framebuffer + rc.d client
 crates/jos-fb          vt(4) framebuffer display and keyboard decoder (splash, installer, greeter)
 crates/jos-greet       login screen: PAM, then the COSMIC session on the same VT
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
-coverage.toml          per-crate line-coverage floors (ratcheted, only go up)
+coverage.toml          per-file uncovered-line/function/region allowances (ratcheted down to 0)
 templates/             cloud-init user-data of the guest template recipes; agent/ the guest agents (share, jos-agentd) and jos-copy
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
 freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet
@@ -230,19 +230,22 @@ cargo xtask ci            # fmt, clippy (host, FreeBSD, UEFI), tests + coverage 
 cargo xtask test          # just the tests (workspace + jos-boot's library on the host)
 cargo xtask lint          # clippy -D warnings on every target
 cargo xtask fmt --fix
-cargo xtask coverage      # line coverage per crate, checked against coverage.toml
+cargo xtask coverage      # lines, functions, regions per file, checked against coverage.toml
 cargo xtask coverage --html --ratchet
 cargo xtask screenshots   # regenerate docs/images (installer pages, boot card)
 cargo xtask ci -- --offline   # arguments after -- go to cargo
 ```
 
-Coverage uses `cargo-llvm-cov` (`rustup component add llvm-tools-preview`,
-`cargo install cargo-llvm-cov`). `coverage.toml` holds a floor per crate
-and for the total; the gate fails when a number drops below its floor,
-and `--ratchet` raises the floors to what was just measured (minus a
-small slack for host differences, never lowering them). Coverage can
-therefore only improve, one commit at a time: add tests, ratchet, commit
-both. The same `cargo xtask ci` runs in GitHub Actions
+Coverage uses `cargo-llvm-cov` (`cargo install cargo-llvm-cov`). The
+target is 100 % of lines, functions and regions in every file.
+`coverage.toml` lists, per file, how many of each may still be uncovered;
+a file it does not list (a new one, for instance) must be fully covered.
+The counts are exact, with no slack: coverage has to be deterministic, so
+tests never depend on timing or on which tools the host has (host
+programs are fake ones on `PATH`). `--ratchet` lowers the allowances to
+what was just measured and drops files that reach zero. The toolchain is
+pinned in `rust-toolchain.toml`, because another compiler version counts
+regions differently. The same `cargo xtask ci` runs in GitHub Actions
 (`.github/workflows/ci.yml`).
 
 How the code stays testable on a Linux or macOS laptop:
@@ -342,8 +345,9 @@ second per command, 2 MB of output included, and `jos copy` and
 `jos-copy` ride on it. The channel's second port is the qube's doorbell:
 `jos-copy` rings it and `jos serve` answers at once instead of on its
 next poll (0.4 s end to end with the poll set to 60 s; both templates
-updated). The test suite reaches 96.9% line coverage, gated per crate
-in CI (see `coverage.toml` for the per-crate floors).
+updated). The test suite reaches 97.0% of lines, 96.9% of functions and
+95.5% of regions, gated per file in CI on the way to 100 % (see
+`coverage.toml` for what each file may still leave uncovered).
 
 `jos setup` was then run for real on that dom0 (`--nic` on the
 emulated-IOMMU NIC, no GPU): it built `fbsd15-net`, `sys-net` and

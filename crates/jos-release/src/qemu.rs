@@ -32,23 +32,25 @@ pub fn find_ovmf() -> Option<PathBuf> {
 /// `/dev/kvm` is usable by this user (otherwise QEMU would refuse to
 /// start); TCG is slow but always works.
 pub fn accel() -> &'static str {
-    if cfg!(target_os = "linux") {
-        if std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/kvm")
-            .is_ok()
-        {
-            "kvm"
-        } else {
-            "tcg"
-        }
-    } else if cfg!(target_os = "macos") {
-        "hvf"
-    } else if cfg!(target_os = "freebsd") {
-        "nvmm"
-    } else {
-        "tcg"
+    accel_for(std::env::consts::OS, kvm_usable())
+}
+
+fn kvm_usable() -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+        .is_ok()
+}
+
+/// The accelerator for an OS (`std::env::consts::OS`) and whether
+/// `/dev/kvm` can be opened.
+pub fn accel_for(os: &str, kvm: bool) -> &'static str {
+    match (os, kvm) {
+        ("linux", true) => "kvm",
+        ("macos", _) => "hvf",
+        ("freebsd", _) => "nvmm",
+        _ => "tcg",
     }
 }
 
@@ -858,6 +860,16 @@ mod tests {
         assert!(a.contains("-device intel-iommu,intremap=on "));
         // vmm's vtd_init panics on caching mode.
         assert!(!a.contains("caching-mode"));
+    }
+
+    #[test]
+    fn accelerator_per_host() {
+        assert_eq!(accel_for("linux", true), "kvm");
+        assert_eq!(accel_for("linux", false), "tcg");
+        assert_eq!(accel_for("macos", false), "hvf");
+        assert_eq!(accel_for("freebsd", true), "nvmm");
+        assert_eq!(accel_for("windows", false), "tcg");
+        assert!(["kvm", "tcg", "hvf", "nvmm"].contains(&accel()));
     }
 
     #[test]
