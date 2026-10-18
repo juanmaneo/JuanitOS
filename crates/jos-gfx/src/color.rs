@@ -38,10 +38,8 @@ impl Rgba {
             a => {
                 let sa = a as u32;
                 let da = dst.a as u32;
+                // At least `sa`, which is 1..=254 here: never zero.
                 let out_a = sa + da * (255 - sa) / 255;
-                if out_a == 0 {
-                    return Rgba::TRANSPARENT;
-                }
                 let ch = |s: u8, d: u8| -> u8 {
                     let s = s as u32;
                     let d = d as u32;
@@ -86,18 +84,12 @@ pub struct Theme {
 pub const THEME: Theme = Theme {
     background: Rgba::rgb(0x00, 0x00, 0x00),
     accent: Rgba::rgb(0xf5, 0xa6, 0x23),
-    accent_soft: Rgba::rgb(0xf5, 0xa6, 0x23).with_alpha_const(96),
+    accent_soft: Rgba::new(0xf5, 0xa6, 0x23, 96),
     dim: Rgba::rgb(0x2c, 0x31, 0x39),
     text: Rgba::rgb(0xd8, 0xdc, 0xe2),
     text_muted: Rgba::rgb(0x6c, 0x74, 0x80),
     highlight: Rgba::rgb(0x1c, 0x22, 0x2b),
 };
-
-impl Rgba {
-    const fn with_alpha_const(self, a: u8) -> Self {
-        Rgba { a, ..self }
-    }
-}
 
 #[cfg(test)]
 mod tests {

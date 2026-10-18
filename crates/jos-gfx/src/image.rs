@@ -48,11 +48,6 @@ impl Rect {
     pub const fn bottom(&self) -> i32 {
         self.y + self.h
     }
-
-    /// Shrink by `d` on every side.
-    pub const fn inset(&self, d: i32) -> Rect {
-        Rect::new(self.x + d, self.y + d, self.w - 2 * d, self.h - 2 * d)
-    }
 }
 
 impl Image {
@@ -87,37 +82,29 @@ impl Image {
         self.pixels.get(start..start + w)
     }
 
+    /// Index of (x, y) in `pixels`, `None` outside the image.
+    fn index(&self, x: i32, y: i32) -> Option<usize> {
+        let inside = (0..self.width as i32).contains(&x) && (0..self.height as i32).contains(&y);
+        inside.then(|| y as usize * self.width as usize + x as usize)
+    }
+
     pub fn get(&self, x: i32, y: i32) -> Option<Rgba> {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
-            return None;
-        }
-        self.pixels
-            .get(y as usize * self.width as usize + x as usize)
-            .copied()
+        self.index(x, y).and_then(|i| self.pixels.get(i)).copied()
     }
 
     /// Composite `c` over the pixel at (x, y); out-of-range is ignored.
     pub fn blend(&mut self, x: i32, y: i32, c: Rgba) {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
-            return;
-        }
-        let idx = y as usize * self.width as usize + x as usize;
-        if let Some(p) = self.pixels.get_mut(idx) {
+        if let Some(p) = self.index(x, y).and_then(|i| self.pixels.get_mut(i)) {
             *p = c.over(*p);
         }
     }
 
-    pub fn clear(&mut self, c: Rgba) {
-        self.pixels.iter_mut().for_each(|p| *p = c);
-    }
-
     /// Composite `src` onto `self` with its top-left corner at (x, y).
     pub fn draw_image(&mut self, src: &Image, x: i32, y: i32) {
-        for sy in 0..src.height {
-            if let Some(row) = src.row(sy) {
-                for (sx, &c) in row.iter().enumerate() {
-                    self.blend(x + sx as i32, y + sy as i32, c);
-                }
+        let rows = src.pixels.chunks(src.width.max(1) as usize);
+        for (sy, row) in rows.enumerate() {
+            for (sx, &c) in row.iter().enumerate() {
+                self.blend(x + sx as i32, y + sy as i32, c);
             }
         }
     }
@@ -196,11 +183,7 @@ impl Image {
             let dx = x - cx;
             let dy = y - cy;
             let d2 = dx * dx + dy * dy;
-            if d2 > o2 || d2 < i2 {
-                return false;
-            }
-            let a = atan2(dy, dx);
-            angle_distance(a, gap_angle) > gap_half
+            d2 <= o2 && d2 >= i2 && angle_distance(atan2(dy, dx), gap_angle) > gap_half
         });
     }
 
@@ -211,10 +194,8 @@ impl Image {
         let y0 = r.y as f32;
         let x1 = r.right() as f32;
         let y1 = r.bottom() as f32;
+        // Every sample `fill_shape` takes lies inside `r`, its bounds.
         self.fill_shape(r, c, |x, y| {
-            if x < x0 || x > x1 || y < y0 || y > y1 {
-                return false;
-            }
             // Distance to the inner (corner-centre) box.
             let ix = (x0 + rad).max(x.min(x1 - rad));
             let iy = (y0 + rad).max(y.min(y1 - rad));
@@ -421,6 +402,13 @@ mod tests {
         assert_eq!(img.get(20, 20), Some(WHITE));
         assert_eq!(img.get(20, 10), Some(BLACK));
         assert_eq!(img.get(20, 19), Some(WHITE));
+        // A zero-length line is a dot.
+        let mut img = Image::new(8, 8, BLACK);
+        img.line(4.0, 4.0, 4.0, 4.0, 2.0, WHITE);
+        for (x, y) in [(3, 3), (4, 3), (3, 4), (4, 4)] {
+            assert!(img.get(x, y).unwrap().r > 0, "({x}, {y})");
+        }
+        assert_eq!(img.get(0, 0), Some(BLACK));
     }
 
     #[test]
@@ -432,6 +420,7 @@ mod tests {
         assert!(close(atan2(1.0, 0.0), FRAC_PI_2));
         assert!(close(atan2(0.0, -1.0), PI));
         assert!(close(atan2(-1.0, 0.0), -FRAC_PI_2));
+        assert_eq!(atan2(0.0, 0.0), 0.0);
         assert!(close(angle_distance(-FRAC_PI_2, 3.0 * FRAC_PI_2), 0.0));
     }
 
@@ -455,5 +444,9 @@ mod tests {
         assert_eq!(dst.get(3, 3), Some(BLACK));
         assert_eq!(dst.row(1).map(|r| r.len()), Some(4));
         assert!(dst.row(4).is_none());
+        // An empty image draws nothing.
+        let before = dst.clone();
+        dst.draw_image(&Image::new(0, 3, WHITE), 0, 0);
+        assert_eq!(dst, before);
     }
 }

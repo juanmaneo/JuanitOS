@@ -174,6 +174,13 @@ mod tests {
         assert!(close(s, -1.0) && close(c, 0.0));
         let (s, c) = sin_cos(2.0 * PI / 3.0);
         assert!(close(s, 0.866) && close(c, -0.5), "{s} {c}");
+        // Every quadrant, and angles beyond half a turn either way.
+        let (s, c) = sin_cos(-2.0 * PI / 3.0);
+        assert!(close(s, -0.866) && close(c, -0.5), "{s} {c}");
+        let (s, c) = sin_cos(4.0 * PI / 3.0);
+        assert!(close(s, -0.866) && close(c, -0.5), "{s} {c}");
+        let (s, c) = sin_cos(-4.0 * PI / 3.0);
+        assert!(close(s, 0.866) && close(c, -0.5), "{s} {c}");
     }
 
     #[test]

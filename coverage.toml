@@ -34,30 +34,6 @@ regions = 11
 lines = 17
 regions = 102
 
-[files."crates/jos-gfx/src/color.rs"]
-lines = 4
-functions = 1
-regions = 4
-
-[files."crates/jos-gfx/src/icons.rs"]
-lines = 3
-regions = 3
-
-[files."crates/jos-gfx/src/image.rs"]
-lines = 11
-functions = 3
-regions = 17
-
-[files."crates/jos-gfx/src/png.rs"]
-lines = 7
-functions = 5
-regions = 17
-
-[files."crates/jos-gfx/src/scene.rs"]
-lines = 4
-functions = 1
-regions = 4
-
 [files."crates/jos-install/src/disks.rs"]
 lines = 2
 regions = 6

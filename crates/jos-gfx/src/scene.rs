@@ -333,6 +333,12 @@ mod tests {
         let text = img.pixels().iter().filter(|p| **p == THEME.text).count();
         assert!(accent > 100);
         assert!(text > 200);
+        // More lines than the card holds: the rest is left out.
+        let many: Vec<String> = (0..100).map(|i| std::format!("line {i}")).collect();
+        let crowded = render_message_card("BOOT FAILED", &many);
+        let few = render_message_card("BOOT FAILED", &many[..20]);
+        assert_eq!(crowded.height(), few.height());
+        assert_eq!(Scene::default(), Scene::new());
     }
 
     #[test]

@@ -3,7 +3,6 @@
 //! previews. The kernel's `vt(4)` wants a 32-bit RGBA image, which is what
 //! the loader's decoder produces from any 8-bit PNG.
 
-use std::io::Write;
 use std::vec::Vec;
 
 use crate::image::Image;
@@ -30,10 +29,8 @@ pub fn encode(img: &Image) -> Result<Vec<u8>, PngError> {
         let mut enc = png::Encoder::new(&mut out, img.width(), img.height());
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
-        let mut w = enc
-            .write_header()
-            .map_err(|e| PngError(std::format!("{e}")))?;
-        w.write_image_data(&data)
+        enc.write_header()
+            .and_then(|mut w| w.write_image_data(&data))
             .map_err(|e| PngError(std::format!("{e}")))?;
     }
     Ok(out)
@@ -42,11 +39,7 @@ pub fn encode(img: &Image) -> Result<Vec<u8>, PngError> {
 /// Encode and write to `path`.
 pub fn write(img: &Image, path: &std::path::Path) -> Result<(), PngError> {
     let bytes = encode(img)?;
-    let mut f = std::fs::File::create(path)
-        .map_err(|e| PngError(std::format!("{}: {e}", path.display())))?;
-    f.write_all(&bytes)
-        .map_err(|e| PngError(std::format!("{}: {e}", path.display())))?;
-    Ok(())
+    std::fs::write(path, bytes).map_err(|e| PngError(std::format!("{}: {e}", path.display())))
 }
 
 #[cfg(test)]
@@ -68,5 +61,17 @@ mod tests {
         assert_eq!(info.color_type, png::ColorType::Rgba);
         assert_eq!(&buf[..4], &[250, 251, 252, 255]);
         assert_eq!(&buf[4..8], &[1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn failures_are_reported() {
+        // PNG has no empty images.
+        let empty = Image::new(0, 4, Rgba::rgb(0, 0, 0));
+        assert!(encode(&empty).is_err());
+        let dir = std::env::temp_dir().join(std::format!("jos-gfx-png-{}", std::process::id()));
+        assert!(write(&empty, &dir.join("x.png")).is_err());
+        let img = Image::new(2, 2, Rgba::rgb(0, 0, 0));
+        let err = write(&img, &dir.join("missing/x.png")).unwrap_err();
+        assert!(std::format!("{err}").contains("missing/x.png"), "{err}");
     }
 }
