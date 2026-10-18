@@ -20,7 +20,11 @@ jobs:
       # rust-toolchain.toml selects the toolchain, its components and the
       # UEFI/FreeBSD targets; `rustup show` installs them.
       - run: rustup show && rustup component add llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      # Cargo subcommands `cargo xtask ci` needs (prebuilt binaries):
+      # coverage, then the security audit (RustSec + deny.toml).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-audit,cargo-deny
       # Host tools some tests need; without them they skip and coverage
       # drops below the floors. OVMF: jos-release QEMU tests; mtools:
       # writing into a disk image's ESP (jos-release disk.rs).

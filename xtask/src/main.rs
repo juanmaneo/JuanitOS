@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! cargo xtask ci                  everything CI runs, in order
+//! cargo xtask security-audit      cargo-audit + cargo-deny (deny.toml), all workspaces
 //! cargo xtask fmt [--fix]         rustfmt, all three workspaces
 //! cargo xtask lint                clippy -D warnings: host, FreeBSD, UEFI
 //! cargo xtask test                tests: workspace + jos-boot lib on the host
@@ -65,6 +66,7 @@ fn run() -> anyhow::Result<()> {
     let flag = |name: &str| args.iter().any(|a| a == name);
     match args.first().map(String::as_str) {
         Some("ci") => ci(&ctx),
+        Some("security-audit") => security_audit(&ctx),
         Some("fmt") => fmt(&ctx, flag("--fix")),
         Some("lint") => lint(&ctx),
         Some("test") => test(&ctx),
@@ -81,7 +83,9 @@ fn run() -> anyhow::Result<()> {
 const HELP: &str = "\
 cargo xtask <task> [options] [-- <cargo args>]
 
-  ci                     fmt, lint, coverage gate, UEFI builds
+  ci                     security audit, fmt, lint, coverage gate, UEFI builds
+  security-audit         RustSec advisories (cargo-audit) and the deny.toml policy
+                         (cargo-deny: advisories, licenses, sources) on every lockfile
   fmt [--fix]            check (or apply) rustfmt in all workspaces
   lint                   clippy -D warnings for host, FreeBSD and UEFI targets
   test                   workspace tests + jos-boot's library tests on the host
@@ -112,10 +116,11 @@ fn cargo(ctx: &Ctx, dir: &Path, args: &[&str]) -> anyhow::Result<()> {
 }
 
 /// `args` with the pass-through arguments inserted before a `--` (whose
-/// tail belongs to the tool cargo runs). `cargo fmt` takes none of them.
+/// tail belongs to the tool cargo runs). `cargo fmt` and the audit tools
+/// have their own command lines and take none of them.
 fn with_extra(args: &[&str], extra: &[String]) -> Vec<String> {
     let mut out: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    if matches!(args.first(), Some(&"fmt")) {
+    if matches!(args.first(), Some(&("fmt" | "audit" | "deny"))) {
         return out;
     }
     let at = args.iter().position(|a| *a == "--").unwrap_or(args.len());
@@ -133,6 +138,26 @@ fn rel(ctx: &Ctx, dir: &Path) -> String {
     }
 }
 
+/// The three workspaces, each with its own Cargo.lock: the host one and
+/// the standalone UEFI ones.
+fn workspaces(ctx: &Ctx) -> Vec<PathBuf> {
+    std::iter::once(ctx.root.clone())
+        .chain(UEFI_CRATES.iter().map(|dir| ctx.root.join(dir)))
+        .collect()
+}
+
+/// Fail early, saying how to install it, when `cargo <subcommand>` is
+/// missing.
+fn require(subcommand: &str, install: &str) -> anyhow::Result<()> {
+    let probe = Command::new("cargo")
+        .args([subcommand, "--version"])
+        .output();
+    if !probe.map(|o| o.status.success()).unwrap_or(false) {
+        bail!("cargo-{subcommand} is not installed:\n  {install}");
+    }
+    Ok(())
+}
+
 /// Is a rustup target installed? (Missing ones are skipped with a note,
 /// so a fresh checkout without them can still run the host tasks.)
 fn has_target(target: &str) -> bool {
@@ -148,6 +173,9 @@ fn has_target(target: &str) -> bool {
 }
 
 fn ci(ctx: &Ctx) -> anyhow::Result<()> {
+    println!("🔍 Running security audit...");
+    security_audit(ctx)?;
+
     println!("🔍 Running format check...");
     fmt(ctx, false)?;
 
@@ -195,9 +223,23 @@ fn fmt(ctx: &Ctx, fix: bool) -> anyhow::Result<()> {
     } else {
         &["fmt", "--all", "--check"]
     };
-    cargo(ctx, &ctx.root, args)?;
-    for dir in UEFI_CRATES {
-        cargo(ctx, &ctx.root.join(dir), args)?;
+    for dir in workspaces(ctx) {
+        cargo(ctx, &dir, args)?;
+    }
+    Ok(())
+}
+
+/// Known vulnerabilities, unmaintained or yanked crates (both tools read
+/// the RustSec database), then the deny.toml policy on licenses and
+/// sources, for every lockfile.
+fn security_audit(ctx: &Ctx) -> anyhow::Result<()> {
+    require("audit", "cargo install --locked cargo-audit")?;
+    require("deny", "cargo install --locked cargo-deny")?;
+    let policy = ctx.root.join("deny.toml");
+    let policy = policy.to_string_lossy();
+    for dir in workspaces(ctx) {
+        cargo(ctx, &dir, &["audit", "--deny", "warnings"])?;
+        cargo(ctx, &dir, &["deny", "--config", &policy, "check"])?;
     }
     Ok(())
 }
@@ -246,16 +288,10 @@ fn test(ctx: &Ctx) -> anyhow::Result<()> {
 }
 
 fn coverage(ctx: &Ctx, ratchet: bool, html: bool) -> anyhow::Result<()> {
-    let probe = Command::new("cargo")
-        .args(["llvm-cov", "--version"])
-        .output();
-    if !probe.map(|o| o.status.success()).unwrap_or(false) {
-        bail!(
-            "cargo-llvm-cov is not installed:\n  \
-             rustup component add llvm-tools-preview\n  \
-             cargo install cargo-llvm-cov"
-        );
-    }
+    require(
+        "llvm-cov",
+        "rustup component add llvm-tools-preview\n  cargo install cargo-llvm-cov",
+    )?;
     let out_dir = ctx.root.join("target/coverage");
     std::fs::create_dir_all(&out_dir)?;
     let lcov_path = out_dir.join("lcov.info");
@@ -402,6 +438,14 @@ mod tests {
             with_extra(&["fmt", "--check"], &extra),
             vec!["fmt", "--check"]
         );
+        assert_eq!(
+            with_extra(&["audit", "--deny", "warnings"], &extra),
+            vec!["audit", "--deny", "warnings"]
+        );
+        assert_eq!(
+            with_extra(&["deny", "check"], &extra),
+            vec!["deny", "check"]
+        );
     }
 
     #[test]
@@ -417,6 +461,11 @@ mod tests {
             "crates/jos-boot"
         );
         assert_eq!(rel(&ctx, Path::new("/elsewhere")), "/elsewhere");
+        let all = workspaces(&ctx);
+        assert_eq!(all.len(), 1 + UEFI_CRATES.len());
+        assert!(all.iter().all(|w| w.join("Cargo.lock").is_file()));
+        assert!(ctx.root.join("deny.toml").is_file());
+        assert!(require("no-such-subcommand", "nothing").is_err());
         assert!(!host_target().is_empty());
     }
 }

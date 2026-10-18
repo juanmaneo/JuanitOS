@@ -57,6 +57,7 @@ crates/jos-fb          vt(4) framebuffer display and keyboard decoder (splash, i
 crates/jos-greet       login screen: PAM, then the COSMIC session on the same VT
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
 coverage.toml          per-file uncovered-line/function/region allowances (ratcheted down to 0)
+deny.toml              cargo-deny policy: advisories, licenses, sources
 templates/             cloud-init user-data of the guest template recipes; agent/ the guest agents (share, jos-agentd) and jos-copy
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
 freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet
@@ -226,7 +227,8 @@ then Docker and Podman running containers on the next boot); `fbsd15-dev`,
 Project automation is a Rust program too ([cargo xtask](https://github.com/matklad/cargo-xtask)):
 
 ```sh
-cargo xtask ci            # fmt, clippy (host, FreeBSD, UEFI), tests + coverage gate, UEFI builds
+cargo xtask ci            # security audit, fmt, clippy (host, FreeBSD, UEFI), tests + coverage gate, UEFI builds
+cargo xtask security-audit  # cargo-audit + cargo-deny (deny.toml) on all three lockfiles
 cargo xtask test          # just the tests (workspace + jos-boot's library on the host)
 cargo xtask lint          # clippy -D warnings on every target
 cargo xtask fmt --fix
@@ -247,6 +249,14 @@ what was just measured and drops files that reach zero. The toolchain is
 pinned in `rust-toolchain.toml`, because another compiler version counts
 regions differently. The same `cargo xtask ci` runs in GitHub Actions
 (`.github/workflows/ci.yml`).
+
+The security audit runs first and needs `cargo install --locked
+cargo-audit cargo-deny` and network access (both fetch the RustSec
+advisory database). It fails on any advisory (vulnerable, unmaintained,
+unsound or yanked crate), on a license that is not compatible with
+BSD-3-Clause, and on a dependency from anywhere but crates.io; the
+policy is `deny.toml`, where an advisory that does not apply is ignored
+with its reason.
 
 How the code stays testable on a Linux or macOS laptop:
 

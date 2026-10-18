@@ -1,0 +1,31 @@
+# cargo-deny policy, checked by `cargo xtask security-audit` (and so by
+# `cargo xtask ci`) on the three workspaces: the host one, crates/jos-boot
+# and crates/jos-firewall. cargo-audit runs alongside on the same lockfiles.
+
+[graph]
+# Every optional feature (jos-fwcfg's serde, jos-gfx's png, ...) is shipped
+# somewhere, so all of them are checked.
+all-features = true
+
+[advisories]
+# Vulnerable and unmaintained crates are errors by default. A RustSec
+# advisory that does not apply goes in `ignore` with the reason, e.g.
+# { id = "RUSTSEC-0000-0000", reason = "..." }.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Everything must be compatible with JuanitOS' BSD-3-Clause (LICENSE).
+# MPL-2.0 is file-level copyleft: ucs2 (pulled in by uefi) stays MPL-2.0.
+allow = ["Apache-2.0", "BSD-3-Clause", "MIT", "MPL-2.0", "Unicode-3.0"]
+# One policy for three workspaces: a license only one of them uses is fine.
+unused-allowed-license = "allow"
+
+[bans]
+# Two versions of one crate cost build time, not safety.
+multiple-versions = "warn"
+
+[sources]
+# crates.io only: no other registry, no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
