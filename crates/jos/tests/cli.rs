@@ -1695,7 +1695,7 @@ fn real_runs_against_a_stand_in_host() {
     let bin = fake_host(
         &e,
         &[
-            ("zfs", "exit 0"),
+            ("zfs", "case \"$*\" in *extra*) exit 1;; esac; exit 0"),
             ("kill", "exit 0"),
             ("ifconfig", "exit 0"),
             ("bhyvectl", "exit 0"),
@@ -1758,6 +1758,34 @@ fn real_runs_against_a_stand_in_host() {
         String::from_utf8_lossy(&ls.stdout).contains("work "),
         "{ls:?}"
     );
+
+    // Outside the JOS_CONFIG_DIR sandbox a dry run prints what it would
+    // write or remove and leaves the qube definitions alone.
+    let out = jos(&[
+        "--dry-run",
+        "create",
+        "extra",
+        "--kind",
+        "app",
+        "--os",
+        "freebsd",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let extra = e.qube_file("extra");
+    assert!(
+        stdout.contains(&format!("+ write {}", extra.display())),
+        "{stdout}"
+    );
+    assert!(!extra.exists());
+    let out = jos(&["--dry-run", "remove", "web"]);
+    assert!(out.status.success(), "{out:?}");
+    let web = e.qube_file("web");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&format!("+ rm -f {}", web.display())),
+        "{out:?}"
+    );
+    assert!(web.is_file());
 
     // A detached supervisor, logging next to its pidfile.
     let out = jos(&["start", "work"]);

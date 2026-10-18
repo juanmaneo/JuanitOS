@@ -537,26 +537,54 @@ pub fn load_global_config(path: Option<&Path>) -> Result<GlobalConfig> {
 }
 
 /// Directory of per-qube TOML files.
+///
+/// A dry-run store ([`QubeStore::dry_run`]) reads the directory but keeps
+/// its writes and removals in memory, printing them like the host
+/// commands of a dry run: later steps of the same invocation see them,
+/// the disk never does.
 #[derive(Debug, Clone)]
 pub struct QubeStore {
     pub dir: PathBuf,
+    /// Pending changes of a dry run by name: `Some` saved, `None` removed.
+    overlay: Option<std::cell::RefCell<std::collections::BTreeMap<String, Option<Qube>>>>,
 }
 
 impl QubeStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        QubeStore { dir: dir.into() }
+        QubeStore {
+            dir: dir.into(),
+            overlay: None,
+        }
+    }
+
+    pub fn dry_run(dir: impl Into<PathBuf>) -> Self {
+        QubeStore {
+            overlay: Some(Default::default()),
+            ..QubeStore::new(dir)
+        }
     }
 
     fn path_for(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.toml"))
     }
 
+    /// The dry run's pending change for `name`, if any.
+    fn pending(&self, name: &str) -> Option<Option<Qube>> {
+        self.overlay.as_ref()?.borrow().get(name).cloned()
+    }
+
     pub fn exists(&self, name: &str) -> bool {
-        self.path_for(name).is_file()
+        match self.pending(name) {
+            Some(q) => q.is_some(),
+            None => self.path_for(name).is_file(),
+        }
     }
 
     pub fn get(&self, name: &str) -> Result<Qube> {
         validate_name(name)?;
+        if let Some(q) = self.pending(name) {
+            return q.ok_or_else(|| Error::QubeNotFound(name.to_string()));
+        }
         match fs::read_to_string(self.path_for(name)) {
             Ok(text) => Qube::from_toml(&text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -568,12 +596,30 @@ impl QubeStore {
 
     pub fn save(&self, q: &Qube) -> Result<()> {
         validate_name(&q.name)?;
+        if let Some(overlay) = &self.overlay {
+            let toml = q.to_toml()?;
+            println!(
+                "+ write {} ({} bytes)",
+                self.path_for(&q.name).display(),
+                toml.len()
+            );
+            overlay.borrow_mut().insert(q.name.clone(), Some(q.clone()));
+            return Ok(());
+        }
         fs::create_dir_all(&self.dir)?;
         fs::write(self.path_for(&q.name), q.to_toml()?)?;
         Ok(())
     }
 
     pub fn remove(&self, name: &str) -> Result<()> {
+        if let Some(overlay) = &self.overlay {
+            if !self.exists(name) {
+                return Err(Error::QubeNotFound(name.to_string()));
+            }
+            println!("+ rm -f {}", self.path_for(name).display());
+            overlay.borrow_mut().insert(name.to_string(), None);
+            return Ok(());
+        }
         match fs::remove_file(self.path_for(name)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -586,8 +632,8 @@ impl QubeStore {
     /// All qubes, sorted by name. A missing directory yields an empty list.
     pub fn list(&self) -> Result<Vec<Qube>> {
         let entries = match fs::read_dir(&self.dir) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Ok(rd) => rd.collect::<Vec<_>>(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
         let mut qubes = Vec::new();
@@ -598,6 +644,11 @@ impl QubeStore {
             }
             let text = fs::read_to_string(&path)?;
             qubes.push(Qube::from_toml(&text)?);
+        }
+        if let Some(overlay) = &self.overlay {
+            let overlay = overlay.borrow();
+            qubes.retain(|q| !overlay.contains_key(&q.name));
+            qubes.extend(overlay.values().flatten().cloned());
         }
         qubes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(qubes)
@@ -783,6 +834,53 @@ mod tests {
         store.remove("work").unwrap();
         assert!(!store.exists("work"));
         assert!(matches!(store.remove("work"), Err(Error::QubeNotFound(_))));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dry_run_store_keeps_changes_in_memory() {
+        let dir = std::env::temp_dir().join(format!(
+            "jos-store-dry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let disk = QubeStore::new(&dir);
+        let old = Qube::new("old", QubeKind::App, OsType::Freebsd);
+        disk.save(&old).unwrap();
+        disk.save(&Qube::new("keep", QubeKind::Net, OsType::Freebsd))
+            .unwrap();
+
+        let store = QubeStore::dry_run(&dir);
+        assert_eq!(store.get("old").unwrap(), old);
+        assert!(matches!(store.get("new"), Err(Error::QubeNotFound(_))));
+        assert!(matches!(store.remove("new"), Err(Error::QubeNotFound(_))));
+
+        let new = Qube::new("new", QubeKind::App, OsType::Linux);
+        store.save(&new).unwrap();
+        assert!(store.exists("new"));
+        assert_eq!(store.get("new").unwrap(), new);
+        assert!(!dir.join("new.toml").exists());
+
+        let mut changed = old.clone();
+        changed.cpus += 1;
+        store.save(&changed).unwrap();
+        assert_eq!(store.get("old").unwrap(), changed);
+        assert_eq!(disk.get("old").unwrap(), old);
+
+        store.remove("old").unwrap();
+        assert!(!store.exists("old"));
+        assert!(matches!(store.get("old"), Err(Error::QubeNotFound(_))));
+        assert!(dir.join("old.toml").is_file());
+        let names: Vec<String> = store.list().unwrap().into_iter().map(|q| q.name).collect();
+        assert_eq!(names, vec!["keep", "new"]);
+
+        let missing = QubeStore::dry_run(dir.join("missing"));
+        missing.save(&new).unwrap();
+        assert_eq!(missing.list().unwrap(), vec![new]);
+        assert!(!dir.join("missing").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

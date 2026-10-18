@@ -164,8 +164,11 @@ console), falling back to the serial console for qubes without it
 (Redox).
 
 Every command accepts `--dry-run` to print the host commands it would run,
-which also makes the CLI usable on a non-FreeBSD development machine
-(set `JOS_CONFIG_DIR` to keep qube definitions out of `/usr/local/etc`).
+which also makes the CLI usable on a non-FreeBSD development machine.
+A dry run never changes the qube definitions: it prints the files it
+would write or remove. Set `JOS_CONFIG_DIR` to a scratch directory to
+keep dry-run definitions there, so that a series of dry runs
+builds on each other without touching `/usr/local/etc`.
 On a machine without IOMMU (no NIC passthrough for `sys-net`), or before
 `sys-net` exists, `--uplink IFACE` bridges a host interface straight into
 a qube. Qube definitions are plain TOML files under

@@ -400,15 +400,18 @@ impl App {
             Box::new(RealRunner)
         };
         // JOS_CONFIG_DIR lets the CLI be exercised on a dev box without
-        // touching /usr/local/etc.
-        let dir = match std::env::var_os("JOS_CONFIG_DIR") {
-            Some(d) => PathBuf::from(d).join("qubes"),
-            None => cfg.qubes_dir(),
+        // touching /usr/local/etc: that sandbox keeps what a dry run saves,
+        // so a series of dry runs builds on each other. Elsewhere a dry run
+        // never changes the qube definitions.
+        let store = match std::env::var_os("JOS_CONFIG_DIR") {
+            Some(d) => QubeStore::new(PathBuf::from(d).join("qubes")),
+            None if cli.dry_run => QubeStore::dry_run(cfg.qubes_dir()),
+            None => QubeStore::new(cfg.qubes_dir()),
         };
         Ok(App {
             runner,
             cfg,
-            store: QubeStore::new(dir),
+            store,
             dry_run: cli.dry_run,
             config_path: cli.config.clone(),
         })
