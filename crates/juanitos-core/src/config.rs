@@ -150,6 +150,31 @@ impl OsType {
             _ => None,
         }
     }
+
+    /// What `jos run` types on the console to run `command` as `user`
+    /// when the shell there belongs to `console_user`: unchanged for that
+    /// user, else through the templates' password-less `doas` (FreeBSD) or
+    /// `sudo` (Linux), from the home directory as the agent does.
+    pub fn console_command(&self, console_user: &str, user: &str, command: &str) -> Result<String> {
+        if user == console_user {
+            return Ok(command.to_string());
+        }
+        let switch = match self {
+            OsType::Freebsd => "doas",
+            OsType::Linux => "sudo",
+            other => {
+                return Err(Error::Other(format!(
+                    "the {other} console shell belongs to {console_user}; it cannot run \
+                     commands as {user}"
+                )))
+            }
+        };
+        Ok(format!(
+            "{switch} -u {} sh -c {}",
+            crate::sys::shell_quote(user),
+            crate::sys::shell_quote(&format!("cd; {command}"))
+        ))
+    }
 }
 
 impl std::str::FromStr for OsType {
@@ -582,6 +607,32 @@ impl QubeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_commands_switch_user_with_the_templates_tools() {
+        let os = OsType::Freebsd;
+        assert_eq!(os.console_command("user", "user", "id").unwrap(), "id");
+        assert_eq!(
+            os.console_command("user", "root", "echo 'x'").unwrap(),
+            r#"doas -u root sh -c 'cd; echo '\''x'\'''"#
+        );
+        assert_eq!(
+            OsType::Linux.console_command("user", "root", "id").unwrap(),
+            "sudo -u root sh -c 'cd; id'"
+        );
+        assert_eq!(
+            OsType::Redox.console_command("user", "user", "ls").unwrap(),
+            "ls"
+        );
+        let e = OsType::Redox
+            .console_command("user", "root", "ls")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("belongs to user; it cannot run commands as root"),
+            "{e}"
+        );
+    }
 
     #[test]
     fn qube_toml_roundtrip_with_defaults() {

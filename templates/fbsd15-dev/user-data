@@ -59,70 +59,6 @@ write_files:
       load_rc_config $name
       run_rc_command "$1"
 
-  # jos-copy PATH QUBE: ask dom0 to copy a file to another qube (see
-  # templates/agent/jos-copy, docs/inter-qube.md).
-  - path: /usr/local/bin/jos-copy
-    permissions: "0755"
-    content: |
-      #!/bin/sh
-      # jos-copy PATH QUBE: ask dom0 to copy PATH from this qube into QUBE's
-      # inbox (/mnt/jos/in/<this qube>/ there). The file goes to the outbox of
-      # the dom0 share, a request goes to /mnt/jos/req/, and dom0 (`jos serve`)
-      # answers according to its policy: delivered, denied, or held for the
-      # operator (`jos requests`). See docs/inter-qube.md.
-      set -u
-      usage() { echo "usage: jos-copy PATH QUBE" >&2; exit 64; }
-      [ $# -eq 2 ] || usage
-      path=$1
-      dst=$2
-      share=/mnt/jos
-      timeout=${JOS_COPY_TIMEOUT:-600}
-      [ -d "$share/req" ] || { echo "jos-copy: dom0 share not mounted at $share" >&2; exit 2; }
-      [ -e "$path" ] || { echo "jos-copy: $path: no such file or directory" >&2; exit 1; }
-      base=$(basename "$path")
-      case $base in ''|.|..|*/*) echo "jos-copy: $path: cannot copy that" >&2; exit 1;; esac
-      # A previous export of the same name still in the outbox is one dom0 has
-      # not consumed yet: a guest user cannot remove it (dom0 does, once it has
-      # answered), so wait for that rather than copy into it.
-      if [ -e "$share/out/$base" ]; then
-          echo "jos-copy: $base is still being handled by dom0; try again shortly" >&2
-          exit 75
-      fi
-      # Follow symbolic links: the share cannot hold them.
-      cp -RL "$path" "$share/out/$base" || exit 1
-      id="$(date +%s)-$$"
-      req="$share/req/$id"
-      # The request appears atomically, complete.
-      printf 'copy %s %s\n' "$base" "$dst" > "$req.tmp" && mv "$req.tmp" "$req" || exit 1
-      # Ring dom0's doorbell: one line on the qube's events port (the second
-      # virtio-console port, made writable by the template) wakes `jos serve`
-      # before its next poll. Best effort: without it the poll finds the request.
-      for bell in /dev/vtcon/events /dev/virtio-ports/events; do
-          if [ -w "$bell" ]; then
-              printf 'REQUEST %s\n' "$id" > "$bell" 2>/dev/null && break
-          fi
-      done
-      echo "jos-copy: asked dom0 to copy $base to $dst (request $id)"
-      # dom0 answers within milliseconds when the doorbell works: look often
-      # (quarter seconds; FreeBSD's and GNU sleep take fractions).
-      waited=0
-      while [ ! -e "$req.reply" ]; do
-          if [ "$waited" -ge "$((timeout * 4))" ]; then
-              echo "jos-copy: no answer from dom0 after ${timeout}s; still pending as $id" >&2
-              exit 75
-          fi
-          sleep 0.25
-          waited=$((waited + 1))
-      done
-      reply=$(cat "$req.reply")
-      # dom0 sweeps replies a minute later (a guest user cannot unlink them).
-      echo "jos-copy: $reply"
-      case $reply in
-          ok\ *) exit 0;;
-          denied*) exit 77;;
-          *) exit 1;;
-      esac
-
   # jos-agentd: runs what `jos run` sends over the agent channel, a
   # virtio-console port (see templates/agent/jos-agentd, docs/inter-qube.md).
   - path: /usr/local/sbin/jos-agentd
@@ -227,12 +163,80 @@ write_files:
       load_rc_config $name
       run_rc_command "$1"
 
+  # jos-copy PATH QUBE: ask dom0 to copy a file to another qube (see
+  # templates/agent/jos-copy, docs/inter-qube.md). Staged in sbin and
+  # moved to /usr/local/bin by runcmd: that directory only appears with
+  # the first package, and nuageinit neither creates parent directories
+  # nor writes the entries after one that fails. Keep it last.
+  - path: /usr/local/sbin/jos-copy
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # jos-copy PATH QUBE: ask dom0 to copy PATH from this qube into QUBE's
+      # inbox (/mnt/jos/in/<this qube>/ there). The file goes to the outbox of
+      # the dom0 share, a request goes to /mnt/jos/req/, and dom0 (`jos serve`)
+      # answers according to its policy: delivered, denied, or held for the
+      # operator (`jos requests`). See docs/inter-qube.md.
+      set -u
+      usage() { echo "usage: jos-copy PATH QUBE" >&2; exit 64; }
+      [ $# -eq 2 ] || usage
+      path=$1
+      dst=$2
+      share=/mnt/jos
+      timeout=${JOS_COPY_TIMEOUT:-600}
+      [ -d "$share/req" ] || { echo "jos-copy: dom0 share not mounted at $share" >&2; exit 2; }
+      [ -e "$path" ] || { echo "jos-copy: $path: no such file or directory" >&2; exit 1; }
+      base=$(basename "$path")
+      case $base in ''|.|..|*/*) echo "jos-copy: $path: cannot copy that" >&2; exit 1;; esac
+      # A previous export of the same name still in the outbox is one dom0 has
+      # not consumed yet: a guest user cannot remove it (dom0 does, once it has
+      # answered), so wait for that rather than copy into it.
+      if [ -e "$share/out/$base" ]; then
+          echo "jos-copy: $base is still being handled by dom0; try again shortly" >&2
+          exit 75
+      fi
+      # Follow symbolic links: the share cannot hold them.
+      cp -RL "$path" "$share/out/$base" || exit 1
+      id="$(date +%s)-$$"
+      req="$share/req/$id"
+      # The request appears atomically, complete.
+      printf 'copy %s %s\n' "$base" "$dst" > "$req.tmp" && mv "$req.tmp" "$req" || exit 1
+      # Ring dom0's doorbell: one line on the qube's events port (the second
+      # virtio-console port, made writable by the template) wakes `jos serve`
+      # before its next poll. Best effort: without it the poll finds the request.
+      for bell in /dev/vtcon/events /dev/virtio-ports/events; do
+          if [ -w "$bell" ]; then
+              printf 'REQUEST %s\n' "$id" > "$bell" 2>/dev/null && break
+          fi
+      done
+      echo "jos-copy: asked dom0 to copy $base to $dst (request $id)"
+      # dom0 answers within milliseconds when the doorbell works: look often
+      # (quarter seconds; FreeBSD's and GNU sleep take fractions).
+      waited=0
+      while [ ! -e "$req.reply" ]; do
+          if [ "$waited" -ge "$((timeout * 4))" ]; then
+              echo "jos-copy: no answer from dom0 after ${timeout}s; still pending as $id" >&2
+              exit 75
+          fi
+          sleep 0.25
+          waited=$((waited + 1))
+      done
+      reply=$(cat "$req.reply")
+      # dom0 sweeps replies a minute later (a guest user cannot unlink them).
+      echo "jos-copy: $reply"
+      case $reply in
+          ok\ *) exit 0;;
+          denied*) exit 77;;
+          *) exit 1;;
+      esac
+
 runcmd:
   # Packages: Podman with the ocijail runtime and buildah, plus tools.
   - env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
   - env ASSUME_ALWAYS_YES=yes pkg update
   - env ASSUME_ALWAYS_YES=yes pkg upgrade
   - env ASSUME_ALWAYS_YES=yes pkg install podman-suite git curl jq tmux vim htop doas rust python3
+  - install -m 0755 /usr/local/sbin/jos-copy /usr/local/bin/jos-copy && rm /usr/local/sbin/jos-copy
   # QubesOS convention: one unprivileged "user", root via doas without a
   # password. The only way in is the serial console, reachable from dom0.
   - pw useradd user -m -c "JuanitOS user" -G wheel -s /bin/sh

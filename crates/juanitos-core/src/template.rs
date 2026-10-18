@@ -622,7 +622,6 @@ mod tests {
                 assert!(!r.os.has_share(), "{}", r.name);
                 continue;
             };
-            assert!(ud.contains("path: /usr/local/bin/jos-copy"), "{}", r.name);
             assert!(embedded(ud, jos_copy), "{}: stale jos-copy", r.name);
             assert!(
                 ud.contains("path: /usr/local/sbin/jos-agentd"),
@@ -647,12 +646,20 @@ mod tests {
                     assert!(embedded(ud, freebsd_agentd), "{}: stale jos_agentd", r.name);
                     assert!(ud.contains("jos_agentd_enable=YES"), "{}", r.name);
                     assert!(
+                        ud.contains(
+                            "- install -m 0755 /usr/local/sbin/jos-copy /usr/local/bin/jos-copy"
+                        ),
+                        "{}",
+                        r.name
+                    );
+                    assert!(
                         ud.contains("- echo 'perm vtcon/events 0622' >> /etc/devfs.conf"),
                         "{}: events port not writable",
                         r.name
                     );
                 }
                 OsType::Linux => {
+                    assert!(ud.contains("path: /usr/local/bin/jos-copy"), "{}", r.name);
                     assert!(
                         ud.contains("path: /usr/local/sbin/jos-agent\n"),
                         "{}",
@@ -684,6 +691,27 @@ mod tests {
                 other => panic!("{}: unexpected os {other}", r.name),
             }
         }
+    }
+
+    /// FreeBSD's nuageinit writes `write_files` entries into existing
+    /// directories only, and stops at the first one that fails: in the
+    /// stock image, before any package, `/usr/local/bin` does not exist.
+    #[test]
+    fn freebsd_templates_write_files_into_existing_directories() {
+        const EXISTING: [&str; 3] = ["/etc", "/usr/local/etc/rc.d", "/usr/local/sbin"];
+        let mut checked = 0;
+        for r in RECIPES.iter().filter(|r| r.os == OsType::Freebsd) {
+            let Some(ud) = r.user_data else { continue };
+            for line in ud.lines() {
+                let Some(path) = line.strip_prefix("  - path: ") else {
+                    continue;
+                };
+                let dir = Path::new(path).parent().unwrap().to_str().unwrap();
+                assert!(EXISTING.contains(&dir), "{}: {path}", r.name);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 8, "{checked}");
     }
 
     #[test]

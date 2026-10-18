@@ -245,6 +245,27 @@ fn start_supervise_stop_kill_console_in_dry_run() {
     assert!(run.contains("nmdm-work.1B"), "{run}");
     assert!(run.contains(": JOS_RUN; docker ps -a; printf"), "{run}");
     assert!(!run.contains("logging in"), "{run}");
+    // On the console another user than the autologin one goes through
+    // doas; the autologin user itself needs nothing.
+    let run = e.ok(&[
+        "run",
+        "work",
+        "--console",
+        "--user",
+        "root",
+        "pfctl",
+        "-s",
+        "nat",
+    ]);
+    assert!(
+        run.contains(": JOS_RUN; doas -u root sh -c 'cd; pfctl -s nat'; printf"),
+        "{run}"
+    );
+    let run = e.ok(&["run", "work", "--console", "--user", "user", "id"]);
+    assert!(run.contains(": JOS_RUN; id; printf"), "{run}");
+    assert!(e
+        .err(&["run", "work", "--console", "--user", "a b", "id"])
+        .contains("invalid user"));
     assert!(e.err(&["run", "ghost", "id"]).contains("ghost"));
     // autostart starts sys-net and sys-firewall.
     let auto = e.ok(&["autostart"]);

@@ -108,9 +108,11 @@ enum Cmd {
         /// Seconds to wait for the command to finish.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
-        /// User the agent runs the command as.
-        #[arg(long, default_value = juanitos_core::agent::DEFAULT_USER)]
-        user: String,
+        /// User the command runs as [default: `user`; on the console, the
+        /// one logged in]. On the console another user goes through doas
+        /// (FreeBSD) or sudo (Linux).
+        #[arg(long)]
+        user: Option<String>,
         /// Type into the serial console even when the agent is there.
         #[arg(long)]
         console: bool,
@@ -861,14 +863,7 @@ impl App {
         let mut run_in_qube = |name: &str, command: &str| -> juanitos_core::Result<()> {
             let q = self.store.get(name)?;
             let Some(outcome) = self
-                .run_in(
-                    &q,
-                    juanitos_core::agent::DEFAULT_USER,
-                    command,
-                    timeout,
-                    None,
-                    false,
-                )
+                .run_in(&q, None, command, timeout, None, false)
                 .map_err(|e| juanitos_core::Error::Other(format!("{e:#}")))?
             else {
                 return Ok(());
@@ -893,20 +888,22 @@ impl App {
         Ok(())
     }
 
-    /// Run `command` in `q` as `user`: through the agent channel when the
+    /// Run `command` in `q` as `user` (default: the agent's user, or on the
+    /// console whoever is logged in): through the agent channel when the
     /// qube has one and its daemon answers, else over the serial console
     /// (always, with `console`). `None` in dry-run mode, after printing
     /// what would be sent.
     fn run_in(
         &self,
         q: &Qube,
-        user: &str,
+        user: Option<&str>,
         command: &str,
         timeout: std::time::Duration,
         login: Option<&juanitos_core::console::Login>,
         console: bool,
     ) -> Result<Option<juanitos_core::console::Outcome>> {
         if !console && q.os.has_agent() {
+            let user = user.unwrap_or(juanitos_core::agent::DEFAULT_USER);
             juanitos_core::agent::validate_user(user)?;
             juanitos_core::agent::validate_command(command)?;
             let sock = self.cfg.agent_socket(&q.name);
@@ -932,6 +929,19 @@ impl App {
         }
         let dev = self.cfg.console_host_device(&q.name);
         let login = login.cloned().or_else(|| q.os.console_login());
+        // Who the console shell belongs to: the account logged in when a
+        // prompt shows, else the templates' autologin user.
+        let console_user = login
+            .as_ref()
+            .map_or(juanitos_core::agent::DEFAULT_USER, |l| l.user.as_str());
+        let typed = match user {
+            Some(u) => {
+                juanitos_core::agent::validate_user(u)?;
+                q.os.console_command(console_user, u, command)?
+            }
+            None => command.to_string(),
+        };
+        let command = typed.as_str();
         let dialect = q.os.console_dialect();
         if self.dry_run {
             println!(
@@ -1537,7 +1547,14 @@ fn main() -> Result<()> {
             let command = command.join(" ");
             let timeout = std::time::Duration::from_secs(timeout);
             let login = login.as_deref().map(parse_login);
-            match app.run_in(&q, &user, &command, timeout, login.as_ref(), console)? {
+            match app.run_in(
+                &q,
+                user.as_deref(),
+                &command,
+                timeout,
+                login.as_ref(),
+                console,
+            )? {
                 Some(outcome) => finish(&name, outcome),
                 None => Ok(()),
             }

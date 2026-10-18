@@ -92,7 +92,10 @@ directory; the id is dom0's, so the end line cannot be mistaken for
 output. If nothing answers the ping within 3 s (a clone made before the
 daemon existed, or a template booted elsewhere) `jos run` says so and
 types into the serial console instead, which is also what Redox qubes
-always get and what `--console` forces. Compared with the console path
+always get and what `--console` forces. On the console the command runs
+as the logged-in user (the templates' autologin `user`); `--user` naming
+another one goes through the templates' password-less `doas -u`
+(FreeBSD) or `sudo -u` (Linux). Compared with the console path
 there is no login, no echo, no prompt detection, no clash with someone
 using `jos console`, and a command may read its input without eating
 the marker; one request at a time per qube, since bhyve accepts a single
@@ -105,6 +108,13 @@ connected, so the daemon holds one descriptor for both directions and
 sleeps a second between reconnections; FreeBSD's port is a tty, which
 the daemon puts in raw mode (no echo, no CR/LF translation) while it
 holds it open, as the tty forgets its modes on the last close.
+
+FreeBSD's nuageinit writes `write_files` entries into existing
+directories only and gives up on the rest at the first failure, so the
+FreeBSD templates stage `jos-copy` in `/usr/local/sbin` (the last entry)
+and `runcmd` moves it to `/usr/local/bin` once packages have created
+that directory; until this was fixed `fbsd15-net` came out without
+`jos-agentd`.
 
 Verified on the nested dom0: `work` (FreeBSD) and `web` (Debian) answer
 `id`, `pwd`, multi-command lines, exit statuses, output without a final
