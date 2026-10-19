@@ -7,37 +7,3 @@
 # `cargo xtask coverage --ratchet` lowers the allowances to the
 # measured values and drops files that reach zero (never raises).
 # Commit the updated file together with the tests that earned it.
-
-[files."crates/jos-release/src/compare.rs"]
-lines = 5
-functions = 2
-regions = 20
-
-[files."crates/jos-release/src/console.rs"]
-lines = 4
-regions = 17
-
-[files."crates/jos-release/src/disk.rs"]
-lines = 8
-functions = 2
-regions = 38
-
-[files."crates/jos-release/src/main.rs"]
-lines = 8
-functions = 4
-regions = 17
-
-[files."crates/jos-release/src/profile.rs"]
-lines = 1
-functions = 1
-regions = 3
-
-[files."crates/jos-release/src/qemu.rs"]
-lines = 83
-functions = 1
-regions = 177
-
-[files."crates/jos-release/src/ventoy.rs"]
-lines = 2
-functions = 2
-regions = 16

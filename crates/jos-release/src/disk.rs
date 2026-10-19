@@ -4,12 +4,12 @@
 //! through `/efi/freebsd/loader.env`, which FreeBSD 15's `loader.efi`
 //! reads from the ESP before anything else.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{bail, Context};
+use juanitos_core::sys::Runner;
 
 pub const SECTOR: u64 = 512;
 
@@ -30,22 +30,25 @@ impl Partition {
     pub fn offset(&self) -> u64 {
         self.first_lba * SECTOR
     }
-    /// Size in bytes.
-    pub fn byte_len(&self) -> u64 {
-        (self.last_lba + 1).saturating_sub(self.first_lba) * SECTOR
-    }
 }
 
-fn u32_at(b: &[u8], off: usize) -> Option<u32> {
-    b.get(off..off + 4)?.try_into().ok().map(u32::from_le_bytes)
+/// The little-endian `u64` at `off`; 0 past the end of `b`.
+fn u64_at(b: &[u8], off: usize) -> u64 {
+    b.get(off..)
+        .and_then(<[u8]>::first_chunk)
+        .map_or(0, |c| u64::from_le_bytes(*c))
 }
 
-fn u64_at(b: &[u8], off: usize) -> Option<u64> {
-    b.get(off..off + 8)?.try_into().ok().map(u64::from_le_bytes)
+/// The little-endian `u32` at `off`; 0 past the end of `b`.
+fn u32_at(b: &[u8], off: usize) -> u32 {
+    b.get(off..)
+        .and_then(<[u8]>::first_chunk)
+        .map_or(0, |c| u32::from_le_bytes(*c))
 }
 
 /// Find the first partition of type `type_guid` in a raw GPT disk image
-/// prefix (`head` must cover the header at LBA 1 and the entry array).
+/// prefix (`head` must cover the header at LBA 1 and the entry array;
+/// entries past its end are not seen).
 pub fn find_partition(head: &[u8], type_guid: &[u8; 16]) -> anyhow::Result<Option<Partition>> {
     let hdr = head
         .get(SECTOR as usize..2 * SECTOR as usize)
@@ -53,30 +56,24 @@ pub fn find_partition(head: &[u8], type_guid: &[u8; 16]) -> anyhow::Result<Optio
     if hdr.get(..8) != Some(b"EFI PART") {
         bail!("no GPT header at LBA 1");
     }
-    let entries_lba = u64_at(hdr, 72).context("gpt")?;
-    let count = u32_at(hdr, 80).context("gpt")? as usize;
-    let size = u32_at(hdr, 84).context("gpt")? as usize;
+    let start = usize::try_from(u64_at(hdr, 72).saturating_mul(SECTOR)).unwrap_or(usize::MAX);
+    let count = u32_at(hdr, 80) as usize;
+    let size = u32_at(hdr, 84) as usize;
     if size < 128 {
         bail!("unexpected GPT entry size {size}");
     }
-    let start = usize::try_from(entries_lba * SECTOR).context("gpt")?;
-    for i in 0..count {
-        let Some(e) = head.get(start + i * size..start + (i + 1) * size) else {
-            break;
-        };
-        if e.get(..16) != Some(&type_guid[..]) {
-            continue;
-        }
-        let (Some(first), Some(last)) = (u64_at(e, 32), u64_at(e, 40)) else {
-            continue;
-        };
-        return Ok(Some(Partition {
+    Ok(head
+        .get(start..)
+        .unwrap_or_default()
+        .chunks_exact(size)
+        .take(count)
+        .enumerate()
+        .find(|(_, e)| e.get(..16) == Some(&type_guid[..]))
+        .map(|(i, e)| Partition {
             index: i + 1,
-            first_lba: first,
-            last_lba: last,
-        }));
-    }
-    Ok(None)
+            first_lba: u64_at(e, 32),
+            last_lba: u64_at(e, 40),
+        }))
 }
 
 /// Bytes needed from the start of a disk to parse its GPT (header plus a
@@ -93,80 +90,29 @@ pub fn find_esp(raw_image: &Path) -> anyhow::Result<Partition> {
 }
 
 /// Write `content` as `path_in_esp` (e.g. `efi/freebsd/loader.env`) into
-/// the ESP of a raw disk image, creating directories. Needs `mmd`/`mcopy`
-/// from mtools; the partition is copied out, edited and copied back so no
-/// privileged block-device access is required.
-pub fn write_into_esp(raw_image: &Path, path_in_esp: &str, content: &[u8]) -> anyhow::Result<()> {
-    let esp = find_esp(raw_image)?;
-    let len = usize::try_from(esp.byte_len()).context("ESP size")?;
-    let mut disk = OpenOptions::new().read(true).write(true).open(raw_image)?;
-    let mut part = vec![0u8; len];
-    disk.seek(SeekFrom::Start(esp.offset()))?;
-    disk.read_exact(&mut part).context("reading the ESP")?;
-
-    let tmp = std::env::temp_dir().join(format!("jos-esp-{}.img", std::process::id()));
-    std::fs::write(&tmp, &part)?;
-    let src = std::env::temp_dir().join(format!("jos-esp-{}.file", std::process::id()));
-    std::fs::write(&src, content)?;
-    let result = (|| {
-        let tmp_s = tmp.to_string_lossy().into_owned();
-        // Create each missing directory level. mtools prompts on stdin
-        // when a name exists with different case, so check with mdir
-        // first and keep stdin closed.
-        let mut dir = String::new();
-        let file_name = path_in_esp.rsplit('/').next().unwrap_or("");
-        for comp in path_in_esp.trim_start_matches('/').split('/') {
-            if comp.is_empty() || comp == file_name {
-                break;
-            }
-            dir = if dir.is_empty() {
-                comp.to_string()
-            } else {
-                format!("{dir}/{comp}")
-            };
-            let exists = Command::new("mdir")
-                .args(["-i", &tmp_s, &format!("::/{dir}")])
-                .stdin(std::process::Stdio::null())
-                .output()
-                .context("running mdir (is mtools installed?)")?
-                .status
-                .success();
-            if !exists {
-                let out = Command::new("mmd")
-                    .args(["-i", &tmp_s, &format!("::/{dir}")])
-                    .stdin(std::process::Stdio::null())
-                    .output()?;
-                if !out.status.success() {
-                    bail!("mmd {dir}: {}", String::from_utf8_lossy(&out.stderr).trim());
-                }
-            }
+/// the ESP of a raw disk image, creating directories. Needs `mdir`, `mmd`
+/// and `mcopy` from mtools, which edit the partition in place
+/// (`-i image@@offset`): no privileged block-device access is required.
+pub fn write_into_esp(
+    runner: &dyn Runner,
+    raw_image: &Path,
+    path_in_esp: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    let image = format!("{}@@{}", raw_image.display(), find_esp(raw_image)?.offset());
+    let path = path_in_esp.trim_start_matches('/');
+    // Create each missing directory level. mtools prompts on stdin when a
+    // name exists with different case, so check with mdir first (the
+    // runner keeps stdin closed).
+    for (end, _) in path.match_indices('/') {
+        let dir = format!("::/{}", path.get(..end).unwrap_or_default());
+        if !runner.run("mdir", &["-i", &image, &dir])?.success() {
+            runner.run_checked("mmd", &["-i", &image, &dir])?;
         }
-        let out = Command::new("mcopy")
-            .args([
-                "-i",
-                &tmp_s,
-                "-o",
-                &src.to_string_lossy(),
-                &format!("::/{}", path_in_esp.trim_start_matches('/')),
-            ])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .context("running mcopy (is mtools installed?)")?;
-        if !out.status.success() {
-            bail!("mcopy: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        let edited = std::fs::read(&tmp)?;
-        if edited.len() != len {
-            bail!("mtools changed the partition size");
-        }
-        disk.seek(SeekFrom::Start(esp.offset()))?;
-        disk.write_all(&edited)?;
-        disk.flush()?;
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&tmp);
-    let _ = std::fs::remove_file(&src);
-    result
+    }
+    let dest = format!("::/{path}");
+    runner.run_with_input_checked("mcopy", &["-i", &image, "-o", "-", &dest], content)?;
+    Ok(())
 }
 
 /// `loader.env` that puts FreeBSD's loader and kernel on the serial port
@@ -180,38 +126,75 @@ autoboot_delay=2\n";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_gpt as gpt;
+    use std::process::Command;
 
     fn synthetic_gpt() -> Vec<u8> {
-        let mut d = vec![0u8; GPT_HEAD_LEN];
-        let hdr = 512;
-        d[hdr..hdr + 8].copy_from_slice(b"EFI PART");
-        d[hdr + 72..hdr + 80].copy_from_slice(&2u64.to_le_bytes()); // entries at LBA 2
-        d[hdr + 80..hdr + 84].copy_from_slice(&128u32.to_le_bytes());
-        d[hdr + 84..hdr + 88].copy_from_slice(&128u32.to_le_bytes());
-        let e0 = 2 * 512;
-        d[e0..e0 + 16].copy_from_slice(&[1u8; 16]); // some other type
-        d[e0 + 32..e0 + 40].copy_from_slice(&34u64.to_le_bytes());
-        d[e0 + 40..e0 + 48].copy_from_slice(&380u64.to_le_bytes());
-        let e1 = e0 + 128;
-        d[e1..e1 + 16].copy_from_slice(&ESP_TYPE_GUID);
-        d[e1 + 32..e1 + 40].copy_from_slice(&381u64.to_le_bytes());
-        d[e1 + 40..e1 + 48].copy_from_slice(&66964u64.to_le_bytes());
-        d
+        gpt::head(&[([1u8; 16], 34, 380), (gpt::ESP, 381, 66964)])
     }
 
     #[test]
     fn finds_the_esp() {
+        assert_eq!(gpt::ESP, ESP_TYPE_GUID);
         let p = find_partition(&synthetic_gpt(), &ESP_TYPE_GUID)
             .unwrap()
             .unwrap();
         assert_eq!(p.index, 2);
         assert_eq!(p.first_lba, 381);
         assert_eq!(p.offset(), 381 * 512);
-        assert_eq!(p.byte_len(), (66964 - 381 + 1) * 512);
-        assert!(find_partition(&synthetic_gpt(), &[9u8; 16])
-            .unwrap()
-            .is_none());
-        assert!(find_partition(&vec![0u8; GPT_HEAD_LEN], &ESP_TYPE_GUID).is_err());
+        assert_eq!(p.last_lba, 66964);
+        assert_eq!(find_partition(&synthetic_gpt(), &[9u8; 16]).unwrap(), None);
+        // Entries past the end of what was read are not seen.
+        let short = synthetic_gpt();
+        assert_eq!(
+            find_partition(&short[..2 * 512 + 200], &ESP_TYPE_GUID).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_what_is_not_a_gpt() {
+        let err = |head: &[u8]| {
+            find_partition(head, &ESP_TYPE_GUID)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(err(&[0u8; 600]), "image too short for a GPT header");
+        assert_eq!(err(&[0u8; GPT_HEAD_LEN]), "no GPT header at LBA 1");
+        let mut small = synthetic_gpt();
+        small[512 + 84..512 + 88].copy_from_slice(&64u32.to_le_bytes());
+        assert_eq!(err(&small), "unexpected GPT entry size 64");
+        // An entry table beyond any address: nothing found.
+        let mut far = synthetic_gpt();
+        far[512 + 72..512 + 80].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(find_partition(&far, &ESP_TYPE_GUID).unwrap(), None);
+    }
+
+    #[test]
+    fn find_esp_reads_the_image() {
+        let dir = std::env::temp_dir().join(format!("jos-find-esp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("disk.raw");
+        assert!(find_esp(&img).is_err(), "missing");
+        std::fs::write(&img, [0u8; 512]).unwrap();
+        assert_eq!(
+            find_esp(&img).unwrap_err().to_string(),
+            format!("reading the GPT of {}", img.display())
+        );
+        std::fs::write(&img, [0u8; GPT_HEAD_LEN]).unwrap();
+        assert_eq!(
+            find_esp(&img).unwrap_err().to_string(),
+            "no GPT header at LBA 1"
+        );
+        std::fs::write(&img, gpt::head(&[([1u8; 16], 34, 380)])).unwrap();
+        assert_eq!(
+            find_esp(&img).unwrap_err().to_string(),
+            format!("{} has no EFI system partition", img.display())
+        );
+        std::fs::write(&img, synthetic_gpt()).unwrap();
+        assert_eq!(find_esp(&img).unwrap().first_lba, 381);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A GPT disk with one 4 MB FAT12 ESP, built with mformat. Needs mtools.
@@ -219,42 +202,81 @@ mod tests {
     fn writes_a_file_into_the_esp() {
         let dir = std::env::temp_dir().join(format!("jos-disk-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let esp = dir.join("esp.img");
-        let st = Command::new("mformat")
-            .args(["-C", "-i", &esp.to_string_lossy(), "-T", "8192", "::"])
-            .status()
-            .expect("this test needs mtools (mformat) on PATH");
-        assert!(st.success());
-        let esp_bytes = std::fs::read(&esp).unwrap();
-        let first = 2048u64;
-        let last = first + esp_bytes.len() as u64 / SECTOR - 1;
-        let mut head = synthetic_gpt();
-        let e1 = 2 * 512 + 128;
-        head[e1 + 32..e1 + 40].copy_from_slice(&first.to_le_bytes());
-        head[e1 + 40..e1 + 48].copy_from_slice(&last.to_le_bytes());
-        let mut disk = head;
-        disk.resize(first as usize * 512, 0);
-        disk.extend_from_slice(&esp_bytes);
         let img = dir.join("disk.raw");
-        std::fs::write(&img, &disk).unwrap();
+        gpt::esp_disk(&img);
+        let len = std::fs::metadata(&img).unwrap().len();
+        let real = juanitos_core::sys::RealRunner;
 
-        write_into_esp(&img, "efi/freebsd/loader.env", b"boot_serial=YES\n").unwrap();
+        write_into_esp(&real, &img, "efi/freebsd/loader.env", "boot_serial=YES\n").unwrap();
         // Idempotent: directories exist now.
-        write_into_esp(&img, "efi/freebsd/loader.env", b"boot_serial=YES\nx=1\n").unwrap();
+        write_into_esp(
+            &real,
+            &img,
+            "/efi/freebsd/loader.env",
+            "boot_serial=YES\nx=1\n",
+        )
+        .unwrap();
 
-        let edited = std::fs::read(&img).unwrap();
-        let part = &edited[first as usize * 512..];
-        let out = dir.join("part.img");
-        std::fs::write(&out, part).unwrap();
+        let part = format!("{}@@{}", img.display(), gpt::ESP_FIRST_LBA * SECTOR);
         let got = Command::new("mtype")
-            .args(["-i", &out.to_string_lossy(), "::/efi/freebsd/loader.env"])
+            .args(["-i", &part, "::/efi/freebsd/loader.env"])
             .output()
             .expect("this test needs mtools (mtype) on PATH");
         assert_eq!(
             String::from_utf8_lossy(&got.stdout),
             "boot_serial=YES\nx=1\n"
         );
-        assert_eq!(edited.len(), disk.len(), "the image size must not change");
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), len);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Where each mtools failure stops the edit.
+    #[test]
+    fn mtools_failures_stop_the_edit() {
+        use juanitos_core::sys::{CmdOutput, MockRunner};
+        let dir = std::env::temp_dir().join(format!("jos-esp-mock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("disk.raw");
+        std::fs::write(&img, synthetic_gpt()).unwrap();
+        let i = format!("{}@@{}", img.display(), 381 * SECTOR);
+        let mdir = |d: &str| format!("mdir -i {i} ::/{d}");
+        let mmd = |d: &str| format!("mmd -i {i} ::/{d}");
+        let mcopy = format!("mcopy -i {i} -o - ::/efi/freebsd/loader.env");
+        let write = |r: &MockRunner| write_into_esp(r, &img, "efi/freebsd/loader.env", "x=1\n");
+
+        let present = MockRunner::new();
+        write(&present).unwrap();
+        assert_eq!(
+            present.calls(),
+            [mdir("efi"), mdir("efi/freebsd"), mcopy.clone()]
+        );
+
+        let absent = || MockRunner::new().respond("mdir", &[], CmdOutput::failed(1, ""));
+        let all = [
+            mdir("efi"),
+            mmd("efi"),
+            mdir("efi/freebsd"),
+            mmd("efi/freebsd"),
+            mcopy,
+        ];
+        let r = absent();
+        write(&r).unwrap();
+        assert_eq!(r.calls(), all);
+        // The mmd, then the mcopy, fails.
+        for n in [1, 4] {
+            let r = absent().fail_call(n);
+            assert!(write(&r).is_err());
+            assert_eq!(r.calls(), all[..=n]);
+        }
+        let r = MockRunner::new().missing("mdir");
+        assert!(write(&r).is_err());
+        assert_eq!(r.calls(), all[..1]);
+
+        std::fs::write(&img, [0u8; GPT_HEAD_LEN]).unwrap();
+        let r = MockRunner::new();
+        assert!(write(&r).is_err());
+        assert_eq!(r.calls(), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -6,7 +6,7 @@
 //! log file), so a hung build is visible rather than silent.
 
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, ChildStdout};
+use std::process::{Child, ChildStdin};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -24,26 +24,25 @@ pub struct Console {
     rx: mpsc::Receiver<Vec<u8>>,
     /// Unconsumed output, searched by `expect`.
     buf: Vec<u8>,
+    /// Bound on `buf`: past it, the older half is dropped.
+    window: usize,
     log: Option<std::fs::File>,
 }
 
 impl Console {
     /// Take over a child's piped stdin/stdout.
     pub fn attach(mut child: Child, log: Option<std::fs::File>) -> anyhow::Result<Self> {
-        let stdin = child.stdin.take().context("child stdin not piped")?;
-        let stdout: ChildStdout = child.stdout.take().context("child stdout not piped")?;
+        let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            bail!("the child's stdin and stdout must be piped");
+        };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut stdout = stdout;
             let mut chunk = [0u8; 4096];
             loop {
-                match stdout.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if tx.send(chunk.get(..n).unwrap_or(&[]).to_vec()).is_err() {
-                            break;
-                        }
-                    }
+                // A read error ends the console like end of file does.
+                let n = stdout.read(&mut chunk).unwrap_or(0);
+                if n == 0 || tx.send(chunk.get(..n).unwrap_or(&[]).to_vec()).is_err() {
+                    break;
                 }
             }
         });
@@ -52,6 +51,7 @@ impl Console {
             stdin,
             rx,
             buf: Vec::new(),
+            window: 1 << 20,
             log,
         })
     }
@@ -66,9 +66,8 @@ impl Console {
                     let _ = log.write_all(&data);
                 }
                 self.buf.extend_from_slice(&data);
-                // Keep the search window bounded.
-                if self.buf.len() > 1 << 20 {
-                    let cut = self.buf.len() - (1 << 19);
+                if self.buf.len() > self.window {
+                    let cut = self.buf.len() - self.window / 2;
                     self.buf.drain(..cut);
                 }
                 Ok(true)
@@ -121,10 +120,11 @@ impl Console {
     }
 
     /// Send bytes as they are (control characters such as ^D included).
+    /// (`ChildStdin` is unbuffered: there is nothing to flush.)
     pub fn send_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        self.stdin.write_all(data)?;
-        self.stdin.flush()?;
-        Ok(())
+        self.stdin
+            .write_all(data)
+            .context("writing to the guest's console")
     }
 
     /// Send a line, paced: written in one burst, a line longer than a few
@@ -134,8 +134,7 @@ impl Console {
         let mut data = line.as_bytes().to_vec();
         data.push(b'\n');
         for chunk in data.chunks(SEND_CHUNK) {
-            self.stdin.write_all(chunk)?;
-            self.stdin.flush()?;
+            self.send_raw(chunk)?;
             std::thread::sleep(SEND_PAUSE);
         }
         Ok(())
@@ -164,7 +163,8 @@ impl Console {
     pub fn wait_exit(&mut self, timeout: Duration) -> anyhow::Result<()> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(st) = self.child.try_wait()? {
+            // A failing try_wait is retried until the deadline.
+            if let Ok(Some(st)) = self.child.try_wait() {
                 return if st.success() {
                     Ok(())
                 } else {
@@ -283,6 +283,66 @@ mod tests {
         // Raw bytes go through as they are, no newline added.
         c.send_raw(b"printf 'raw\\n'\n").unwrap();
         c.expect("raw", t).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_piped_child_can_be_attached() {
+        use std::process::{Command, Stdio};
+        let child = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();
+        let err = Console::attach(child, None).err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "the child's stdin and stdout must be piped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_guest_that_is_gone_cannot_be_written_to() {
+        let mut c = shell(None);
+        c.send_line("exit 0").unwrap();
+        c.wait_exit(Duration::from_secs(5)).unwrap();
+        let err = c.run("true", Duration::from_secs(5)).unwrap_err();
+        assert_eq!(err.to_string(), "writing to the guest's console");
+    }
+
+    /// The guest's end of [`Console::run`]: `echo <marker>=<status>.`,
+    /// replaced by a shell function to play a broken guest.
+    #[cfg(unix)]
+    #[test]
+    fn a_status_that_never_comes_or_is_garbled() {
+        let t = Duration::from_secs(5);
+        let mut c = shell(None);
+        let err = c.run("exit 0", t).unwrap_err();
+        assert_eq!(err.to_string(), "the guest's console closed");
+
+        let mut c = shell(None);
+        c.send_line(r#"echo() { printf '%s' "${1%%=*}="; exit 0; }"#)
+            .unwrap();
+        let err = c.run("true", t).unwrap_err();
+        assert_eq!(err.to_string(), "the guest's console closed");
+
+        let mut c = shell(None);
+        c.send_line(r#"echo() { printf '%s' "${1%%=*}=x."; }"#)
+            .unwrap();
+        let err = c.run("true", t).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r#"could not read the status of: true (got "x")"#
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_search_window_is_bounded() {
+        let mut c = shell(None);
+        c.window = 64;
+        // 103 bytes before the match: the front is dropped on the way.
+        c.send_line("printf '%0100dEND'").unwrap();
+        let before = c.expect("END", Duration::from_secs(5)).unwrap();
+        assert!(before.len() < 100);
+        assert!(before.bytes().all(|b| b == b'0'));
     }
 
     #[cfg(unix)]

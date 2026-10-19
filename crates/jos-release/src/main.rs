@@ -9,6 +9,9 @@ mod console;
 mod disk;
 mod profile;
 mod qemu;
+#[cfg(test)]
+#[path = "../tests/common/gpt.rs"]
+mod test_gpt;
 mod ventoy;
 
 use std::path::PathBuf;
@@ -40,6 +43,11 @@ struct Cli {
     /// Scratch/output directory (defaults to <repo>/release/out).
     #[arg(long, global = true)]
     work: Option<PathBuf>,
+
+    /// OVMF code file for `qemu`, `builder --auto` and `selfhost`
+    /// (auto-detected).
+    #[arg(long, global = true)]
+    firmware: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -131,9 +139,6 @@ struct QemuArgs {
     memory_mb: u64,
     #[arg(long, default_value_t = 2)]
     cpus: u32,
-    /// OVMF code file (auto-detected).
-    #[arg(long)]
-    firmware: Option<PathBuf>,
     /// No window; serial console on stdio only.
     #[arg(long)]
     headless: bool,
@@ -177,7 +182,8 @@ fn main() {
 }
 
 fn find_repo() -> anyhow::Result<PathBuf> {
-    let mut dir = std::env::current_dir()?;
+    // A working directory that is gone is outside the repository too.
+    let mut dir = std::env::current_dir().unwrap_or_default();
     loop {
         if dir.join("release/juanitos.toml").is_file() && dir.join("Cargo.toml").is_file() {
             return Ok(dir);
@@ -242,17 +248,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             require_root(cli.dry_run)?;
             make_builder(&a).all()
         }
-        Cmd::Clean => {
-            FsOps::new(cli.dry_run).remove_tree(&work)?;
-            Ok(())
-        }
+        Cmd::Clean => FsOps::new(cli.dry_run)
+            .remove_tree(&work)
+            .map_err(Into::into),
         Cmd::Qemu(a) => {
-            let firmware = match a.firmware.or_else(qemu::find_ovmf) {
-                Some(f) => f,
-                None => bail!(
-                    "OVMF firmware not found; install the ovmf/edk2 package or pass --firmware"
-                ),
-            };
+            let firmware = firmware(cli.firmware)?;
             let iso = if a.no_cdrom {
                 None
             } else {
@@ -289,6 +289,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 image: a.image,
                 repo,
                 out: a.out.unwrap_or_else(|| work.join("builder")),
+                firmware: firmware(cli.firmware)?,
                 disk_size_gb: a.disk_size_gb,
                 memory_mb: a.memory_mb,
                 cpus: a.cpus,
@@ -300,6 +301,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             &qemu::SelfHost {
                 iso: a.iso.unwrap_or_else(|| work.join(profile.iso_name())),
                 out: a.out.unwrap_or_else(|| work.join("selfhost")),
+                firmware: firmware(cli.firmware)?,
                 disk_size_gb: a.disk_size_gb,
                 memory_mb: a.memory_mb,
                 cpus: a.cpus,
@@ -322,6 +324,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// The OVMF code file: `given`, or the first known location that exists.
+fn firmware(given: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    given
+        .or_else(qemu::find_ovmf)
+        .filter(|f| f.is_file())
+        .context("OVMF firmware not found; install the ovmf/edk2 package or pass --firmware")
 }
 
 /// The FreeBSD release steps need root (devfs mounts, pkg -c, ownership

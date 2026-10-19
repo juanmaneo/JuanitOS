@@ -43,6 +43,15 @@ fn kvm_usable() -> bool {
         .is_ok()
 }
 
+/// What to tell the user before a long unattended run under `accel`.
+pub fn accel_note(accel: &str) -> &'static str {
+    if accel == "tcg" {
+        "note: no usable /dev/kvm, running under TCG (slow; hours rather than minutes)\n"
+    } else {
+        ""
+    }
+}
+
 /// The accelerator for an OS (`std::env::consts::OS`) and whether
 /// `/dev/kvm` can be opened.
 pub fn accel_for(os: &str, kvm: bool) -> &'static str {
@@ -173,6 +182,23 @@ pub fn qemu_args(o: &QemuOptions) -> Vec<String> {
     a
 }
 
+/// Print `program args`, then (unless `dry_run`) run it with the terminal
+/// inherited; a non-zero exit is an error.
+fn run_tool(program: &str, args: &[String], dry_run: bool) -> anyhow::Result<()> {
+    println!("+ {program} {}", args.join(" "));
+    if dry_run {
+        return Ok(());
+    }
+    let st = Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("running {program} (is QEMU installed?)"))?;
+    if !st.success() {
+        bail!("{program} exited with {st}");
+    }
+    Ok(())
+}
+
 /// Run QEMU interactively (inherits the terminal). In dry-run mode only
 /// print the command.
 pub fn run_qemu(o: &QemuOptions, dry_run: bool) -> anyhow::Result<()> {
@@ -195,44 +221,25 @@ pub fn run_qemu(o: &QemuOptions, dry_run: bool) -> anyhow::Result<()> {
             create_vars(&o.firmware, &o.vars)?;
         }
     }
-    let args = qemu_args(o);
-    println!("+ qemu-system-x86_64 {}", args.join(" "));
-    if dry_run {
-        return Ok(());
-    }
-    let st = Command::new("qemu-system-x86_64")
-        .args(&args)
-        .status()
-        .context("running qemu-system-x86_64 (is QEMU installed?)")?;
-    if !st.success() {
-        bail!("qemu exited with {st}");
-    }
-    Ok(())
+    run_tool("qemu-system-x86_64", &qemu_args(o), dry_run)
 }
 
 /// An empty (sparse) qcow2 disk.
 fn create_qcow2(disk: &Path, size_gb: u64, dry_run: bool) -> anyhow::Result<()> {
-    let size = format!("{size_gb}G");
-    let args = ["create", "-f", "qcow2", &disk.to_string_lossy(), &size];
-    println!("+ qemu-img {}", args.join(" "));
-    if !dry_run {
-        let st = Command::new("qemu-img")
-            .args(args)
-            .status()
-            .context("running qemu-img")?;
-        if !st.success() {
-            bail!("qemu-img failed");
-        }
-    }
-    Ok(())
+    let args = [
+        "create".into(),
+        "-f".into(),
+        "qcow2".into(),
+        disk.display().to_string(),
+        format!("{size_gb}G"),
+    ];
+    run_tool("qemu-img", &args, dry_run)
 }
 
 /// A fresh UEFI variable store at `vars`: a copy of the `*_VARS.fd` next
 /// to `firmware`, or zeros sized like the code image (which OVMF accepts).
 pub fn create_vars(firmware: &Path, vars: &Path) -> anyhow::Result<()> {
-    if let Some(parent) = vars.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    std::fs::create_dir_all(vars.parent().unwrap_or(Path::new("")))?;
     match sibling_vars(firmware) {
         Some(src) => {
             std::fs::copy(src, vars)?;
@@ -285,19 +292,11 @@ pub fn builder_args(image: &Path, repo: &Path, memory_mb: u64, cpus: u32) -> Vec
 }
 
 pub fn run_builder(image: &Path, repo: &Path, dry_run: bool) -> anyhow::Result<()> {
-    let args = builder_args(image, repo, 8192, 4);
-    println!("+ qemu-system-x86_64 {}", args.join(" "));
-    if dry_run {
-        return Ok(());
-    }
-    let st = Command::new("qemu-system-x86_64")
-        .args(&args)
-        .status()
-        .context("running qemu-system-x86_64")?;
-    if !st.success() {
-        bail!("qemu exited with {st}");
-    }
-    Ok(())
+    run_tool(
+        "qemu-system-x86_64",
+        &builder_args(image, repo, 8192, 4),
+        dry_run,
+    )
 }
 
 /// Unattended stage 1: everything `run_builder` leaves to the user, driven
@@ -309,6 +308,8 @@ pub struct AutoBuilder {
     pub repo: PathBuf,
     /// Where the working disk copy, the console log and the results go.
     pub out: PathBuf,
+    /// OVMF code file.
+    pub firmware: PathBuf,
     pub disk_size_gb: u64,
     pub memory_mb: u64,
     pub cpus: u32,
@@ -385,12 +386,7 @@ pub const AUTO_STEPS: &[(&str, &str, u64)] = &[
 /// serial console is switched on without touching the ZFS root. Hence the
 /// working disk is raw (so the ESP can be edited with mtools) and OVMF is
 /// used.
-pub fn auto_builder_args(
-    b: &AutoBuilder,
-    disk: &Path,
-    firmware: &Path,
-    vars: &Path,
-) -> Vec<String> {
+pub fn auto_builder_args(b: &AutoBuilder, disk: &Path, vars: &Path) -> Vec<String> {
     vec![
         "-machine".into(),
         format!("q35,accel={}", accel()),
@@ -403,7 +399,7 @@ pub fn auto_builder_args(
         "-drive".into(),
         format!(
             "if=pflash,format=raw,readonly=on,file={}",
-            firmware.display()
+            b.firmware.display()
         ),
         "-drive".into(),
         format!("if=pflash,format=raw,file={}", vars.display()),
@@ -431,43 +427,39 @@ pub fn auto_builder_args(
 }
 
 pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
-    use std::time::Duration;
-
     std::fs::create_dir_all(&b.out)?;
     let disk = b.out.join("builder.raw");
     if !disk.is_file() {
-        let size = format!("{}G", b.disk_size_gb);
-        let disk_s = disk.to_string_lossy().into_owned();
-        println!(
-            "+ qemu-img convert -O raw {} {disk_s}\n+ qemu-img resize -f raw {disk_s} {size}\n\
-             + write {}:/efi/freebsd/loader.env (serial console)",
-            b.image.display(),
-            disk_s
-        );
-        if !dry_run {
-            let st = Command::new("qemu-img")
-                .args(["convert", "-O", "raw", &b.image.to_string_lossy(), &disk_s])
-                .status()
-                .context("running qemu-img")?;
-            if !st.success() {
-                bail!("qemu-img convert failed");
-            }
-            let st = Command::new("qemu-img")
-                .args(["resize", "-f", "raw", &disk_s, &size])
-                .status()?;
-            if !st.success() {
-                bail!("qemu-img resize failed");
-            }
-        }
+        let convert = [
+            "convert".into(),
+            "-O".into(),
+            "raw".into(),
+            b.image.display().to_string(),
+            disk.display().to_string(),
+        ];
+        run_tool("qemu-img", &convert, dry_run)?;
+        let resize = [
+            "resize".into(),
+            "-f".into(),
+            "raw".into(),
+            disk.display().to_string(),
+            format!("{}G", b.disk_size_gb),
+        ];
+        run_tool("qemu-img", &resize, dry_run)?;
     }
+    println!(
+        "+ write {}:/efi/freebsd/loader.env (serial console)",
+        disk.display()
+    );
     if !dry_run {
         // Idempotent, and cheap next to the conversion: always make sure
         // the console settings are there (a previous run may have been
         // interrupted between the two steps).
         crate::disk::write_into_esp(
+            &juanitos_core::sys::RealRunner,
             &disk,
             "efi/freebsd/loader.env",
-            crate::disk::SERIAL_LOADER_ENV.as_bytes(),
+            crate::disk::SERIAL_LOADER_ENV,
         )
         .context("enabling the serial console in the VM image")?;
     }
@@ -499,12 +491,11 @@ pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
             println!("note: no host-built {name}; the ISO will do without it");
         }
     }
-    let firmware = find_ovmf().context("OVMF firmware not found; install the ovmf/edk2 package")?;
     let vars = b.out.join("OVMF_VARS.fd");
     if !vars.is_file() && !dry_run {
-        create_vars(&firmware, &vars)?;
+        create_vars(&b.firmware, &vars)?;
     }
-    let args = auto_builder_args(b, &disk, &firmware, &vars);
+    let args = auto_builder_args(b, &disk, &vars);
     println!("+ qemu-system-x86_64 {}", args.join(" "));
     for (what, cmd, minutes) in AUTO_STEPS {
         println!("   guest: {what} (timeout {minutes} min)\n      {cmd}");
@@ -512,22 +503,25 @@ pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
     if dry_run {
         return Ok(());
     }
-    let mut con = spawn_console(&args, &b.out)?;
-    con.expect("login:", Duration::from_secs(20 * 60))?;
-    root_shell(&mut con, None)?;
-    run_steps(&mut con, "builder", AUTO_STEPS.iter().copied())?;
-    power_off(&mut con, "builder")?;
+    drive_builder(&mut spawn_console(&args, &b.out)?)?;
     println!("\nDone: results in {}", b.out.display());
     Ok(())
+}
+
+/// The console side of [`run_auto_builder`]: log in, run [`AUTO_STEPS`],
+/// power off.
+fn drive_builder(con: &mut crate::console::Console) -> anyhow::Result<()> {
+    con.expect("login:", std::time::Duration::from_secs(20 * 60))?;
+    root_shell(con, None)?;
+    run_steps(con, "builder", AUTO_STEPS.iter().copied())?;
+    power_off(con, "builder")
 }
 
 /// Start QEMU with its serial console on a pipe we drive, logged to
 /// `<out>/console.log`.
 fn spawn_console(args: &[String], out: &Path) -> anyhow::Result<crate::console::Console> {
     use std::process::Stdio;
-    if accel() == "tcg" {
-        println!("note: no usable /dev/kvm, running under TCG (slow; hours rather than minutes)");
-    }
+    print!("{}", accel_note(accel()));
     let log = std::fs::File::create(out.join("console.log"))?;
     let child = Command::new("qemu-system-x86_64")
         .args(args)
@@ -585,6 +579,8 @@ pub struct SelfHost {
     pub iso: PathBuf,
     /// Working disk, console log, and what the guest copies out.
     pub out: PathBuf,
+    /// OVMF code file.
+    pub firmware: PathBuf,
     pub disk_size_gb: u64,
     pub memory_mb: u64,
     pub cpus: u32,
@@ -662,7 +658,7 @@ pub fn selfhost_steps() -> Vec<(&'static str, String, u64)> {
 /// ISO still attached. No display device at all: without a Graphics Output
 /// Protocol `jos-boot` hands over to the serial console, where both the
 /// live installer and the login prompt then run.
-pub fn selfhost_args(s: &SelfHost, disk: &Path, firmware: &Path, vars: &Path) -> Vec<String> {
+pub fn selfhost_args(s: &SelfHost, disk: &Path, vars: &Path) -> Vec<String> {
     vec![
         "-machine".into(),
         format!("q35,accel={}", accel()),
@@ -675,7 +671,7 @@ pub fn selfhost_args(s: &SelfHost, disk: &Path, firmware: &Path, vars: &Path) ->
         "-drive".into(),
         format!(
             "if=pflash,format=raw,readonly=on,file={}",
-            firmware.display()
+            s.firmware.display()
         ),
         "-drive".into(),
         format!("if=pflash,format=raw,file={}", vars.display()),
@@ -730,11 +726,10 @@ pub fn run_selfhost(s: &SelfHost, dry_run: bool) -> anyhow::Result<()> {
         }
     }
     create_qcow2(&disk, s.disk_size_gb, dry_run)?;
-    let firmware = find_ovmf().context("OVMF firmware not found; install the ovmf/edk2 package")?;
     if !dry_run {
-        create_vars(&firmware, &vars)?;
+        create_vars(&s.firmware, &vars)?;
     }
-    let args = selfhost_args(s, &disk, &firmware, &vars);
+    let args = selfhost_args(s, &disk, &vars);
     println!("+ qemu-system-x86_64 {}", args.join(" "));
     println!(
         "   live: ^D at the installer, log in as root\n      {}",
@@ -747,9 +742,11 @@ pub fn run_selfhost(s: &SelfHost, dry_run: bool) -> anyhow::Result<()> {
     if dry_run {
         return Ok(());
     }
-
-    let mut con = spawn_console(&args, &s.out)?;
-    drive_selfhost(&mut con, &selfhost_install(), &steps)?;
+    drive_selfhost(
+        &mut spawn_console(&args, &s.out)?,
+        &selfhost_install(),
+        &steps,
+    )?;
     println!(
         "\nSelf-hosting: stage N+1 matches stage N ({})",
         s.out.join("compare.txt").display()
@@ -870,6 +867,10 @@ mod tests {
         assert_eq!(accel_for("freebsd", true), "nvmm");
         assert_eq!(accel_for("windows", false), "tcg");
         assert!(["kvm", "tcg", "hvf", "nvmm"].contains(&accel()));
+        assert!(accel_note("tcg").starts_with("note: no usable /dev/kvm"));
+        assert_eq!(accel_note("kvm"), "");
+        // Whatever the host has, the answer is one of the candidates.
+        let _ = find_ovmf();
     }
 
     #[test]
@@ -901,17 +902,13 @@ mod tests {
             image: PathBuf::from("/img.qcow2"),
             repo: PathBuf::from("/repo"),
             out: PathBuf::from("/out"),
+            firmware: PathBuf::from("/f/OVMF_CODE.fd"),
             disk_size_gb: 60,
             memory_mb: 4096,
             cpus: 4,
         };
-        let a = auto_builder_args(
-            &b,
-            Path::new("/out/builder.raw"),
-            Path::new("/f/OVMF_CODE.fd"),
-            Path::new("/out/vars.fd"),
-        )
-        .join(" ");
+        let a = auto_builder_args(&b, Path::new("/out/builder.raw"), Path::new("/out/vars.fd"))
+            .join(" ");
         assert!(a.contains("if=pflash,format=raw,readonly=on,file=/f/OVMF_CODE.fd"));
         assert!(a.contains("file=/out/builder.raw,if=virtio,format=raw"));
         assert!(a.contains("path=/repo,mount_tag=juanitos,security_model=none,readonly=on"));
@@ -935,6 +932,7 @@ mod tests {
         let s = SelfHost {
             iso: PathBuf::from("/w/JuanitOS.iso"),
             out: PathBuf::from("/w/selfhost"),
+            firmware: PathBuf::from("/f/OVMF_CODE.fd"),
             disk_size_gb: 40,
             memory_mb: 6144,
             cpus: 4,
@@ -942,7 +940,6 @@ mod tests {
         let a = selfhost_args(
             &s,
             Path::new("/w/selfhost/selfhost.qcow2"),
-            Path::new("/f/OVMF_CODE.fd"),
             Path::new("/w/selfhost/vars.fd"),
         )
         .join(" ");
@@ -981,21 +978,39 @@ mod tests {
         assert!(steps.iter().all(|s| s.2 > 0));
     }
 
-    /// A guest played by `sh`: the live installer's disk list (ended by
-    /// one byte, the ^D), a password-less live login, `reboot` to a login
-    /// with a password, `poweroff`.
+    // Pieces of a guest played by `sh` (see `guest`).
+    /// `reboot` lands on a login that asks for a password.
+    const REBOOT: &str =
+        "reboot() { printf 'booting\\nlogin: '; read u; printf 'Password:'; read p; printf '# '; }";
+    const POWEROFF: &str = "poweroff() { exit 0; }";
+    /// The live installer's disk list, ended by one byte (the ^D).
+    const LIVE: &str = "printf 'Disks:\\n'; dd bs=1 count=1 >/dev/null 2>&1";
+    /// A password-less login.
+    const LOGIN: &str = "printf 'login: '; read u; printf '# '";
+    /// Run each line the host sends.
+    const EVAL: &str = "while read -r line; do eval \"$line\"; done";
+    /// Closing stdin before printing a prompt makes the host's next write
+    /// fail, deterministically.
+    const DEAF: &str = "exec 0<&-";
+
+    /// Answer each line the host sends as if it succeeded, without running
+    /// it (the builder's steps are real FreeBSD commands); a line
+    /// containing the word `fail_on` (a `case` pattern) fails instead.
+    fn ack(fail_on: &str) -> String {
+        format!(
+            "while read -r line; do case $line in poweroff) exit 0;; *{fail_on}*) false;; esac; \
+             eval \"echo ${{line##*; echo }}\"; done"
+        )
+    }
+
+    /// A guest made of `parts`. Whatever it evaluates, `reboot` and
+    /// `poweroff` are shell functions, never the host's commands.
     #[cfg(unix)]
-    fn fake_guest() -> crate::console::Console {
+    fn guest(parts: &[&str]) -> crate::console::Console {
         use std::process::Stdio;
-        let script = r#"
-            reboot() { printf 'booting\nlogin: '; read u; printf 'Password:'; read p; printf '# '; }
-            poweroff() { exit 0; }
-            printf 'Disks:\n'; dd bs=1 count=1 >/dev/null 2>&1
-            printf 'login: '; read u; printf '# '
-            while read -r line; do eval "$line"; done
-        "#;
+        let script = [&["reboot() { exit 9; }; poweroff() { exit 9; }"], parts].concat();
         let child = Command::new("sh")
-            .args(["-c", script])
+            .args(["-c", &script.join("\n")])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1007,26 +1022,86 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn selfhost_dialogue_with_a_guest() {
-        let mut con = fake_guest();
         let steps = vec![
             ("first", "true".to_string(), 1),
             ("second", "echo hi".to_string(), 1),
         ];
-        drive_selfhost(&mut con, "true", &steps).unwrap();
+        drive_selfhost(
+            &mut guest(&[REBOOT, POWEROFF, LIVE, LOGIN, EVAL]),
+            "true",
+            &steps,
+        )
+        .unwrap();
+        // A live medium that goes straight to its login prompt.
+        drive_selfhost(&mut guest(&[REBOOT, POWEROFF, LOGIN, EVAL]), "true", &steps).unwrap();
+    }
 
-        // A failing step is reported, after the guest was powered off.
-        let mut con = fake_guest();
-        let steps = vec![("compare", "false".to_string(), 1)];
-        let err = drive_selfhost(&mut con, "true", &steps).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("selfhost step failed: compare"),
-            "{err:#}"
+    /// Every way the dialogue can break, with the error it ends on.
+    #[cfg(unix)]
+    #[test]
+    fn selfhost_dialogue_failures() {
+        let closed = "the guest's console closed";
+        let deaf = "writing to the guest's console";
+        let ok = [("first", "true".to_string(), 1)];
+        let failing = [("compare", "false".to_string(), 1)];
+        let closing = [("close", DEAF.to_string(), 1)];
+        /// Name, guest script parts, install command, steps, error.
+        type Case<'a> = (
+            &'a str,
+            &'a [&'a str],
+            &'a str,
+            &'a [(&'a str, String, u64)],
+            &'a str,
         );
+        #[rustfmt::skip]
+        let cases: &[Case] = &[
+            ("no output at all", &[], "true", &ok, closed),
+            ("deaf at the installer", &[DEAF, "printf 'Disks:\\n'"], "true", &ok, deaf),
+            ("gone after the installer", &[LIVE], "true", &ok, closed),
+            ("deaf at the live login", &[DEAF, "printf 'login: '"], "true", &ok, deaf),
+            ("no live shell", &["printf 'login: '; read u"], "true", &ok, closed),
+            ("failed install", &[REBOOT, LOGIN, EVAL], "false", &ok,
+             "selfhost step failed: install to vtbd0"),
+            ("deaf after the install", &[REBOOT, LOGIN, EVAL], DEAF, &ok, deaf),
+            ("no reboot", &["reboot() { exit 0; }", LOGIN, EVAL], "true", &ok, closed),
+            ("deaf at the dom0 login",
+             &["reboot() { exec 0<&-; printf 'login: '; }", LOGIN, EVAL], "true", &ok, deaf),
+            ("no password prompt",
+             &["reboot() { printf 'login: '; read u; exit 0; }", LOGIN, EVAL], "true", &ok, closed),
+            ("deaf at the password prompt",
+             &["reboot() { printf 'login: '; read u; exec 0<&-; printf 'Password:'; }", LOGIN, EVAL],
+             "true", &ok, deaf),
+            // Reported after the guest was powered off.
+            ("failing step", &[REBOOT, POWEROFF, LOGIN, EVAL], "true", &failing,
+             "selfhost step failed: compare"),
+            ("deaf at power off", &[REBOOT, POWEROFF, LOGIN, EVAL], "true", &closing, deaf),
+            ("failed power off", &[REBOOT, "poweroff() { exit 1; }", LOGIN, EVAL], "true", &ok,
+             "qemu exited with exit status: 1"),
+        ];
+        for (name, parts, install, steps, want) in cases {
+            let err = drive_selfhost(&mut guest(parts), install, steps).unwrap_err();
+            assert_eq!((name, err.to_string()), (name, want.to_string()));
+        }
+    }
 
-        // So is a failed install, before any reboot.
-        let mut con = fake_guest();
-        let err = drive_selfhost(&mut con, "false", &steps).unwrap_err();
-        assert!(format!("{err:#}").contains("install to vtbd0"), "{err:#}");
+    #[cfg(unix)]
+    #[test]
+    fn builder_dialogue_with_a_guest() {
+        drive_builder(&mut guest(&[LOGIN, &ack("never-matched")])).unwrap();
+        let closed = "the guest's console closed";
+        let cases: &[(&str, &[&str], &str)] = &[
+            ("no output at all", &[], closed),
+            ("no shell", &["printf 'login: '; read u"], closed),
+            (
+                "failing step",
+                &[LOGIN, &ack("gpart")],
+                "builder step failed: grow the root pool to the resized disk",
+            ),
+        ];
+        for (name, parts, want) in cases {
+            let err = drive_builder(&mut guest(parts)).unwrap_err();
+            assert_eq!((name, err.to_string()), (name, want.to_string()));
+        }
     }
 
     #[test]
@@ -1037,18 +1112,20 @@ mod tests {
         let s = SelfHost {
             iso: dir.join("missing.iso"),
             out: dir.clone(),
+            firmware: PathBuf::from("/f/OVMF_CODE.fd"),
             disk_size_gb: 40,
             memory_mb: 2048,
             cpus: 2,
         };
         // A previous run's disk is left alone by a dry run.
         std::fs::write(dir.join("selfhost.qcow2"), b"old").unwrap();
-        match run_selfhost(&s, true) {
-            Ok(()) => assert!(dir.join("selfhost.qcow2").is_file()),
-            Err(e) => assert!(format!("{e:#}").contains("OVMF"), "{e:#}"),
-        }
+        run_selfhost(&s, true).unwrap();
+        assert_eq!(std::fs::read(dir.join("selfhost.qcow2")).unwrap(), b"old");
         let err = run_selfhost(&s, false).unwrap_err();
-        assert!(err.to_string().contains("build it first"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!("{} does not exist; build it first", s.iso.display())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1061,6 +1138,12 @@ mod tests {
             "no CODE in the name"
         );
         assert!(sibling_vars(Path::new("/")).is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let not_utf8 = std::ffi::OsStr::from_bytes(b"/f/OVMF_CODE\xff.fd");
+            assert!(sibling_vars(Path::new(not_utf8)).is_none());
+        }
     }
 
     #[test]
@@ -1086,7 +1169,21 @@ mod tests {
         assert_eq!(std::fs::read(&vars).unwrap(), vec![0u8; 32]);
 
         let err = create_vars(&dir.join("missing-code.fd"), &dir.join("v.fd")).unwrap_err();
-        assert!(format!("{err:#}").contains("missing-code.fd"), "{err:#}");
+        assert_eq!(
+            err.to_string(),
+            format!("reading {}", dir.join("missing-code.fd").display())
+        );
+
+        // A parent that is a file, and a store that cannot be written
+        // (a dangling symlink), for both kinds of store.
+        assert!(create_vars(&code, &code.join("vars.fd")).is_err());
+        #[cfg(unix)]
+        {
+            let dangling = dir.join("dangling.fd");
+            std::os::unix::fs::symlink(dir.join("nowhere/vars.fd"), &dangling).unwrap();
+            assert!(create_vars(&code, &dangling).is_err());
+            assert!(create_vars(&lone, &dangling).is_err());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -8,7 +8,8 @@
 //! A short list of files is expected to differ, each for a stated reason.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs::{FileType, Metadata};
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
@@ -63,25 +64,19 @@ pub fn snapshot(root: &Path) -> anyhow::Result<BTreeMap<String, Entry>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries =
-            std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))?;
-        for e in entries {
-            let path = e?.path();
-            let meta = std::fs::symlink_metadata(&path)
-                .with_context(|| format!("inspecting {}", path.display()))?;
+        // `DirEntry::metadata` does not follow symbolic links.
+        let entries: Vec<(PathBuf, Metadata)> = std::fs::read_dir(&dir)
+            .and_then(|it| {
+                it.map(|e| e.and_then(|e| e.metadata().map(|m| (e.path(), m))))
+                    .collect()
+            })
+            .with_context(|| format!("reading {}", dir.display()))?;
+        for (path, meta) in entries {
             let ft = meta.file_type();
-            let kind = if ft.is_dir() {
+            if ft.is_dir() {
                 stack.push(path.clone());
-                Kind::Dir
-            } else if ft.is_symlink() {
-                Kind::Symlink(unix(&std::fs::read_link(&path)?))
-            } else if ft.is_file() {
-                Kind::File(
-                    sha256_file(&path).with_context(|| format!("hashing {}", path.display()))?,
-                )
-            } else {
-                Kind::Other
-            };
+            }
+            let kind = kind(&path, ft).with_context(|| format!("reading {}", path.display()))?;
             let (mode, uid, gid) = owner_and_mode(&meta);
             let rel = path.strip_prefix(root).unwrap_or(&path);
             out.insert(
@@ -96,6 +91,21 @@ pub fn snapshot(root: &Path) -> anyhow::Result<BTreeMap<String, Entry>> {
         }
     }
     Ok(out)
+}
+
+/// What the entry at `path` of type `ft` is.
+fn kind(path: &Path, ft: FileType) -> anyhow::Result<Kind> {
+    if ft.is_symlink() {
+        std::fs::read_link(path)
+            .map(|t| Kind::Symlink(unix(&t)))
+            .map_err(Into::into)
+    } else if ft.is_file() {
+        sha256_file(path).map(Kind::File).map_err(Into::into)
+    } else if ft.is_dir() {
+        Ok(Kind::Dir)
+    } else {
+        Ok(Kind::Other)
+    }
 }
 
 #[cfg(unix)]
@@ -230,32 +240,30 @@ pub fn compare_tarballs(
         .run("id", &["-u"])
         .map(|o| o.success() && o.stdout.trim() == "0")
         .unwrap_or(false);
-    let mut trees = Vec::new();
-    for (tarball, side) in [(a, "a"), (b, "b")] {
+    let extract = |tarball: &Path, side: &str| -> anyhow::Result<BTreeMap<String, Entry>> {
         let dir = scratch.join(side);
         clear(fs, &dir)?;
         fs.mkdir_p(&dir)?;
         println!("==> Extracting {}", tarball.display());
         runner.run_checked("tar", &["-xpf", &unix(tarball), "-C", &unix(&dir)])?;
-        trees.push(if fs.dry_run {
-            BTreeMap::new()
+        if fs.dry_run {
+            Ok(BTreeMap::new())
         } else {
-            snapshot(&dir)?
-        });
-    }
-    let (ta, tb) = match trees.as_slice() {
-        [ta, tb] => (ta, tb),
-        _ => anyhow::bail!("internal error: expected two trees"),
+            snapshot(&dir)
+        }
     };
+    let ta = extract(a, "a")?;
+    let tb = extract(b, "b")?;
     let report = Report {
         entries: (ta.len(), tb.len()),
         owners_compared: owners,
-        differences: diff(ta, tb, owners),
+        differences: diff(&ta, &tb, owners),
     };
-    if !keep {
-        clear(fs, scratch)?;
+    if keep {
+        Ok(report)
+    } else {
+        clear(fs, scratch).map(|()| report)
     }
-    Ok(report)
 }
 
 /// Remove an extracted tree. Directories extracted without write
@@ -275,8 +283,7 @@ fn clear(fs: &FsOps, dir: &Path) -> anyhow::Result<()> {
             }
         }
     }
-    fs.remove_tree(dir)?;
-    Ok(())
+    fs.remove_tree(dir).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -457,14 +464,14 @@ mod tests {
 
         // A fifo is neither file, directory nor link.
         let fifo = s.0.join("t/fifo");
-        if std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .map(|st| st.success())
-            .unwrap_or(false)
-        {
-            assert_eq!(snapshot(&s.0.join("t")).unwrap()["/fifo"].kind, Kind::Other);
-        }
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.expect("this test needs mkfifo on PATH").success());
+        assert_eq!(snapshot(&s.0.join("t")).unwrap()["/fifo"].kind, Kind::Other);
+
+        // A file that cannot be read is named (tests run as non-root).
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = snapshot(&s.0.join("t")).unwrap_err();
+        assert_eq!(err.to_string(), format!("reading {}", f.display()));
     }
 
     /// Two archives of the same tree differ in member order and mtimes; the
@@ -503,8 +510,9 @@ mod tests {
         let fs = FsOps::new(false);
         let r = compare_tarballs(&RealRunner, &fs, &a, &b, &scratch, false).unwrap();
         assert_eq!(r.entries.0, r.entries.1);
-        assert_eq!(r.unexpected().count(), 0, "{}", r.render());
-        assert_eq!(r.differences.len(), 1, "{}", r.render());
+        let shown: Vec<String> = r.differences.iter().map(|d| d.to_string()).collect();
+        assert_eq!(shown, ["contents: /var/log/userlog"]);
+        assert_eq!(r.unexpected().count(), 0);
         assert!(!scratch.exists(), "scratch removed");
 
         s.put("root/usr/local/bin/jos", b"\x7fELF2");
@@ -550,5 +558,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("not an archive"), "{err:#}");
+
+        // The second extraction fails (calls: id, tar a, tar b).
+        let compare = |m: &MockRunner, scratch: &Path| {
+            compare_tarballs(
+                m,
+                &fs,
+                Path::new("/a.txz"),
+                Path::new("/b.txz"),
+                scratch,
+                false,
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        let err = compare(&MockRunner::new().fail_call(2), &s.0.join("cmp"));
+        assert!(err.contains("tar -xpf /b.txz"), "{err}");
+        // A previous extraction that is not a directory cannot be cleared,
+        // and a scratch directory that is a file cannot hold one.
+        let blocked = s.put("blocked/a", b"");
+        let err = compare(&MockRunner::new(), blocked.parent().unwrap());
+        assert!(err.contains("Not a directory"), "{err}");
+        let err = compare(&MockRunner::new(), &blocked);
+        assert!(err.contains("Not a directory"), "{err}");
+
+        // A dry run extracts nothing and compares nothing.
+        let m = MockRunner::new();
+        let dry = FsOps::new(true);
+        let r = compare_tarballs(&m, &dry, Path::new("/a"), Path::new("/b"), &blocked, true);
+        assert_eq!(r.unwrap().entries, (0, 0));
+        assert_eq!(m.calls().len(), 3);
     }
 }

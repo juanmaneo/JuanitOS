@@ -180,6 +180,15 @@ mod tests {
     }
 
     #[test]
+    fn load_names_the_file_it_cannot_parse() {
+        let path = std::env::temp_dir().join(format!("jos-profile-{}.toml", std::process::id()));
+        std::fs::write(&path, "arch = ").unwrap();
+        let err = Profile::load(&path).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(err.to_string(), format!("parsing {}", path.display()));
+    }
+
+    #[test]
     fn partial_toml_uses_defaults() {
         let p: Profile = toml::from_str("freebsd_version = \"15.0-RELEASE\"\n").unwrap();
         assert_eq!(p.freebsd_version, "15.0-RELEASE");

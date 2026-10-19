@@ -26,20 +26,19 @@ pub const MAP_MAGIC: [u32; 4] = [0x1122_3344, 0x5566_7788, 0x99aa_bbcc, 0xddee_f
 /// Alignment the kernel linker honours.
 pub const PAGE: u64 = 4096;
 
-fn bytes<const N: usize>(b: &[u8], at: u64) -> anyhow::Result<[u8; N]> {
-    let start = usize::try_from(at)?;
-    b.get(start..start.saturating_add(N))
-        .and_then(|s| s.try_into().ok())
-        .ok_or_else(|| anyhow!("truncated ELF file at {at:#x}"))
+/// A file offset as an index (past any slice when it does not fit).
+fn idx(at: u64) -> usize {
+    usize::try_from(at).unwrap_or(usize::MAX)
 }
-fn u16_at(b: &[u8], at: u64) -> anyhow::Result<u16> {
-    Ok(u16::from_le_bytes(bytes(b, at)?))
-}
-fn u32_at(b: &[u8], at: u64) -> anyhow::Result<u32> {
-    Ok(u32::from_le_bytes(bytes(b, at)?))
-}
-fn u64_at(b: &[u8], at: u64) -> anyhow::Result<u64> {
-    Ok(u64::from_le_bytes(bytes(b, at)?))
+
+/// The little-endian integer of `n` bytes at `at`; bytes past the end of
+/// `b` read as 0 (callers bound what they read first).
+fn le(b: &[u8], at: u64, n: usize) -> u64 {
+    b.iter()
+        .skip(idx(at))
+        .take(n)
+        .rev()
+        .fold(0, |v, &c| v << 8 | u64::from(c))
 }
 
 /// A section header of interest: where its fields live in the file.
@@ -59,36 +58,38 @@ fn sections(b: &[u8]) -> anyhow::Result<Vec<Section>> {
         bail!("not an ELF file");
     }
     // EI_CLASS 2 = ELF64, EI_DATA 1 = little endian.
-    if bytes::<2>(b, 4)? != [2, 1] {
+    if b.get(4..6) != Some([2, 1].as_slice()) {
         bail!("not a little-endian ELF64 file");
     }
-    let shoff = u64_at(b, 0x28)?;
-    let shentsize = u64::from(u16_at(b, 0x3a)?);
-    let shnum = u64::from(u16_at(b, 0x3c)?);
-    let shstrndx = u64::from(u16_at(b, 0x3e)?);
+    let shoff = le(b, 0x28, 8);
+    let shentsize = le(b, 0x3a, 2);
+    let shnum = le(b, 0x3c, 2);
+    let shstrndx = le(b, 0x3e, 2);
     if shentsize < 64 {
         bail!("bad section header size {shentsize}");
     }
+    // Every header read below is inside the file (and cannot overflow).
+    if shoff.saturating_add(shnum * shentsize) > b.len() as u64 {
+        bail!("truncated ELF file");
+    }
     let header = |i: u64| shoff + i * shentsize;
-    let strtab = u64_at(b, header(shstrndx) + 0x18)?;
+    let strtab = le(b, header(shstrndx) + 0x18, 8);
     let mut out = Vec::new();
     for i in 0..shnum {
         let h = header(i);
-        let name_at = strtab + u64::from(u32_at(b, h)?);
-        let start = usize::try_from(name_at)?;
         let tail = b
-            .get(start..)
-            .ok_or_else(|| anyhow!("section name out of the file"))?;
+            .get(idx(strtab.saturating_add(le(b, h, 4)))..)
+            .unwrap_or_default();
         let len = tail
             .iter()
             .position(|&c| c == 0)
-            .ok_or_else(|| anyhow!("unterminated section name"))?;
+            .ok_or_else(|| anyhow!("section name not terminated in the file"))?;
         out.push(Section {
             name: String::from_utf8_lossy(tail.get(..len).unwrap_or_default()).into_owned(),
-            offset: u64_at(b, h + 0x18)?,
-            size: u64_at(b, h + 0x20)?,
+            offset: le(b, h + 0x18, 8),
+            size: le(b, h + 0x20, 8),
             align_field: h + 0x30,
-            align: u64_at(b, h + 0x30)?,
+            align: le(b, h + 0x30, 8),
         });
     }
     Ok(out)
@@ -111,18 +112,22 @@ pub fn patch_module(b: &mut [u8]) -> anyhow::Result<u64> {
             map.offset
         );
     }
-    let magic: Vec<u32> = (0..4u64)
-        .map(|i| u32_at(b, map.offset + 4 * i))
-        .collect::<anyhow::Result<_>>()?;
-    if magic != MAP_MAGIC || map.size < 16 {
+    // Past the end of the file the magic reads as zeros.
+    let magic: Vec<u64> = (0..4)
+        .map(|i| le(b, map.offset.saturating_add(4 * i), 4))
+        .collect();
+    if magic != MAP_MAGIC.map(u64::from) || map.size < 16 {
         bail!("{MAP_SECTION} does not start with the Ventoy map magic");
     }
     if map.align > PAGE {
-        let at = usize::try_from(map.align_field)?;
-        let field = b
-            .get_mut(at..at + 8)
-            .ok_or_else(|| anyhow!("truncated ELF file"))?;
-        field.copy_from_slice(&PAGE.to_le_bytes());
+        // Inside the section header table, which is inside the file.
+        for (d, s) in b
+            .iter_mut()
+            .skip(idx(map.align_field))
+            .zip(PAGE.to_le_bytes())
+        {
+            *d = s;
+        }
     }
     Ok(map.offset)
 }
