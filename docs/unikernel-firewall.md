@@ -183,6 +183,16 @@ The same `os = "unikernel"` mechanism suits other single-purpose domains:
 Each is just a different boot image; `jos` does not need to know what runs
 inside.
 
+An idea to keep, only if it proves useful: single-program Linux qubes on
+[LiteBox](https://github.com/microsoft/litebox), a Rust library OS (MIT)
+that runs unmodified Linux binaries against a small host interface. A
+disposable converter or viewer would then boot as a small image instead
+of a full Debian qube. This is not planned work. It needs a LiteBox platform for
+a plain x86_64 bhyve guest (it has none: its platforms are Linux, Windows,
+LVBS and SEV-SNP), stable LiteBox APIs, and a program that actually needs
+the Linux ABI. Single-purpose domains written for JuanitOS, like the
+firewall, stay `no_std` Rust on UEFI.
+
 ## Alternatives considered
 
 - **Hermit (RustyHermit)**: a full Rust unikernel with `std` support. More
