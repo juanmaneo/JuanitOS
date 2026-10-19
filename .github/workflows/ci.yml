@@ -26,9 +26,9 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-audit,cargo-deny
       # Host tools some jos-release tests need (they fail without them).
-      # OVMF: the QEMU tests; mtools: writing into a disk image's ESP
-      # (disk.rs); tar comes with the image.
-      - run: sudo apt-get update && sudo apt-get install -y ovmf mtools
+      # mtools: writing into a disk image's ESP (disk.rs); tar and mkfifo
+      # come with the image.
+      - run: sudo apt-get update && sudo apt-get install -y mtools
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |

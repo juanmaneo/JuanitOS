@@ -245,7 +245,7 @@ a file it does not list (a new one, for instance) must be fully covered.
 The counts are exact, with no slack: coverage has to be deterministic, so
 tests never depend on timing or on which tools the host has (host
 programs are fake ones on `PATH`; the few tests that exercise a real
-tool (`tar` and mtools, in `jos-release`) fail rather than skip when it
+tool (`tar`, `mkfifo` and mtools, in `jos-release`) fail rather than skip when it
 is missing). `--ratchet` lowers the allowances to
 what was just measured and drops files that reach zero. The toolchain is
 pinned in `rust-toolchain.toml`, because another compiler version counts
@@ -357,9 +357,9 @@ second per command, 2 MB of output included, and `jos copy` and
 `jos-copy` ride on it. The channel's second port is the qube's doorbell:
 `jos-copy` rings it and `jos serve` answers at once instead of on its
 next poll (0.4 s end to end with the poll set to 60 s; both templates
-updated). The test suite reaches 97.0% of lines, 96.9% of functions and
-95.5% of regions, gated per file in CI on the way to 100 % (see
-`coverage.toml` for what each file may still leave uncovered).
+updated). The test suite covers 100 % of lines, functions and regions
+in every file, and CI keeps it there: `coverage.toml` allows no file
+any uncovered code.
 
 `jos setup` was then run for real on that dom0 (`--nic` on the
 emulated-IOMMU NIC, no GPU): it built `fbsd15-net`, `sys-net` and
