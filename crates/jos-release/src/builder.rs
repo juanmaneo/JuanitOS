@@ -14,7 +14,6 @@ use juanitos_core::dom0::{self, Dom0Options, Flavor};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::release::{parse_freebsd_manifest, sha256_file, DistManifest, ReleaseInfo};
 use juanitos_core::sys::Runner;
-use juanitos_core::Error;
 
 use crate::profile::Profile;
 use crate::ventoy;
@@ -173,18 +172,14 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// `fetch(1)` on FreeBSD, `curl` elsewhere.
+    /// `fetch(1)` on FreeBSD, `curl` where it cannot be started (a shell
+    /// reports that as status 127).
     fn download(&self, url: &str, dst: &Path) -> anyhow::Result<()> {
         let dst_s = Self::s(dst);
         match self.runner.run("fetch", &["-o", &dst_s, url]) {
             Ok(out) if out.success() => return Ok(()),
-            Ok(out) => {
-                if out.status != Some(127) {
-                    bail!("fetch {url}: {}", out.stderr.trim());
-                }
-            }
-            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            Ok(out) if out.status != Some(127) => bail!("fetch {url}: {}", out.stderr.trim()),
+            _ => {}
         }
         self.runner
             .run_checked("curl", &["-fL", "-o", &dst_s, url])
@@ -203,7 +198,8 @@ impl<'a> Builder<'a> {
     pub fn bins(&self) -> anyhow::Result<()> {
         self.step("Building release binaries");
         let manifest = self.repo.join("Cargo.toml");
-        let rustflags = rustflags_config(&path_remaps(&self.repo, cargo_home().as_deref()));
+        let home = cargo_home(std::env::var_os("CARGO_HOME"), std::env::var_os("HOME"));
+        let rustflags = rustflags_config(&path_remaps(&self.repo, home.as_deref()));
         self.runner.run_checked(
             "cargo",
             &[
@@ -221,7 +217,7 @@ impl<'a> Builder<'a> {
         let target_dir = Self::s(&self.repo.join("target/uefi"));
         for name in UEFI_CRATES {
             let manifest = self.repo.join("crates").join(name).join("Cargo.toml");
-            let out = self.runner.run(
+            let built = self.runner.run_checked(
                 "cargo",
                 &[
                     "build",
@@ -235,9 +231,10 @@ impl<'a> Builder<'a> {
                     "--config",
                     &rustflags,
                 ],
-            )?;
-            if !out.success() {
-                let last = out.stderr.lines().last().unwrap_or("").trim();
+            );
+            if let Err(e) = built {
+                let e = e.to_string();
+                let last = e.lines().last().unwrap_or("").trim();
                 println!(
                     "   warning: {name} not built ({last}); \
                      `rustup target add {UEFI_TARGET}` enables it"
@@ -365,9 +362,9 @@ impl<'a> Builder<'a> {
         self.install_repositories()?;
 
         // pkg needs DNS and /dev inside the chroot (as release/tools/vmimage.subr).
-        if Path::new("/etc/resolv.conf").is_file() {
-            self.fs
-                .copy(Path::new("/etc/resolv.conf"), &root.join("etc/resolv.conf"))?;
+        let resolv = self.installed_root.join("etc/resolv.conf");
+        if resolv.is_file() {
+            self.fs.copy(&resolv, &root.join("etc/resolv.conf"))?;
         }
         let devfs = format!("{root_s}/dev");
         self.runner
@@ -391,25 +388,19 @@ impl<'a> Builder<'a> {
             let run_pkg = |args: &[&str]| {
                 let argv = pkg(args);
                 let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-                self.runner.run("env", &argv)
-            };
-            let run_pkg_checked = |args: &[&str]| {
-                let argv = pkg(args);
-                let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
                 self.runner.run_checked("env", &argv)
             };
-            run_pkg_checked(&["bootstrap", "-y"])?;
-            run_pkg_checked(&["update", "-f"])?;
+            run_pkg(&["bootstrap", "-y"])?;
+            run_pkg(&["update", "-f"])?;
             let mut args = vec!["install", "-y"];
             args.extend(required.iter().copied());
-            run_pkg_checked(&args)?;
+            run_pkg(&args)?;
             for name in &optional {
-                let out = run_pkg(&["install", "-y", name])?;
-                if !out.success() {
+                if run_pkg(&["install", "-y", name]).is_err() {
                     println!("   warning: optional package {name} not installed");
                 }
             }
-            run_pkg_checked(&["clean", "-ay"])?;
+            run_pkg(&["clean", "-ay"])?;
             Ok::<(), anyhow::Error>(())
         })();
 
@@ -430,8 +421,9 @@ impl<'a> Builder<'a> {
                 );
             }
             let dst = root.join("usr/local/bin").join(bin);
-            self.fs.copy(&src, &dst)?;
-            self.fs.chmod(&dst, 0o755)?;
+            self.fs
+                .copy(&src, &dst)
+                .and_then(|()| self.fs.chmod(&dst, 0o755))?;
         }
 
         for (path, content, exec) in dom0::static_files() {
@@ -478,23 +470,27 @@ impl<'a> Builder<'a> {
             self.install_source()?;
         }
 
-        let info = self.release_info()?;
-        self.fs.write(
-            &root.join(dom0::RELEASE_INFO_PATH.trim_start_matches('/')),
-            &info.to_toml()?,
-        )?;
+        let path = root.join(dom0::RELEASE_INFO_PATH.trim_start_matches('/'));
+        self.release_info()
+            .to_toml()
+            .and_then(|text| self.fs.write(&path, &text))?;
         Ok(())
     }
 
     /// The kernel splash: the boot card with the first two stages lit,
-    /// which is exactly what `jos-boot` left on the screen.
+    /// which is exactly what `jos-boot` left on the screen. The picture
+    /// never changes, so it is rendered once per process.
     fn install_splash(&self) -> anyhow::Result<()> {
+        static PNG: std::sync::OnceLock<Result<Vec<u8>, jos_gfx::png::PngError>> =
+            std::sync::OnceLock::new();
         let dst = self
             .rootfs()
             .join(dom0::BOOT_SPLASH_PNG.trim_start_matches('/'));
-        let png = jos_gfx::png::encode(&kernel_splash_card())?;
-        self.fs.write_bytes(&dst, &png)?;
-        Ok(())
+        PNG.get_or_init(|| jos_gfx::png::encode(&kernel_splash_card()))
+            .as_ref()
+            .map_err(ToString::to_string)
+            .map_err(anyhow::Error::msg)
+            .and_then(|png| self.fs.write_bytes(&dst, png).map_err(Into::into))
     }
 
     /// Copy this repository into the root (for stage 2: building JuanitOS
@@ -534,7 +530,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Stamp: what was built, where, and which bootstrap stage this is.
-    pub fn release_info(&self) -> anyhow::Result<ReleaseInfo> {
+    pub fn release_info(&self) -> ReleaseInfo {
         let p = self.profile;
         let previous = self
             .installed_root
@@ -564,7 +560,7 @@ impl<'a> Builder<'a> {
             .map(|o| o.stdout.trim().to_string())
             .filter(|s| !s.is_empty());
         let (required, optional) = p.package_sets();
-        Ok(ReleaseInfo {
+        ReleaseInfo {
             version: p.version.clone(),
             freebsd_version: p.freebsd_version.clone(),
             arch: p.arch.clone(),
@@ -578,7 +574,7 @@ impl<'a> Builder<'a> {
                 .collect(),
             git_rev,
             rustc,
-        })
+        }
     }
 
     // ------------------------------------------------------------------
@@ -606,15 +602,11 @@ impl<'a> Builder<'a> {
             ],
         )?;
         if self.fs.dry_run && !tarball.is_file() {
-            self.fs.write(&self.manifest(), "")?;
-            return Ok(());
+            return self.fs.write(&self.manifest(), "").map_err(Into::into);
         }
+        let len = std::fs::metadata(&tarball)?.len();
         let mut m = DistManifest::default();
-        m.add(
-            sha256_file(&tarball)?,
-            std::fs::metadata(&tarball)?.len(),
-            dom0::DIST_TARBALL.to_string(),
-        );
+        m.add(sha256_file(&tarball)?, len, dom0::DIST_TARBALL.to_string());
         self.fs.write(&self.manifest(), &m.render())?;
         println!("   {}", m.render().trim_end());
         Ok(())
@@ -1012,11 +1004,14 @@ fn motd(p: &Profile) -> String {
     )
 }
 
-/// `$CARGO_HOME`, else `~/.cargo`.
-fn cargo_home() -> Option<PathBuf> {
-    std::env::var_os("CARGO_HOME")
+/// `$CARGO_HOME`, else `~/.cargo`, from those two variables.
+fn cargo_home(
+    cargo_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    cargo_home
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".cargo")))
 }
 
 /// `--remap-path-prefix` pairs that make the binaries independent of where
@@ -1296,7 +1291,7 @@ mod tests {
             boot_efi: None,
             installed_root: PathBuf::from("/nonexistent"),
         };
-        let info = b.release_info().unwrap();
+        let info = b.release_info();
         // The test host is not a JuanitOS dom0.
         assert_eq!(info.built_on, "freebsd");
         assert_eq!(info.stage, 1);
@@ -1392,30 +1387,6 @@ mod tests {
         }
     }
 
-    /// `fetch(1)` is missing on Linux: the runner reports the program as
-    /// not found, or a shell says 127.
-    struct NoFetch {
-        inner: MockRunner,
-        kind: std::io::ErrorKind,
-    }
-
-    impl Runner for NoFetch {
-        fn run(&self, program: &str, args: &[&str]) -> juanitos_core::Result<CmdOutput> {
-            if program == "fetch" {
-                return Err(Error::Io(std::io::Error::new(self.kind, "fetch")));
-            }
-            self.inner.run(program, args)
-        }
-        fn run_with_input(
-            &self,
-            program: &str,
-            args: &[&str],
-            _input: &str,
-        ) -> juanitos_core::Result<CmdOutput> {
-            self.run(program, args)
-        }
-    }
-
     #[test]
     fn downloads_fall_back_from_fetch_to_curl() {
         let profile = Profile::default();
@@ -1433,13 +1404,11 @@ mod tests {
             ]
         );
 
-        let missing = NoFetch {
-            inner: MockRunner::new(),
-            kind: std::io::ErrorKind::NotFound,
-        };
-        let b = real_builder(&missing, &profile, Path::new("/nonexistent"));
+        // fetch(1) is missing on Linux: the runner cannot start it.
+        let m = MockRunner::new().missing("fetch");
+        let b = real_builder(&m, &profile, Path::new("/nonexistent"));
         b.download("https://m/MANIFEST", dst).unwrap();
-        assert_eq!(missing.inner.calls(), vec![curl.to_string()]);
+        assert_eq!(m.calls()[1..], [curl.to_string()]);
 
         // fetch exists but the download failed: no second try with curl.
         let m = MockRunner::new().respond("fetch", &[], CmdOutput::failed(1, "404 Not Found"));
@@ -1447,14 +1416,6 @@ mod tests {
         let err = b.download("https://m/MANIFEST", dst).unwrap_err();
         assert!(err.to_string().contains("404 Not Found"), "{err}");
         assert_eq!(m.calls().len(), 1);
-
-        let denied = NoFetch {
-            inner: MockRunner::new(),
-            kind: std::io::ErrorKind::PermissionDenied,
-        };
-        let b = real_builder(&denied, &profile, Path::new("/nonexistent"));
-        assert!(b.download("https://m/MANIFEST", dst).is_err());
-        assert!(denied.inner.calls().is_empty());
 
         let m = MockRunner::new()
             .respond("fetch", &[], CmdOutput::failed(127, ""))
@@ -1989,6 +1950,14 @@ mod tests {
             None
         );
         assert_eq!(etdump_efi_entry(""), None);
+        for broken in [
+            "et_system=i386;et_lba=1;et_sectors=4",
+            "et_platform=efi;et_sectors=4",
+            "et_platform=efi;et_lba=1",
+            "et_platform=efi;et_lba=1;et_sectors=x",
+        ] {
+            assert_eq!(etdump_efi_entry(broken), None, "{broken}");
+        }
         let uefi_only = hybrid_args(
             Path::new("/r/boot/pmbr"),
             None,
@@ -2004,6 +1973,348 @@ mod tests {
     }
 
     #[test]
+    fn cargo_home_falls_back_on_home() {
+        let home =
+            |c: Option<&str>, h: Option<&str>| cargo_home(c.map(Into::into), h.map(Into::into));
+        assert_eq!(home(Some("/c"), Some("/h")), Some(PathBuf::from("/c")));
+        assert_eq!(home(None, Some("/h")), Some(PathBuf::from("/h/.cargo")));
+        assert_eq!(home(None, None), None);
+    }
+
+    /// Every host command of a whole dry-run build fails once, in turn: a
+    /// required one stops the build with its error, a best-effort one
+    /// (UEFI builds, optional packages, kernel modules, the release
+    /// stamp's `git` and `rustc`, cleanup) does not.
+    #[test]
+    fn every_failing_command_stops_the_build_or_is_best_effort() {
+        let s = Scratch::new("walk");
+        for name in [VENTOY_MODULE, dom0::BOOTWATCH_MODULE] {
+            s.put(&format!("repo/freebsd/{name}/Makefile"), b"");
+        }
+        let profile = Profile::default();
+        let (_, optional) = profile.package_sets();
+        let build = |m: &MockRunner| {
+            Builder {
+                fs: FsOps::new(true),
+                ..real_builder(m, &profile, &s.0)
+            }
+            .all()
+        };
+        let best_effort = |call: &str| {
+            call.contains(UEFI_TARGET)
+                || [
+                    "umount ", "kldxref ", "git ", "rustc ", "make ", "fetch ", "tar -xf ",
+                ]
+                .iter()
+                .any(|p| call.starts_with(p))
+                || optional
+                    .iter()
+                    .any(|o| call.ends_with(&format!(" install -y {o}")))
+        };
+        let clean = MockRunner::new();
+        build(&clean).unwrap();
+        for (n, call) in clean.calls().iter().enumerate() {
+            let m = MockRunner::new().fail_call(n);
+            match build(&m) {
+                Ok(()) => assert!(best_effort(call), "{call}: failure ignored"),
+                Err(e) => assert!(format!("{e:#}").contains("mock failure"), "{call}: {e:#}"),
+            }
+        }
+    }
+
+    /// Files and empty directories under `dir`, relative to it, each with
+    /// whether it is a directory. A missing `dir` is empty.
+    fn tree(dir: &Path) -> std::collections::BTreeMap<PathBuf, bool> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![PathBuf::new()];
+        while let Some(rel) = stack.pop() {
+            let entries: Vec<PathBuf> = std::fs::read_dir(dir.join(&rel))
+                .into_iter()
+                .flatten()
+                .map(|e| rel.join(e.unwrap().file_name()))
+                .collect();
+            if entries.is_empty() {
+                out.insert(rel, true);
+            }
+            for e in entries {
+                if dir.join(&e).is_dir() {
+                    stack.push(e);
+                } else {
+                    out.insert(e, false);
+                }
+            }
+        }
+        out
+    }
+
+    /// Run `step` on what `setup` prepares in `dir`, then once more for
+    /// every file and empty directory it created there, with something in
+    /// the way: a directory where it writes a file, a file where it makes a
+    /// directory. Returns the paths whose obstacle the step got past.
+    fn obstacles(
+        dir: &Path,
+        setup: &dyn Fn(),
+        step: &dyn Fn() -> anyhow::Result<()>,
+    ) -> Vec<PathBuf> {
+        let reset = || {
+            let _ = std::fs::remove_dir_all(dir);
+            setup();
+        };
+        reset();
+        let before = tree(dir);
+        step().unwrap();
+        let created: Vec<(PathBuf, bool)> = tree(dir)
+            .into_iter()
+            .filter(|(p, _)| !before.contains_key(p))
+            .collect();
+        assert!(!created.is_empty());
+        let mut passed = Vec::new();
+        for (rel, is_dir) in created {
+            reset();
+            let p = dir.join(&rel);
+            if is_dir {
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"").unwrap();
+            } else {
+                std::fs::create_dir_all(&p).unwrap();
+            }
+            if step().is_ok() {
+                passed.push(rel);
+            }
+        }
+        passed
+    }
+
+    #[test]
+    fn installing_juanitos_stops_at_anything_in_its_way() {
+        let s = Scratch::new("in-the-way");
+        let profile = Profile {
+            source: Source {
+                include: false,
+                vendor: false,
+            },
+            ..Profile::default()
+        };
+        for bin in dom0::BINARIES {
+            s.put(&format!("bins/{bin}"), b"elf");
+        }
+        s.put("repo/freebsd/jos_bootwatch/Makefile", b"");
+        s.put("repo/freebsd/jos_bootwatch/jos_bootwatch.ko", b"\x7fELF");
+        s.put("root/usr/src/sys/conf/kmod.mk", b"");
+        let m = MockRunner::new();
+        let b = Builder {
+            firewall_image: Some(s.put("fw.img", b"fw")),
+            boot_efi: Some(s.put("boot.efi", b"efi")),
+            ..real_builder(&m, &profile, &s.0)
+        };
+        let passed = obstacles(&b.rootfs(), &|| {}, &|| b.install_juanitos());
+        // Only the boot watch is best effort.
+        assert_eq!(
+            passed,
+            [
+                PathBuf::from("boot/loader.conf.d/jos_bootwatch.conf"),
+                PathBuf::from("boot/modules/jos_bootwatch.ko"),
+            ]
+        );
+    }
+
+    #[test]
+    fn installing_packages_stops_at_anything_in_its_way() {
+        let s = Scratch::new("pkg-in-the-way");
+        let mut profile = Profile::default();
+        profile.packages.repo = "latest".into();
+        profile.packages.local_repo = Some("cosmic".into());
+        s.put("repo/cosmic/packagesite.pkg", b"catalogue");
+        s.put("root/etc/resolv.conf", b"nameserver 192.0.2.1\n");
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let passed = obstacles(&b.rootfs(), &|| {}, &|| b.install_packages());
+        assert_eq!(passed, Vec::<PathBuf>::new());
+        assert!(m
+            .calls()
+            .contains(&format!("umount {}/dev", unix(&b.rootfs()))));
+    }
+
+    #[test]
+    fn building_the_iso_stops_at_anything_in_its_way() {
+        let s = Scratch::new("iso-in-the-way");
+        let profile = Profile::default();
+        s.put("repo/freebsd/geom_ventoy/Makefile", b"");
+        s.put(
+            "repo/freebsd/geom_ventoy/geom_ventoy.ko",
+            &crate::ventoy::tests::fake_module(0x10000, 65536, true),
+        );
+        s.put("root/usr/src/sys/conf/kmod.mk", b"");
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let setup = || {
+            s.put("work/juanitos-dom0.txz", b"tarball");
+            s.put("work/MANIFEST", b"manifest");
+            s.put(&format!("work/rootfs{}", dom0::LOADER_EFI), b"loader");
+            s.put(&format!("work/{}", profile.iso_name()), b"iso9660");
+        };
+        let passed = obstacles(&b.work, &setup, &|| b.iso_build());
+        // The ESP and the module build start from an empty directory, and
+        // Geom Ventoy is best effort.
+        let passed: Vec<String> = passed.iter().map(|p| unix(p)).collect();
+        assert_eq!(
+            passed,
+            [
+                "efiboot/EFI/BOOT/BOOTX64.EFI",
+                "efiboot/EFI/FREEBSD/LOADER.EFI",
+                "geom_ventoy/Makefile",
+                "geom_ventoy/geom_ventoy.ko",
+                "rootfs/boot/kernel/geom_ventoy.ko",
+            ]
+        );
+    }
+
+    /// What the obstacle walk cannot reach: steps that start by removing
+    /// their output, and inputs that are missing or unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn steps_report_what_blocks_them() {
+        let s = Scratch::new("blocked");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let fails = |step: &dyn Fn() -> anyhow::Result<()>| {
+            assert!(step().is_err());
+            std::fs::remove_dir_all(&b.work).unwrap();
+        };
+
+        // fetch: no directory for the sets; the MANIFEST was not fetched.
+        s.put("work/dist", b"");
+        fails(&|| b.fetch());
+        s.put("work/dist/base.txz", b"base");
+        fails(&|| b.fetch());
+
+        // The firewall image: its scratch directory, an unreadable input.
+        let efi = b.uefi_release_dir().join("jos-firewall.efi");
+        s.put("work/fwimg", b"");
+        std::fs::create_dir_all(efi.parent().unwrap()).unwrap();
+        std::fs::write(&efi, b"efi").unwrap();
+        fails(&|| b.firewall_image_build());
+        set_mode(&efi, 0o000);
+        let unreadable = b.firewall_image_build();
+        set_mode(&efi, 0o644);
+        assert!(unreadable.is_err());
+
+        // The root: a file where it goes, or where its parent goes.
+        s.put("work/rootfs", b"");
+        fails(&|| b.rootfs_build());
+        s.put("work", b"");
+        assert!(b.rootfs_build().is_err());
+        std::fs::remove_file(&b.work).unwrap();
+
+        // The source copy: its destination, its parent, the cargo config.
+        s.put("repo/Cargo.toml", b"[workspace]\n");
+        s.put("work/rootfs/usr/local/src/juanitos", b"");
+        fails(&|| b.install_source());
+        s.put("work/rootfs/usr/local/src", b"");
+        fails(&|| b.install_source());
+        std::fs::create_dir_all(s.0.join("repo/.cargo/config.toml")).unwrap();
+        fails(&|| b.install_source());
+
+        // pack: no tarball, a directory instead, nowhere for the MANIFEST.
+        std::fs::create_dir_all(&b.work).unwrap();
+        fails(&|| b.pack());
+        std::fs::create_dir_all(b.tarball()).unwrap();
+        fails(&|| b.pack());
+        s.put("work/juanitos-dom0.txz", b"tarball");
+        std::fs::create_dir_all(b.manifest()).unwrap();
+        fails(&|| b.pack());
+
+        // The ISO: its ESP directory, FreeBSD's loader, the image itself.
+        let iso_inputs = || {
+            s.put("work/juanitos-dom0.txz", b"tarball");
+            s.put("work/MANIFEST", b"manifest");
+        };
+        iso_inputs();
+        s.put(&format!("work/rootfs{}", dom0::LOADER_EFI), b"loader");
+        s.put("work/efiboot", b"");
+        fails(&|| b.iso_build());
+        iso_inputs();
+        fails(&|| b.iso_build());
+        iso_inputs();
+        s.put(&format!("work/rootfs{}", dom0::LOADER_EFI), b"loader");
+        fails(&|| b.iso_build());
+    }
+
+    #[cfg(unix)]
+    fn set_mode(p: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn kernel_modules_report_what_blocks_them() {
+        let s = Scratch::new("kmod-blocked");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let src_entry = || {
+            let src = s.put("work/dist/src.txz", b"sources");
+            let entry = format!(
+                "src.txz\t{}\t1\tsrc\t\"Source\"\toff\n",
+                sha256_file(&src).unwrap()
+            );
+            s.put("work/dist/MANIFEST", entry.as_bytes());
+        };
+
+        // Kernel sources: no directory for the set; a MANIFEST but no set
+        // (nothing is really downloaded); nowhere to extract.
+        s.put("work/dist", b"");
+        assert!(b.kernel_sources().is_err());
+        std::fs::remove_file(b.dist_dir()).unwrap();
+        s.put("work/dist/MANIFEST", b"");
+        assert!(b.kernel_sources().is_err());
+        assert!(m.calls().last().unwrap().ends_with("/src.txz"));
+        src_entry();
+        s.put("work/src", b"");
+        assert!(b.kernel_sources().is_err());
+        std::fs::remove_dir_all(&b.work).unwrap();
+
+        // A module: the sources fail, its build directory, its parent,
+        // the module it should have produced.
+        let name = dom0::BOOTWATCH_MODULE;
+        s.put(&format!("repo/freebsd/{name}/Makefile"), b"");
+        s.put("work/dist", b"");
+        assert!(b.build_kmod(name).is_err());
+        std::fs::remove_dir_all(&b.work).unwrap();
+        s.put("root/usr/src/sys/conf/kmod.mk", b"");
+        s.put(&format!("work/{name}"), b"");
+        assert!(b.build_kmod(name).is_err());
+        std::fs::remove_dir_all(&b.work).unwrap();
+        s.put("work", b"");
+        assert!(b.build_kmod(name).is_err());
+        std::fs::remove_file(&b.work).unwrap();
+        let err = b.build_kmod(name).unwrap_err();
+        assert!(format!("{err:#}").contains("No such file"), "{err:#}");
+    }
+
+    #[test]
+    fn the_hybrid_boot_area_reports_what_blocks_it() {
+        let s = Scratch::new("hybrid-blocked");
+        let profile = Profile::default();
+        let m = MockRunner::new().respond(
+            "etdump",
+            &[],
+            CmdOutput::ok("et_platform=efi;et_system=i386;et_lba=20;et_sectors=4\n"),
+        );
+        let b = real_builder(&m, &profile, &s.0);
+        let root = b.rootfs();
+        s.put(&format!("work/rootfs{}", dom0::PMBR), b"pmbr");
+        let iso = b.iso();
+        // The ISO makefs should have written is not there.
+        assert!(b.make_hybrid(&root, &iso, false).is_err());
+        // Something left where the boot area is staged.
+        s.put(&format!("work/{}", profile.iso_name()), b"iso9660");
+        std::fs::create_dir_all(s.0.join("work/hybrid.img")).unwrap();
+        assert!(b.make_hybrid(&root, &iso, false).is_err());
+    }
+
+    #[test]
     fn a_dom0_rebuilding_itself_is_the_next_stage() {
         let s = Scratch::new("stage");
         let profile = Profile::default();
@@ -2015,7 +2326,7 @@ mod tests {
                 CmdOutput::ok("rustc 1.99.0 (b940084d7 2026-09-28)\n"),
             );
         let b = real_builder(&m, &profile, &s.0);
-        let first = b.release_info().unwrap();
+        let first = b.release_info();
         assert_eq!((first.built_on.as_str(), first.stage), ("freebsd", 1));
         assert_eq!(first.git_rev.as_deref(), Some("f826e4e"));
         assert_eq!(
@@ -2027,14 +2338,14 @@ mod tests {
             &format!("root/{}", dom0::RELEASE_INFO_PATH.trim_start_matches('/')),
             first.to_toml().unwrap().as_bytes(),
         );
-        let second = b.release_info().unwrap();
+        let second = b.release_info();
         assert_eq!((second.built_on.as_str(), second.stage), ("juanitos", 2));
 
         // Not a git checkout (a release tarball): no revision recorded.
         let m =
             MockRunner::new().respond("git", &[], CmdOutput::failed(128, "not a git repository"));
         let b = real_builder(&m, &profile, &s.0);
-        let info = b.release_info().unwrap();
+        let info = b.release_info();
         assert_eq!(info.git_rev, None);
         // The mock's rustc printed nothing.
         assert_eq!(info.rustc, None);
