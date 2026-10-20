@@ -1,0 +1,62 @@
+When cosmic-comp exits before it is ready (no display, no usable GPU),
+cosmic-session waits for its environment forever: the exit is reported on
+the session channel, which is only read once the session is up. The
+desktop never comes back to the login screen and the user sees nothing.
+Watch the channel while waiting, and exit with an error instead (a
+restart would fail the same way) so the greeter can show the log.
+Applied to cosmic-session by tools/dev/cosmic-build.sh patch.
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -108,6 +108,12 @@
+ 			Ok(Status::Restarted) => {
+ 				info!("Restarting");
+ 			}
++			Ok(Status::Failed) => {
++				// Restarting would only fail the same way, so fail the session.
++				return Err(color_eyre::eyre::eyre!(
++					"the compositor exited before it was ready"
++				));
++			}
+ 			Err(error) => {
+ 				error!("Restarting after error: {:?}", error);
+ 			}
+@@ -122,6 +128,8 @@
+ pub enum Status {
+ 	Restarted,
+ 	Exited,
++	/// The compositor ended before it was ready: nothing to restart.
++	Failed,
+ }
+ 
+ async fn start(
+@@ -165,11 +173,25 @@
+ 	)
+ 	.wrap_err("failed to start compositor")?;
+ 
+-	let mut env_vars = env_rx
+-		.await
+-		.expect("failed to receive environmental variables")
+-		.into_iter()
+-		.collect::<Vec<_>>();
++	// The compositor's exit handler reports on the session channel, which is
++	// not read until the session is up: without watching it here, a
++	// compositor that fails to start (no display, no GPU) leaves the
++	// session waiting for its environment forever.
++	let compositor_env = tokio::select! {
++		env = env_rx => env.expect("failed to receive environmental variables"),
++		request = session_rx.recv() => {
++			compositor_handle.abort();
++			token.cancel();
++			return Ok(match request {
++				Some(service::SessionRequest::Exit) => Status::Exited,
++				_ => {
++					error!("the compositor exited before it was ready");
++					Status::Failed
++				}
++			});
++		}
++	};
++	let mut env_vars = compositor_env.into_iter().collect::<Vec<_>>();
+ 	info!(
+ 		"got environmental variables from cosmic-comp: {:?}",
+ 		env_vars

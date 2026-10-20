@@ -114,6 +114,7 @@ does not verify after download):
 | `libdisplay-info-sys` | accept libdisplay-info 0.4 (FreeBSD ships 0.4.0; the 0.3 API is a subset) |
 | libcosmic (iced fork) | drop a stale BSD-only block with an old winit API, give the BSDs the Linux Wayland code paths; older pinned revisions gate everything Wayland on `target_os = "linux"` and are rewritten wholesale |
 | `cosmic-panel` | abstract unix sockets for the security context are Linux-only; a socket file under `XDG_RUNTIME_DIR` elsewhere |
+| `cosmic-session` | not FreeBSD-specific: it waits forever for the compositor's environment when `cosmic-comp` exits first (no display or GPU), so the greeter never gets the exit status; it now exits with an error |
 | `cosmic-applets` | the bluetooth applet (bluer) is Linux-only |
 | `pop-launcher` | pidfd is Linux-only (tokio's `Child::wait` instead); plugins and config under `/usr/local` |
 | `pipewire`, `pipewire-sys` | FreeBSD renames `pw_init` to `pipewire_init` (libc has a `pw_init`); the bindgen allowlist missed it |
@@ -178,8 +179,10 @@ Verified in the FreeBSD 15.1 build VM (QEMU VGA, efifb 1280×800):
 "Login incorrect"; the right one runs the session as the user (uid,
 `video` group, umask 022, home, the environment above,
 `/var/run/user/<uid>` mode 700) on VT 9 with its output in the log; a
-missing `start-cosmic` comes back as "COSMIC exited with status 127";
-after a session the greeter redraws and says the user logged out; root
+missing `start-cosmic` comes back as "COSMIC exited with status 127"; a
+session whose compositor cannot start (no KMS device) ends with status 1
+and `the compositor exited before it was ready` in the log, where it used
+to hang; after a session the greeter redraws and says the user logged out; root
 and unknown users are refused (`jos-greet try-login --user NAME --
 COMMAND` exercises PAM and the session setup without the screen). The
 COSMIC session itself still needs real hardware, as above.

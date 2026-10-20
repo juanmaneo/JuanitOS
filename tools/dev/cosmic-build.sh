@@ -245,6 +245,7 @@ cmd_patch() {
 	# Linux-only APIs with a portable alternative.
 	patches=$here/cosmic-patches
 	apply_patch "$src/cosmic-panel" "$patches/cosmic-panel-freebsd-security-context.patch"
+	apply_patch "$src/cosmic-session" "$patches/cosmic-session-exit-before-ready.patch"
 	apply_patch "$src/cosmic-applets" "$patches/cosmic-applets-freebsd-no-bluetooth.patch"
 	apply_patch "$src/pop-launcher" "$patches/pop-launcher-freebsd-no-pidfd.patch"
 	for d in "$HOME"/.cargo/registry/src/*/pipewire-0.10.*; do
