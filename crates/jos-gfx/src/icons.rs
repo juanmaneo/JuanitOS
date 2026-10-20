@@ -5,6 +5,8 @@
 //! in a menu. Icons are drawn in a single colour: lit icons use the accent
 //! colour, dormant ones the dim grey.
 
+use alloc::vec::Vec;
+
 use crate::color::Rgba;
 use crate::image::{Gap, Image, Rect};
 
@@ -118,6 +120,42 @@ pub fn draw_logo(img: &mut Image, cx: i32, cy: i32, radius: i32, ring: Rgba, cub
     }
 }
 
+/// The mouse pointer, an arrow 20 units high, as a polygon (y down).
+const POINTER: [(f32, f32); 7] = [
+    (0.0, 0.0),
+    (0.0, 17.0),
+    (4.4, 13.1),
+    (7.3, 19.6),
+    (10.3, 18.3),
+    (7.5, 12.0),
+    (12.5, 12.0),
+];
+
+/// The same arrow inset by 1.15 units: the white fill inside the black
+/// outline.
+const POINTER_FILL: [(f32, f32); 7] = [
+    (1.15, 2.7),
+    (1.15, 14.44),
+    (4.81, 11.2),
+    (7.89, 18.09),
+    (8.78, 17.71),
+    (5.73, 10.85),
+    (9.64, 10.85),
+];
+
+/// Draw the mouse pointer with its tip at (x, y), `scale` pixels per unit
+/// (about 20 * `scale` pixels high).
+pub fn draw_pointer(img: &mut Image, x: i32, y: i32, scale: f32) {
+    let place = |shape: &[(f32, f32)]| -> Vec<(f32, f32)> {
+        shape
+            .iter()
+            .map(|&(u, v)| (x as f32 + u * scale, y as f32 + v * scale))
+            .collect()
+    };
+    img.fill_polygon(&place(&POINTER), Rgba::rgb(0, 0, 0));
+    img.fill_polygon(&place(&POINTER_FILL), Rgba::rgb(255, 255, 255));
+}
+
 /// `(sin, cos)` without libm, via a short Taylor series after range
 /// reduction. Accurate to ~1e-4 on the reduced range.
 pub fn sin_cos(a: f32) -> (f32, f32) {
@@ -181,6 +219,21 @@ mod tests {
         assert!(close(s, -0.866) && close(c, -0.5), "{s} {c}");
         let (s, c) = sin_cos(-4.0 * PI / 3.0);
         assert!(close(s, 0.866) && close(c, -0.5), "{s} {c}");
+    }
+
+    #[test]
+    fn the_pointer_is_white_in_black_from_its_tip() {
+        let grey = Rgba::rgb(90, 90, 90);
+        let mut img = Image::new(40, 40, grey);
+        draw_pointer(&mut img, 10, 5, 1.0);
+        assert_eq!(img.get(9, 4), Some(grey), "nothing left of / above the tip");
+        assert_eq!(img.get(12, 14), Some(Rgba::rgb(255, 255, 255)));
+        assert_eq!(img.get(10, 12), Some(BG), "outline");
+        assert_eq!(img.get(30, 30), Some(grey));
+        // Twice the scale reaches twice as far down.
+        let mut big = Image::new(40, 60, grey);
+        draw_pointer(&mut big, 0, 0, 2.0);
+        assert_ne!(big.get(1, 32), Some(grey));
     }
 
     #[test]

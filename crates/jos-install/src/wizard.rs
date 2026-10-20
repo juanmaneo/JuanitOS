@@ -226,6 +226,19 @@ pub enum Action {
     Exit,
 }
 
+/// What a mouse click landed on (found by `ui::Hits::target`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// A button or a checkbox.
+    Widget(Widget),
+    /// A text field, and the character the caret goes before.
+    Caret(Widget, usize),
+    /// A row of the disk list.
+    Disk(usize),
+    /// A row of the passthrough list.
+    Device(usize),
+}
+
 #[derive(Debug, Clone)]
 pub struct Wizard {
     pub page: Page,
@@ -584,6 +597,36 @@ impl Wizard {
                         _ => {}
                     }
                 }
+            }
+        }
+        Action::None
+    }
+
+    /// Handle a click: focus what was clicked, then press the button,
+    /// tick the box, place the caret or select the row (a device row is
+    /// ticked too). Something not on the current page is ignored.
+    pub fn click(&mut self, target: Target) -> Action {
+        let widget = match target {
+            Target::Widget(w) | Target::Caret(w, _) => w,
+            Target::Disk(_) => Widget::Disks,
+            Target::Device(_) => Widget::Devices,
+        };
+        let Some(focus) = self.widgets().iter().position(|&w| w == widget) else {
+            return Action::None;
+        };
+        self.focus = focus;
+        self.error = None;
+        match target {
+            Target::Widget(w) => return self.activate(w),
+            Target::Caret(w, at) => {
+                if let Some(f) = self.field_mut(w) {
+                    f.cursor = at.min(f.len());
+                }
+            }
+            Target::Disk(i) => self.disk_index = i,
+            Target::Device(i) => {
+                self.device_index = i;
+                self.toggle_device();
             }
         }
         Action::None
@@ -1108,6 +1151,59 @@ mod tests {
         empty.toggle_device();
         assert!(empty.reserved.is_empty());
         assert!(empty.plan().pptdevs.is_empty());
+    }
+
+    #[test]
+    fn clicks_focus_and_activate_what_they_land_on() {
+        let mut w = wizard();
+        // Buttons are pressed.
+        assert_eq!(w.click(Target::Widget(Widget::Next)), Action::None);
+        assert_eq!(w.page, Page::Hardware);
+        w.click(Target::Widget(Widget::Next));
+        assert_eq!(w.page, Page::Disk);
+        // A disk row is selected and focused, the list is not left.
+        w.handle(Key::Tab);
+        w.click(Target::Disk(1));
+        assert_eq!((w.disk_index, w.focused()), (1, Some(Widget::Disks)));
+        assert_eq!(w.page, Page::Disk);
+        // Things that are not on this page are ignored.
+        assert_eq!(w.click(Target::Device(0)), Action::None);
+        assert_eq!(w.click(Target::Widget(Widget::Reboot)), Action::None);
+        assert_eq!(w.focused(), Some(Widget::Disks));
+
+        // A field gets the caret where it was clicked, clamped to its text.
+        w.goto(Page::Users);
+        typ(&mut w, "alice");
+        w.error = Some("stale".into());
+        w.click(Target::Caret(Widget::UserName, 3));
+        assert_eq!(w.focused(), Some(Widget::UserName));
+        assert_eq!(w.error, None);
+        w.click(Target::Caret(Widget::RootPw, 2));
+        assert_eq!(w.root_pw.cursor, 2);
+        w.handle(Key::Char('-'));
+        assert_eq!(w.root_pw.value, "al-ice");
+        w.click(Target::Caret(Widget::RootPw, 99));
+        assert_eq!(w.root_pw.cursor, 6);
+        // A caret on something that is not a field only focuses it.
+        w.click(Target::Caret(Widget::Back, 1));
+        assert_eq!(w.focused(), Some(Widget::Back));
+
+        // A device row is selected and ticked.
+        w.goto(Page::Passthrough);
+        let bob = w.devices[3].addr;
+        assert!(!w.is_reserved(bob));
+        w.click(Target::Device(3));
+        assert_eq!(w.device_index, 3);
+        assert!(w.is_reserved(bob));
+
+        // Checkboxes are ticked, Quit leaves.
+        w.goto(Page::System);
+        let desktop = w.desktop;
+        w.click(Target::Widget(Widget::Desktop));
+        assert_eq!(w.desktop, !desktop);
+        assert_eq!(w.focused(), Some(Widget::Desktop));
+        w.goto(Page::Welcome);
+        assert_eq!(w.click(Target::Widget(Widget::Quit)), Action::Exit);
     }
 
     #[test]

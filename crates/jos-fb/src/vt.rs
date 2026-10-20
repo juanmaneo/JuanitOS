@@ -22,7 +22,11 @@ use std::path::Path;
 use anyhow::{bail, Context};
 use jos_gfx::Image;
 
+use crate::mouse::{self, Mouse};
 use crate::{ioc, pack_row, Display, RgbOffsets};
+
+/// Where `moused` publishes every mouse and touchpad.
+pub const SYSMOUSE: &str = "/dev/sysmouse";
 
 /// `struct fbtype` from `sys/fbio.h`.
 #[repr(C)]
@@ -63,6 +67,7 @@ pub struct VtDisplay {
     saved_flags: libc::c_int,
     row_buf: Vec<u8>,
     console_restored: bool,
+    mouse: Option<File>,
 }
 
 fn ioctl_int(fd: libc::c_int, req: u32, value: libc::c_int, what: &str) -> anyhow::Result<()> {
@@ -187,7 +192,20 @@ impl VtDisplay {
             saved_flags,
             row_buf: vec![0u8; stride],
             console_restored: false,
+            mouse: None,
         })
+    }
+
+    /// Start reading the mouse from `/dev/sysmouse` (fails when `moused`
+    /// is not running, which leaves the keyboard-only installer intact).
+    pub fn enable_mouse(&mut self) -> anyhow::Result<()> {
+        let dev = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(SYSMOUSE)
+            .with_context(|| format!("opening {SYSMOUSE}"))?;
+        self.mouse = Some(dev);
+        Ok(())
     }
 
     fn fd(&self) -> libc::c_int {
@@ -269,6 +287,18 @@ impl Display for VtDisplay {
         match self.tty.read(&mut b) {
             Ok(1) => b.first().copied(),
             _ => None,
+        }
+    }
+
+    fn poll_mouse(&mut self) -> Vec<Mouse> {
+        let Some(dev) = self.mouse.as_mut() else {
+            return Vec::new();
+        };
+        // sysmouse(4) hands out whole packets only.
+        let mut buf = [0u8; mouse::PACKET * 64];
+        match dev.read(&mut buf) {
+            Ok(n) => mouse::decode(buf.get(..n).unwrap_or(&[])),
+            Err(_) => Vec::new(),
         }
     }
 }

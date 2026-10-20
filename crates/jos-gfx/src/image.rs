@@ -205,6 +205,34 @@ impl Image {
         });
     }
 
+    /// Anti-aliased filled polygon (even-odd rule); fewer than three points
+    /// draw nothing.
+    pub fn fill_polygon(&mut self, points: &[(f32, f32)], c: Rgba) {
+        if points.len() < 3 {
+            return;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for &(x, y) in points {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+        let bounds = Rect::new(
+            floor_i(x0),
+            floor_i(y0),
+            ceil_i(x1) - floor_i(x0) + 1,
+            ceil_i(y1) - floor_i(y0) + 1,
+        );
+        let edges = || points.iter().zip(points.iter().cycle().skip(1));
+        self.fill_shape(bounds, c, |x, y| {
+            edges()
+                .filter(|(&(xa, ya), &(xb, yb))| {
+                    (ya > y) != (yb > y) && x < xa + (y - ya) * (xb - xa) / (yb - ya)
+                })
+                .count()
+                % 2
+                == 1
+        });
+    }
+
     /// Anti-aliased thick line segment with round caps.
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, thickness: f32, c: Rgba) {
         let half = thickness / 2.0;
@@ -384,6 +412,22 @@ mod tests {
         );
         assert_eq!(img.get(20, 10), Some(BLACK));
         assert_eq!(img.get(20, 30), Some(WHITE));
+    }
+
+    #[test]
+    fn polygons_are_filled_inside_their_edges() {
+        let mut img = Image::new(20, 20, BLACK);
+        // A right triangle with its right angle at the top left.
+        img.fill_polygon(&[(2.0, 2.0), (18.0, 2.0), (2.0, 18.0)], WHITE);
+        assert_eq!(img.get(4, 4), Some(WHITE));
+        assert_eq!(img.get(16, 16), Some(BLACK));
+        assert_eq!(img.get(1, 1), Some(BLACK));
+        let edge = img.get(9, 10).unwrap();
+        assert!(edge != WHITE && edge != BLACK, "{edge:?}");
+        // Degenerate input draws nothing.
+        let mut img = Image::new(8, 8, BLACK);
+        img.fill_polygon(&[(0.0, 0.0), (7.0, 7.0)], WHITE);
+        assert!(img.pixels().iter().all(|&p| p == BLACK));
     }
 
     #[test]

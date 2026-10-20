@@ -174,15 +174,23 @@ Reserving every GPU is allowed but flagged: the dom0 then has no display
 of its own. NICs are never ticked by default: until `sys-net` exists the
 dom0 needs one to download templates.
 
-Keyboard only (the live medium has no pointer driver in the console):
-`Tab`/`Shift-Tab` or `Up`/`Down` move between fields, `Up`/`Down` pick a
-disk or a device in a list, `Space` ticks a device, `Enter`/`Space` press
-buttons and tick boxes, `Esc` goes back. Fields filter what they accept (digits for the swap size,
-host-name and user-name characters), passwords are masked.
+Keyboard: `Tab`/`Shift-Tab` or `Up`/`Down` move between fields,
+`Up`/`Down` pick a disk or a device in a list, `Space` ticks a device,
+`Enter`/`Space` press buttons and tick boxes, `Esc` goes back. Fields
+filter what they accept (digits for the swap size, host-name and
+user-name characters), passwords are masked.
+
+Mouse and touchpad: the installer reads `/dev/sysmouse`, where devd's
+`moused` publishes every pointing device, and draws its own pointer once
+the mouse moves. A left click focuses and activates what it lands on: it
+presses a button, ticks a box, selects a disk, ticks a device, or puts
+the caret in a field (at the nearest character, counted in average
+character widths). Without `moused` the installer says so on the console
+and stays keyboard-only.
 
 The installation runs on a background thread and reports each step, so
-the progress page stays responsive during the long extraction; keys typed
-during the install are discarded so a stray Enter cannot reboot the
+the progress page stays responsive during the long extraction; keys and
+clicks during the install are discarded so a stray Enter cannot reboot the
 machine on the Finish page. **Exit to console** leaves for a login prompt
 (the full log is on `ttyv0`); **Reboot** restarts into the new system.
 
@@ -191,8 +199,8 @@ The code is split so all of it is tested without a screen:
 ```text
 crates/jos-install/src/wizard.rs   pages, fields, focus, validation (pure state machine)
 crates/jos-install/src/ui.rs       rendering into a jos-gfx Image (1280x800 logical, integer-scaled)
-crates/jos-install/src/gui.rs      event loop: keys -> wizard, frames -> display, installer thread
-crates/jos-fb                      vt(4) framebuffer + keyboard decoder, shared with jos-splash
+crates/jos-install/src/gui.rs      event loop: keys and clicks -> wizard, frames -> display, installer thread
+crates/jos-fb                      vt(4) framebuffer, keyboard and sysmouse decoders, shared with jos-splash
 ```
 
 `jos-install --screenshots DIR` renders every page to PNG on any host

@@ -53,7 +53,7 @@ crates/jos-firewall    the sys-firewall unikernel (UEFI application)
 crates/jos-gfx         no_std boot artwork: icons, font, rasteriser, PNG export
 crates/jos-boot        graphical UEFI pre-loader that chain-loads loader.efi
 crates/jos-splash      boot splash daemon on the vt(4) framebuffer + rc.d clients
-crates/jos-fb          vt(4) framebuffer display and keyboard decoder (splash, installer, greeter)
+crates/jos-fb          vt(4) framebuffer display, keyboard and mouse decoders (splash, installer, greeter)
 crates/jos-greet       login screen: PAM, then the COSMIC session on the same VT
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
 coverage.toml          per-file uncovered-line/function/region allowances (ratcheted down to 0)

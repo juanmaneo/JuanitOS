@@ -15,7 +15,7 @@ use jos_gfx::image::{Image, Rect};
 use jos_gfx::Rgba;
 use juanitos_core::doctor::Status;
 
-use crate::wizard::{InstallState, Page, Widget, Wizard, PAGES};
+use crate::wizard::{InstallState, Page, Target, Widget, Wizard, PAGES};
 
 pub const LOGICAL_W: i32 = 1280;
 pub const LOGICAL_H: i32 = 800;
@@ -35,12 +35,61 @@ const SIDEBAR_BG: Rgba = Rgba::rgb(0x0e, 0x11, 0x16);
 const OK: Rgba = Rgba::rgb(0x4c, 0xc3, 0x7a);
 const FAIL: Rgba = Rgba::rgb(0xff, 0x5c, 0x5c);
 
+/// What a click can land on: the screen rectangles of the widgets of the
+/// last rendered page, in drawing order.
+#[derive(Debug, Clone, Default)]
+pub struct Hits {
+    regions: Vec<(Rect, Hit)>,
+    scale: i32,
+}
+
+/// A hit region's meaning. A field remembers where its text starts so the
+/// click can be turned into a caret position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    Target(Target),
+    Field {
+        widget: Widget,
+        text_x: i32,
+        len: usize,
+    },
+}
+
+impl Hits {
+    /// What is under the screen pixel (x, y), if anything.
+    pub fn target(&self, x: i32, y: i32) -> Option<Target> {
+        let (r, hit) = self
+            .regions
+            .iter()
+            .find(|(r, _)| (r.x..r.right()).contains(&x) && (r.y..r.bottom()).contains(&y))?;
+        Some(match *hit {
+            Hit::Target(t) => t,
+            Hit::Field {
+                widget,
+                text_x,
+                len,
+            } => Target::Caret(widget, caret_index(len, x - r.x - text_x, self.scale)),
+        })
+    }
+}
+
+/// The caret position a click `dx` pixels into a `len`-character field
+/// means: before the character the click is on, after it past its middle.
+/// Fields are measured as if every character were an 'n' (passwords are
+/// masked, and a caret off by one is easily fixed with the arrow keys).
+fn caret_index(len: usize, dx: i32, scale: i32) -> usize {
+    let cell = font::text_width("n", 2 * scale).max(1);
+    let cells = (dx.max(0) + cell / 2) / cell;
+    (cells as usize).min(len)
+}
+
 /// Integer scale and offset mapping the logical canvas onto the screen.
 struct Canvas {
     img: Image,
     s: i32,
     ox: i32,
     oy: i32,
+    hits: Hits,
 }
 
 impl Canvas {
@@ -53,7 +102,17 @@ impl Canvas {
             s,
             ox: (width as i32 - LOGICAL_W * s) / 2,
             oy: (height as i32 - LOGICAL_H * s) / 2,
+            hits: Hits {
+                regions: Vec::new(),
+                scale: s,
+            },
         }
+    }
+
+    /// Remember that the logical box (x, y, w, h) is `hit`.
+    fn hit(&mut self, x: i32, y: i32, w: i32, h: i32, hit: Hit) {
+        let r = self.rect(x, y, w, h);
+        self.hits.regions.push((r, hit));
     }
 
     fn rect(&self, x: i32, y: i32, w: i32, h: i32) -> Rect {
@@ -136,6 +195,11 @@ impl Canvas {
 
 /// Render the whole screen for the wizard's current state.
 pub fn render(w: &Wizard, width: u32, height: u32) -> Image {
+    render_page(w, width, height).0
+}
+
+/// [`render`], with where the page's widgets ended up on screen.
+pub fn render_page(w: &Wizard, width: u32, height: u32) -> (Image, Hits) {
     let mut c = Canvas::new(width, height);
     // The sidebar runs the full height of the screen, also outside the
     // logical canvas.
@@ -154,7 +218,7 @@ pub fn render(w: &Wizard, width: u32, height: u32) -> Image {
         Page::Finish => finish(&mut c, w),
     }
     bottom_bar(&mut c, w);
-    c.img
+    (c.img, c.hits)
 }
 
 fn sidebar(c: &mut Canvas, w: &Wizard) {
@@ -252,11 +316,12 @@ fn welcome(c: &mut Canvas) {
         ],
     );
     let y = y + 24;
-    c.text(CONTENT_X, y, "Keyboard", 2, THEME.accent);
+    c.text(CONTENT_X, y, "Keyboard and mouse", 2, THEME.accent);
     let keys = [
         ("Tab / Up / Down", "move between fields"),
         ("Enter / Space", "select, tick, press a button"),
         ("Esc", "previous page"),
+        ("Mouse", "click anything"),
     ];
     for (i, (k, what)) in keys.iter().enumerate() {
         let ky = y + 30 + i as i32 * 26;
@@ -352,6 +417,7 @@ fn disk(c: &mut Canvas, w: &Wizard) {
             THEME.highlight
         };
         c.boxed(CONTENT_X, y, CONTENT_W, 54, border, THEME.highlight);
+        c.hit(CONTENT_X, y, CONTENT_W, 54, Hit::Target(Target::Disk(i)));
         if selected {
             c.circle(CONTENT_X + 28, y + 27, 8, THEME.accent);
         } else {
@@ -395,6 +461,17 @@ fn field(c: &mut Canvas, w: &Wizard, widget: Widget, x: i32, y: i32, label: &str
     let border = if focused { THEME.accent } else { THEME.dim };
     c.boxed(x, by, FIELD_W, FIELD_H, border, THEME.highlight);
     let f = w.field(widget).cloned().unwrap_or_default();
+    c.hit(
+        x,
+        by,
+        FIELD_W,
+        FIELD_H,
+        Hit::Field {
+            widget,
+            text_x: 14 * c.s,
+            len: f.len(),
+        },
+    );
     let (shown, before) = if widget.is_password() {
         (
             font::mask(f.len()),
@@ -438,6 +515,14 @@ fn checkbox(c: &mut Canvas, w: &Wizard, widget: Widget, x: i32, y: i32, label: &
         2,
         CONTENT_R - x - 42,
         if focused { THEME.accent } else { THEME.text },
+    );
+    let label_w = font::text_width(label, 2).min(CONTENT_R - x - 42);
+    c.hit(
+        x,
+        y - 6,
+        42 + label_w,
+        26,
+        Hit::Target(Target::Widget(widget)),
     );
 }
 
@@ -517,6 +602,7 @@ fn passthrough(c: &mut Canvas, w: &Wizard) {
             THEME.highlight
         };
         c.boxed(CONTENT_X, y, CONTENT_W, 44, border, THEME.highlight);
+        c.hit(CONTENT_X, y, CONTENT_W, 44, Hit::Target(Target::Device(i)));
         c.boxed(
             CONTENT_X + 12,
             y + 9,
@@ -713,8 +799,17 @@ fn finish(c: &mut Canvas, w: &Wizard) {
     }
 }
 
-fn button(c: &mut Canvas, x: i32, label: &str, focused: bool, primary: bool, enabled: bool) {
+fn button(
+    c: &mut Canvas,
+    x: i32,
+    b: Widget,
+    label: &str,
+    focused: bool,
+    primary: bool,
+    enabled: bool,
+) {
     let y = BAR_Y + 24;
+    c.hit(x, y, BUTTON_W, BUTTON_H, Hit::Target(Target::Widget(b)));
     let (fill, text) = match (focused, primary, enabled) {
         (_, _, false) => (THEME.highlight, THEME.dim),
         (true, true, true) => (THEME.accent, THEME.background),
@@ -750,7 +845,7 @@ fn bottom_bar(c: &mut Canvas, w: &Wizard) {
     let n = buttons.len() as i32;
     for (i, (b, label, primary, enabled)) in buttons.into_iter().enumerate() {
         let x = CONTENT_R - (n - i as i32) * (BUTTON_W + 16) + 16;
-        button(c, x, label, w.focused() == Some(b), primary, enabled);
+        button(c, x, b, label, w.focused() == Some(b), primary, enabled);
     }
     if !widgets.is_empty() {
         c.text(
@@ -1037,6 +1132,65 @@ mod tests {
         }
         assert_eq!(w.device_index, 14);
         assert!(differs(&top, &render(&w, 1280, 800)));
+    }
+
+    #[test]
+    fn clicks_find_the_widget_under_them() {
+        let mut w = sample_wizard();
+        w.page = Page::System;
+        let len = w.hostname.len();
+        assert!(len > 3);
+        let (_, hits) = render_page(&w, 1280, 800);
+        // Fields: the caret goes to the nearest character boundary.
+        let cell = font::text_width("n", 2);
+        let text_x = CONTENT_X + 14;
+        let field_y = BODY_Y + 40;
+        assert_eq!(
+            hits.target(text_x - 10, field_y),
+            Some(Target::Caret(Widget::Hostname, 0))
+        );
+        assert_eq!(
+            hits.target(text_x + 2 * cell + 1, field_y),
+            Some(Target::Caret(Widget::Hostname, 2))
+        );
+        assert_eq!(
+            hits.target(CONTENT_X + FIELD_W - 2, field_y),
+            Some(Target::Caret(Widget::Hostname, len))
+        );
+        // The checkbox and its label, the buttons.
+        assert_eq!(
+            hits.target(CONTENT_X + 60, BODY_Y + 215),
+            Some(Target::Widget(Widget::Desktop))
+        );
+        assert_eq!(hits.target(1120, 738), Some(Target::Widget(Widget::Next)));
+        assert_eq!(hits.target(904, 738), Some(Target::Widget(Widget::Back)));
+        // Nothing there.
+        assert_eq!(hits.target(700, 640), None);
+        assert_eq!(hits.target(10, 10), None);
+
+        // Twice the size on a 2560x1600 screen.
+        let (_, big) = render_page(&w, 2560, 1600);
+        assert_eq!(big.target(2240, 1476), Some(Target::Widget(Widget::Next)));
+        assert_eq!(
+            big.target(2 * (text_x + 2 * cell + 1), 2 * field_y),
+            Some(Target::Caret(Widget::Hostname, 2))
+        );
+    }
+
+    #[test]
+    fn clicks_on_list_rows_follow_the_scrolling() {
+        let mut w = sample_wizard();
+        w.page = Page::Disk;
+        let (_, hits) = render_page(&w, 1280, 800);
+        assert_eq!(hits.target(500, BODY_Y + 64 + 20), Some(Target::Disk(1)));
+        w.page = Page::Passthrough;
+        let extra = w.devices[1].clone();
+        w.devices.extend(std::iter::repeat_n(extra, 10));
+        let (_, top) = render_page(&w, 1280, 800);
+        assert_eq!(top.target(500, BODY_Y + 20), Some(Target::Device(0)));
+        w.device_index = 14;
+        let (_, scrolled) = render_page(&w, 1280, 800);
+        assert_eq!(scrolled.target(500, BODY_Y + 20), Some(Target::Device(7)));
     }
 
     #[test]

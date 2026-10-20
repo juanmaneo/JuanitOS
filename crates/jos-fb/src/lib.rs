@@ -6,6 +6,7 @@
 //! calls live in [`vt`] (FreeBSD only).
 
 pub mod keys;
+pub mod mouse;
 #[cfg(target_os = "freebsd")]
 pub mod vt;
 
@@ -35,6 +36,11 @@ pub trait Display {
     /// Next byte typed on the terminal, if any (Esc → `Some(0x1b)`;
     /// arrows etc. arrive as escape sequences, see [`keys::Decoder`]).
     fn poll_key(&mut self) -> Option<u8>;
+    /// Mouse packets since the last call, oldest first; none unless the
+    /// display was asked to listen to the mouse.
+    fn poll_mouse(&mut self) -> Vec<mouse::Mouse> {
+        Vec::new()
+    }
 }
 
 /// Bit offsets of the colour channels inside a 32-bit pixel.
@@ -122,6 +128,8 @@ pub struct NullDisplay {
     pub repaired: Vec<Range<u32>>,
     /// Fail `present_rows`.
     pub fail_repair: bool,
+    /// Packets `poll_mouse` returns, one call each.
+    pub mouse: std::collections::VecDeque<Vec<mouse::Mouse>>,
 }
 
 impl NullDisplay {
@@ -189,6 +197,10 @@ impl Display for NullDisplay {
     fn poll_key(&mut self) -> Option<u8> {
         self.keys.pop_front()
     }
+
+    fn poll_mouse(&mut self) -> Vec<mouse::Mouse> {
+        self.mouse.pop_front().unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +261,14 @@ mod tests {
         assert_eq!(d.poll_key(), Some(b'a'));
         assert_eq!(d.poll_key(), Some(b'b'));
         assert_eq!(d.poll_key(), None);
+        let m = mouse::Mouse {
+            dx: 1,
+            dy: 2,
+            left: true,
+        };
+        d.mouse.push_back(vec![m]);
+        assert_eq!(d.poll_mouse(), [m]);
+        assert!(d.poll_mouse().is_empty());
         d.restore_console().unwrap();
         assert!(d.restored);
         d.release().unwrap();
@@ -317,6 +337,7 @@ mod tests {
         assert!(b
             .present_rows(&Image::new(1, 1, Rgba::TRANSPARENT), 0..1)
             .is_ok());
+        assert!(b.poll_mouse().is_empty());
         assert!(b.present(&Image::new(1, 1, Rgba::TRANSPARENT)).is_ok());
         assert!(b.restore_console().is_ok());
         assert_eq!((b.size(), b.poll_key()), ((1, 1), None));

@@ -300,6 +300,9 @@ fn run_graphical(
     use jos_fb::Display;
 
     let mut display = jos_fb::vt::VtDisplay::open(cli.vt)?;
+    if let Err(e) = display.enable_mouse() {
+        eprintln!("jos-install: no mouse ({e:#}); the keyboard works");
+    }
     let mut wizard = wizard::Wizard::new(
         plan,
         hw.checks.clone(),
