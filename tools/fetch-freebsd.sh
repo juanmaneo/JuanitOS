@@ -1,7 +1,7 @@
 #!/bin/sh
 # Fetch FreeBSD release pieces needed for testing on a non-FreeBSD host,
-# into $JOS_WORK/freebsd/ (JOS_WORK defaults to ./work, which survives
-# `cargo clean`). Everything is verified against the release MANIFEST
+# into $JOS_WORK/freebsd/ (JOS_WORK defaults to ./target/work, so
+# `cargo clean` wipes it). Everything is verified against the release MANIFEST
 # (SHA-256).
 #
 #   tools/fetch-freebsd.sh loader        # base.txz -> target/work/freebsd/boot/loader.efi
