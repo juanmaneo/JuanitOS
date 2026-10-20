@@ -182,7 +182,8 @@ Verified in the FreeBSD 15.1 build VM (QEMU VGA, efifb 1280×800):
 missing `start-cosmic` comes back as "COSMIC exited with status 127"; a
 session whose compositor cannot start (no KMS device) ends with status 1
 and `the compositor exited before it was ready` in the log, where it used
-to hang; after a session the greeter redraws and says the user logged out; root
+to hang: the greeter shows "COSMIC exited with status 1 (log: …)" a few
+seconds after the password (checked in QEMU with the stage-1 ISO); after a session the greeter redraws and says the user logged out; root
 and unknown users are refused (`jos-greet try-login --user NAME --
 COMMAND` exercises PAM and the session setup without the screen). The
 COSMIC session itself still needs real hardware, as above.
