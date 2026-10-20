@@ -2,7 +2,8 @@
 //! daemon, as single UDP-style datagrams on a Unix socket.
 //!
 //! The format is one line of text so a shell script can also speak it:
-//! `stage network`, `status Starting qubes`, `finish console`.
+//! `stage network`, `status Starting qubes`, `leave qubes`,
+//! `finish console`.
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
@@ -27,6 +28,8 @@ pub enum Finish {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Stage(Stage),
+    /// Shutdown: turn this stage and the later ones off.
+    Leave(Stage),
     Status(String),
     Finish(Finish),
 }
@@ -50,9 +53,8 @@ impl Message {
             None => (text, ""),
         };
         match verb {
-            "stage" => Stage::from_name(rest)
-                .map(Message::Stage)
-                .ok_or_else(|| ParseError(format!("unknown stage {rest:?}"))),
+            "stage" => stage(rest).map(Message::Stage),
+            "leave" => stage(rest).map(Message::Leave),
             "status" => Ok(Message::Status(rest.to_string())),
             "finish" => match rest {
                 "" | "keep" => Ok(Message::Finish(Finish::Keep)),
@@ -66,11 +68,16 @@ impl Message {
     pub fn encode(&self) -> String {
         match self {
             Message::Stage(s) => format!("stage {}", s.name()),
+            Message::Leave(s) => format!("leave {}", s.name()),
             Message::Status(t) => format!("status {t}"),
             Message::Finish(Finish::Keep) => "finish keep".to_string(),
             Message::Finish(Finish::Console) => "finish console".to_string(),
         }
     }
+}
+
+fn stage(name: &str) -> Result<Stage, ParseError> {
+    Stage::from_name(name).ok_or_else(|| ParseError(format!("unknown stage {name:?}")))
 }
 
 #[cfg(test)]
@@ -81,6 +88,7 @@ mod tests {
     fn roundtrip() {
         let msgs = [
             Message::Stage(Stage::Network),
+            Message::Leave(Stage::Qubes),
             Message::Status("Starting qubes".into()),
             Message::Finish(Finish::Keep),
             Message::Finish(Finish::Console),
@@ -109,6 +117,7 @@ mod tests {
     #[test]
     fn errors() {
         assert!(Message::parse("stage nope").is_err());
+        assert!(Message::parse("leave").is_err());
         assert!(Message::parse("finish maybe").is_err());
         assert!(Message::parse("dance").is_err());
         assert!(Message::parse("").is_err());

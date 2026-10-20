@@ -123,6 +123,16 @@ impl Scene {
         }
     }
 
+    /// Turn `stage` and every later stage off: the shutdown runs the boot
+    /// backwards.
+    pub fn leave(&mut self, stage: Stage) {
+        for (i, lit) in self.lit.iter_mut().enumerate() {
+            if i >= stage.index() {
+                *lit = false;
+            }
+        }
+    }
+
     pub fn is_lit(&self, stage: Stage) -> bool {
         self.lit.get(stage.index()).copied().unwrap_or(false)
     }
@@ -257,6 +267,18 @@ mod tests {
         assert!(s.is_lit(Stage::Storage));
         assert!(s.is_lit(Stage::Network));
         assert!(!s.is_lit(Stage::Qubes));
+    }
+
+    #[test]
+    fn leaving_a_stage_darkens_later_ones() {
+        let mut s = Scene::new();
+        s.reach(Stage::Desktop);
+        s.leave(Stage::Qubes);
+        assert!(s.is_lit(Stage::Network));
+        assert!(!s.is_lit(Stage::Qubes));
+        assert!(!s.is_lit(Stage::Desktop));
+        s.leave(Stage::Boot);
+        assert_eq!(s.lit, [false; 6]);
     }
 
     #[test]

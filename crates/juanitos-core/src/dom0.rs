@@ -155,10 +155,13 @@ pub fn bootwatch_loader_conf() -> (String, String) {
 pub const RC_D_JOS: &str = include_str!("../../../freebsd/rc.d/jos");
 
 /// Boot splash hooks (see `docs/boot-splash.md`): start the daemon early,
-/// light the network icon, end the splash before the greeter.
+/// light the network icon, end the splash before the greeter, and draw it
+/// again at shutdown.
 pub const RC_D_JOS_SPLASH: &str = include_str!("../../../freebsd/rc.d/jos-splash");
 pub const RC_D_JOS_SPLASH_NETWORK: &str = include_str!("../../../freebsd/rc.d/jos-splash-network");
 pub const RC_D_JOS_SPLASH_FINISH: &str = include_str!("../../../freebsd/rc.d/jos-splash-finish");
+pub const RC_D_JOS_SPLASH_SHUTDOWN: &str =
+    include_str!("../../../freebsd/rc.d/jos-splash-shutdown");
 
 /// Clears `jos-boot`'s "muted boot in progress" UEFI variable once rc(8)
 /// runs (always on), so the next boot is quiet again.
@@ -404,6 +407,11 @@ pub fn static_files() -> Vec<(&'static str, String, bool)> {
             lf(RC_D_JOS_SPLASH_FINISH),
             true,
         ),
+        (
+            "/usr/local/etc/rc.d/jos-splash-shutdown",
+            lf(RC_D_JOS_SPLASH_SHUTDOWN),
+            true,
+        ),
         ("/usr/local/etc/rc.d/jos-login", lf(RC_D_JOS_LOGIN), true),
         ("/usr/local/etc/rc.d/jos-bootok", lf(RC_D_JOS_BOOTOK), true),
         ("/usr/local/libexec/jos-session", lf(JOS_SESSION), true),
@@ -619,6 +627,7 @@ mod tests {
             "jos-splash",
             "jos-splash-network",
             "jos-splash-finish",
+            "jos-splash-shutdown",
             "jos-login",
             "jos-bootok",
         ] {
@@ -635,6 +644,27 @@ mod tests {
             local.find("jos-splash finish --console").unwrap()
                 < local.find("jos-install --live").unwrap()
         );
+    }
+
+    #[test]
+    fn the_shutdown_splash_runs_between_the_login_screen_and_the_qubes() {
+        // rc.shutdown stops the `shutdown` scripts in reverse boot order.
+        let s = RC_D_JOS_SPLASH_SHUTDOWN;
+        assert!(s.contains("KEYWORD: shutdown"));
+        assert!(s.contains("REQUIRE: LOGIN jos jos-splash-finish"));
+        assert!(s.contains("BEFORE: jos-login"));
+        assert!(s.contains("--reached desktop"));
+        assert!(s.find("status \"Shutting down\"") < s.find("leave desktop"));
+        for (script, leaves) in [
+            (RC_D_JOS, "leave qubes"),
+            (RC_D_JOS_SPLASH_NETWORK, "leave network"),
+        ] {
+            assert!(script.contains("KEYWORD: shutdown"), "{leaves}");
+            assert!(script.contains(leaves));
+        }
+        assert!(RC_D_JOS_LOGIN.contains("KEYWORD: shutdown"));
+        // Stopping the boot splash would end the shutdown one.
+        assert!(!RC_D_JOS_SPLASH.contains("KEYWORD: shutdown"));
     }
 
     #[test]

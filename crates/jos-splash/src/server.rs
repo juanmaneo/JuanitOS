@@ -89,6 +89,13 @@ impl<D: Display> Splash<D> {
                 }
                 Flow::Continue
             }
+            Message::Leave(stage) => {
+                if self.scene.is_lit(stage) {
+                    self.scene.leave(stage);
+                    self.dirty = true;
+                }
+                Flow::Continue
+            }
             Message::Status(text) => {
                 let status = if text.is_empty() {
                     None
@@ -300,6 +307,21 @@ mod tests {
         s.redraw().unwrap();
         let err = s.redraw().unwrap_err();
         assert!(format!("{err:#}").contains("repairing frame"), "{err:#}");
+    }
+
+    #[test]
+    fn shutdown_turns_the_icons_off_from_the_right() {
+        let mut s = Splash::new(NullDisplay::new(320, 200), Some(Stage::Desktop));
+        s.redraw().unwrap();
+        assert_eq!(s.handle(Message::Leave(Stage::Qubes)), Flow::Continue);
+        s.redraw().unwrap();
+        assert_eq!(s.frames, 2);
+        assert!(s.scene().is_lit(Stage::Network));
+        assert!(!s.scene().is_lit(Stage::Desktop));
+        // Already dark: nothing to draw.
+        s.handle(Message::Leave(Stage::Desktop));
+        s.redraw().unwrap();
+        assert_eq!(s.frames, 2);
     }
 
     #[test]

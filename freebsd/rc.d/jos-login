@@ -2,6 +2,7 @@
 #
 # PROVIDE: jos-login
 # REQUIRE: LOGIN seatd dbus jos-splash-finish
+# KEYWORD: shutdown
 #
 # The JuanitOS login screen: jos-greet on ttyv8 (VT 9, Alt+F9), which no
 # getty uses (its /etc/ttys line is "off"). It runs under daemon(8) so it
@@ -12,7 +13,8 @@
 # jos_login_vt             its virtual terminal, 1-based (9 = ttyv8)
 #
 # rc.d/jos-splash-finish runs first and leaves the boot picture up; the
-# greeter replaces it when it switches to its terminal.
+# greeter replaces it when it switches to its terminal. At shutdown the
+# greeter is stopped first, then rc.d/jos-splash-shutdown draws the card.
 
 . /etc/rc.subr
 

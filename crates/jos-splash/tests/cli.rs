@@ -67,6 +67,7 @@ fn clients_without_a_daemon_are_no_ops() {
     let s = sock.to_str().unwrap();
     for args in [
         vec!["--socket", s, "stage", "network"],
+        vec!["--socket", s, "leave", "qubes"],
         vec!["--socket", s, "status", "Starting", "qubes"],
         vec!["--socket", s, "finish"],
         vec!["--socket", s, "finish", "--console"],
@@ -74,9 +75,11 @@ fn clients_without_a_daemon_are_no_ops() {
         let out = splash(&args);
         assert!(out.status.success(), "{args:?}: {:?}", out);
     }
-    for bad in ["bogus", "none"] {
-        let out = splash(&["--socket", s, "stage", bad]);
-        assert!(!out.status.success(), "{bad}");
+    for verb in ["stage", "leave"] {
+        for bad in ["bogus", "none"] {
+            let out = splash(&["--socket", s, verb, bad]);
+            assert!(!out.status.success(), "{verb} {bad}");
+        }
     }
 }
 
@@ -140,6 +143,7 @@ fn dry_run_daemon(tag: &str, finish: &[&str]) -> String {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(splash(&["--socket", &s, "stage", "qubes"]).status.success());
+    assert!(splash(&["--socket", &s, "leave", "qubes"]).status.success());
     let finish: Vec<&str> = ["--socket", &s]
         .into_iter()
         .chain(finish.iter().copied())

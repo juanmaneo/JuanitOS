@@ -56,6 +56,9 @@ jos_start()
 jos_stop()
 {
 	echo "Stopping JuanitOS qubes."
+	if [ -x "${jos_splash_bin}" ]; then
+		"${jos_splash_bin}" status "Stopping qubes"
+	fi
 	if [ -e "${serve_pidfile}" ]; then
 		kill "$(cat "${serve_pidfile}")" 2>/dev/null
 		rm -f "${serve_pidfile}"
@@ -74,6 +77,11 @@ jos_stop()
 		[ -e "${vm}" ] || continue
 		"${jos_bin}" --config "${jos_config}" kill "$(basename "${vm}")"
 	done
+	# The shutdown splash (rc.d/jos-splash-shutdown), if any.
+	if [ -x "${jos_splash_bin}" ]; then
+		"${jos_splash_bin}" leave qubes
+		"${jos_splash_bin}" status "Shutting down"
+	fi
 }
 
 jos_status()

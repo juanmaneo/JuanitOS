@@ -5,7 +5,8 @@
 //! and lights up one icon per stage as the other rc.d hooks report
 //! progress with `jos-splash stage <name>`. `finish` hands the screen to
 //! the login screen, `jos-greet` (keeping the picture), or back to the text
-//! console.
+//! console. At shutdown it is started again with every icon lit, and
+//! `jos-splash leave <name>` turns them off from the right.
 //! See `docs/boot-splash.md`.
 
 mod proto;
@@ -44,6 +45,8 @@ enum Cmd {
     Run(RunArgs),
     /// Report that a boot stage was reached (lights its icon).
     Stage { name: String },
+    /// Shutdown: turn a stage's icon (and the later ones) off.
+    Leave { name: String },
     /// Show a one-line status under the icons (empty clears it).
     Status { text: Vec<String> },
     /// End the splash: keep the picture for the greeter, or restore the
@@ -110,13 +113,16 @@ fn parse_stage(name: &str) -> anyhow::Result<Option<Stage>> {
     }
 }
 
+/// A stage given to a client command (`none` is only for `render`).
+fn named_stage(name: &str) -> anyhow::Result<Stage> {
+    parse_stage(name)?.context("stage name required")
+}
+
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Run(a) => run_daemon(&a, &cli.socket),
-        Cmd::Stage { name } => {
-            let stage = parse_stage(&name)?.context("stage name required")?;
-            send(&Message::Stage(stage), &cli.socket)
-        }
+        Cmd::Stage { name } => send(&Message::Stage(named_stage(&name)?), &cli.socket),
+        Cmd::Leave { name } => send(&Message::Leave(named_stage(&name)?), &cli.socket),
         Cmd::Status { text } => send(&Message::Status(text.join(" ")), &cli.socket),
         Cmd::Finish { console } => {
             let mode = if console {

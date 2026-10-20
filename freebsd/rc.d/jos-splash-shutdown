@@ -1,0 +1,53 @@
+#!/bin/sh
+#
+# PROVIDE: jos-splash-shutdown
+# REQUIRE: LOGIN jos jos-splash-finish
+# BEFORE: jos-login
+# KEYWORD: shutdown
+#
+# The boot splash, backwards. rc.shutdown stops scripts in reverse boot
+# order, so this runs once the login screen (and the desktop with it) is
+# gone and before the qubes are stopped: it draws the boot card again with
+# every icon lit and turns the desktop icon off. rc.d/jos then turns the
+# qubes icon off, rc.d/jos-splash-network the network one, and the
+# kernel's shutdown splash (boot and kernel lit) follows when the disks are
+# synced: the icons go out from right to left.
+
+. /etc/rc.subr
+
+name="jos_splash_shutdown"
+rcvar="jos_splash_enable"
+
+load_rc_config jos_splash
+
+: ${jos_splash_enable:="NO"}
+: ${jos_splash_vt:="10"}
+: ${jos_splash_bin:="/usr/local/bin/jos-splash"}
+
+pidfile="/var/run/jos-splash.pid"
+socket="/var/run/jos-splash.sock"
+start_cmd=":"
+stop_cmd="jos_splash_shutdown_stop"
+
+jos_splash_shutdown_stop()
+{
+	[ -x "${jos_splash_bin}" ] || return 0
+	[ -c /dev/ttyv0 ] || return 0
+	# The boot splash ended at the login screen; one still running (the
+	# boot never got that far) is reused.
+	if ! pgrep -q -F "${pidfile}" 2>/dev/null; then
+		rm -f "${socket}"
+		/usr/sbin/daemon -f -p "${pidfile}" "${jos_splash_bin}" run \
+		    --vt "${jos_splash_vt}" --reached desktop
+		# It switches terminals before it listens.
+		n=0
+		while [ ! -S "${socket}" ] && [ ${n} -lt 25 ]; do
+			sleep 0.2
+			n=$((n + 1))
+		done
+	fi
+	"${jos_splash_bin}" status "Shutting down"
+	"${jos_splash_bin}" leave desktop
+}
+
+run_rc_command "$1"

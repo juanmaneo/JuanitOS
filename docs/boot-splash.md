@@ -138,6 +138,7 @@ never touches the picture, `mmap`s the framebuffer and draws the card with
 
 ```text
 stage <boot|kernel|storage|network|qubes|desktop>   light that icon (and earlier ones)
+leave <stage>                                      shutdown: turn that icon (and later ones) off
 status <text>                                      one line under the icons
 finish [keep|console]                              end: leave the frame / restore the console
 ```
@@ -155,6 +156,23 @@ Hooks:
 | `jos`                 | `LOGIN`         | `status Starting qubes`, `stage qubes`  |
 | `jos-splash-finish`   | `LOGIN jos`     | `stage desktop`, then `finish` if the login screen is enabled and installed, else `finish --console` |
 | `jos-login`           | `LOGIN seatd dbus jos-splash-finish` | nothing; starts `jos-greet` under daemon(8) |
+
+At shutdown, rc.shutdown stops the scripts that carry `KEYWORD: shutdown`
+in reverse boot order, and the icons go out from right to left:
+
+| rc.d script (stop)    | Order (verified with `rcorder -k shutdown` on 15.1) | Sends |
+|-----------------------|-----------------------------|-------------------------------------------|
+| `jos-login`           | first                       | nothing; stops the greeter (and the session) |
+| `jos-splash-shutdown` | right after                 | starts the daemon again (`--reached desktop`), `status Shutting down`, `leave desktop` |
+| `jos`                 | before the system services  | `status Stopping qubes`, stops the qubes, `leave qubes` |
+| `jos-splash-network`  | before the network goes down | `leave network`                         |
+
+The kernel's own `shutdown_splash` (the boot PNG: boot and kernel lit)
+replaces the frame when the disks are synced, which turns the storage
+icon off. `rc.d/jos-splash` itself has no `shutdown` keyword: its stop
+(`finish --console`) would end the shutdown splash. Leaving a COSMIC
+session for the shutdown splash (compositor and seat released by stopping
+`jos-login`) is not verified on hardware yet.
 
 `finish` (keep) lights every icon and leaves the frame on screen; the
 login screen (`jos-greet` on `ttyv8`, `docs/relibc-cosmic.md`) then
