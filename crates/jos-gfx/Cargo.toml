@@ -12,6 +12,8 @@ default = []
 png = ["dep:png"]
 
 [dependencies]
+ab_glyph_rasterizer.workspace = true
+skrifa.workspace = true
 png = { workspace = true, optional = true }
 
 [lints]

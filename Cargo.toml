@@ -33,6 +33,10 @@ clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
 png = "0.17"
 libc = "0.2"
+# no_std font parsing and coverage rasterising; libm replaces std's float
+# functions.
+skrifa = { version = "0.48", default-features = false, features = ["libm"] }
+ab_glyph_rasterizer = { version = "0.1", default-features = false, features = ["libm"] }
 
 # An OS cannot afford a panic in critical code: every crate opts in with
 # `[lints] workspace = true`. Tests are exempt via clippy.toml.

@@ -4,8 +4,8 @@
 //! like one product.
 //!
 //! Everything is laid out on a logical 1280×800 canvas, scaled by an
-//! integer factor and centred on bigger screens (the bitmap font stays
-//! crisp), and rendered into a [`jos_gfx::Image`]: the same code produces
+//! integer factor and centred on bigger screens (text is rasterised at the
+//! final size, never stretched), and rendered into a [`jos_gfx::Image`]: the same code produces
 //! the frames on the framebuffer and the PNG screenshots in `docs/`.
 
 use jos_gfx::color::THEME;
@@ -397,8 +397,8 @@ fn field(c: &mut Canvas, w: &Wizard, widget: Widget, x: i32, y: i32, label: &str
     let f = w.field(widget).cloned().unwrap_or_default();
     let (shown, before) = if widget.is_password() {
         (
-            "*".repeat(f.len()),
-            "*".repeat(f.before_cursor().chars().count()),
+            font::mask(f.len()),
+            font::mask(f.before_cursor().chars().count()),
         )
     } else {
         (f.value.clone(), f.before_cursor().to_string())
@@ -982,7 +982,7 @@ mod tests {
         w.handle(Key::Char('a'));
         let a = render(&w, 1280, 800);
         assert!(differs(&before, &a));
-        // Another letter of the same length renders the same: only '*'.
+        // Another letter of the same length renders the same: only bullets.
         w.handle(Key::Backspace);
         w.handle(Key::Char('b'));
         let b = render(&w, 1280, 800);

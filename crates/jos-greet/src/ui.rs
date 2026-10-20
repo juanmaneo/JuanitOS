@@ -105,7 +105,7 @@ pub fn render(g: &Greeter, width: u32, height: u32) -> Image {
     c.text_centered(cx, 272, &g.hostname, 2, THEME.text_muted);
 
     c.rounded(CARD_X, 320, CARD_W, 340, 12, CARD_BG);
-    let shown_password = "*".repeat(g.password.chars().count());
+    let shown_password = font::mask(g.password.chars().count());
     field(&mut c, g, Focus::User, 340, "User", &g.user);
     field(&mut c, g, Focus::Password, 428, "Password", &shown_password);
     session(&mut c, g, 516);

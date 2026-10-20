@@ -9,10 +9,11 @@ from somewhere else, and under which terms.
 | Path | Origin | License |
 |------|--------|---------|
 | `freebsd/geom_ventoy/` | [Ventoy](https://github.com/ventoy/Ventoy) `Unix/ventoy_unix_src/FreeBSD/geom_ventoy_src/15.x`, commit 5fae0ca (local changes listed in its README) | BSD-2-Clause, © longpanda, © Pawel Jakub Dawidek. File headers kept. |
+| `crates/jos-gfx/fonts/OpenSans-Regular.ttf` | [Open Sans](https://github.com/googlefonts/opensans) `fonts/ttf/OpenSans-Regular.ttf`, commit bd7e376, unmodified; embedded in every binary that draws text | SIL Open Font License 1.1 (`crates/jos-gfx/fonts/OFL.txt`, shipped next to it). © The Open Sans Project Authors. |
 | `tools/dev/cosmic-patches/*.patch` | Patches to COSMIC components (pop-launcher) | Same license as the patched project (GPL-3.0); applied at build time, not linked into JuanitOS code |
 
 Everything else (Rust crates, kernel module `jos_bootwatch`, rc.d scripts,
-templates, boot artwork, the 5×7 font, the icons) is original work under
+templates, boot artwork, the icons) is original work under
 `LICENSE`.
 
 ## Rust dependencies
@@ -23,12 +24,13 @@ file-level copyleft and compatible with BSD-3-Clause distribution:
 
 | License | Crates (examples) |
 |---------|-------------------|
-| MIT OR Apache-2.0 | anyhow, clap, serde, toml, sha2, uefi, log, … |
-| MIT | generic-array, strsim, winnow, ptr_meta |
-| Zlib / MIT OR Zlib OR Apache-2.0 | zlib-rs, miniz_oxide |
+| MIT OR Apache-2.0 | anyhow, clap, serde, toml, sha2, uefi, log, skrifa, read-fonts, … |
+| Apache-2.0 | ab_glyph_rasterizer |
+| MIT | generic-array, strsim, winnow, ptr_meta, libm, core_maths |
+| Zlib / MIT OR Zlib OR Apache-2.0 | zlib-rs, miniz_oxide, bytemuck |
 | Unlicense OR MIT | memchr |
 | 0BSD OR MIT OR Apache-2.0 | adler2 |
-| Unicode-3.0 (with MIT OR Apache-2.0) | unicode-ident |
+| Unicode-3.0 (with MIT OR Apache-2.0) | unicode-ident, yoke, zerofrom |
 | MPL-2.0 | ucs2 (UEFI crates only; file-level copyleft: modifications to its own files must stay MPL, linking is unrestricted) |
 
 Binary distributions must carry these crates' notices. The dom0 ships the

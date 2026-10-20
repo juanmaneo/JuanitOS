@@ -11,10 +11,10 @@
 //!    lights the stage icons up, BeOS/Haiku style, until the desktop takes
 //!    over.
 //!
-//! Hence everything is here: colours, the logo, the icons, the bitmap font
-//! and the layout of the "card" that is centred on the screen. No image
-//! assets, no decoder, no allocator surprises: `no_std` + `alloc`, pure
-//! integer/float math, unit-tested on any host.
+//! Hence everything is here: colours, the logo, the icons, the font (Open
+//! Sans, embedded) and the layout of the "card" that is centred on the
+//! screen. No image assets, no decoder, no allocator surprises: `no_std` +
+//! `alloc`, pure integer/float math, unit-tested on any host.
 
 #![no_std]
 #![forbid(unsafe_code)]

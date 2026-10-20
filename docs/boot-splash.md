@@ -23,7 +23,9 @@ phases. Background is pure black, which is what `vt(4)` blanks to.
 
 ### `crates/jos-gfx` — the artwork
 
-`no_std` + `alloc`, `#![forbid(unsafe_code)]`. Colours, a 5×7 bitmap font,
+`no_std` + `alloc`, `#![forbid(unsafe_code)]`. Colours, anti-aliased text
+in Open Sans (COSMIC's interface font, embedded; parsed by `skrifa`,
+rasterised by `ab_glyph_rasterizer`),
 procedurally drawn icons (power, kernel, storage, network, qubes, desktop)
 and logo, an anti-aliased rasteriser (4×4 supersampling), and `Scene`:
 which stages are lit, an optional status line, an optional menu. With the
