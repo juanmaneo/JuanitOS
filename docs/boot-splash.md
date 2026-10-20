@@ -177,6 +177,19 @@ terminal (blank cells and border) from its 25 Hz timer *after*
 real FreeBSD 15.1 boot under QEMU: a black screen until the next stage
 redrew).
 
+The mouse pointer is the other thing `vt(4)` draws over a graphics-mode
+terminal. devd starts `moused` as soon as a mouse or touchpad attaches
+(between the storage and network stages), and `rc.d/moused` runs
+`vidcontrol -m on` on every `ttyv`: vt then draws its pointer once at the
+centre of the screen, with the blank text cells under it, which is where
+the card's title is (it erased the "I" of JUANITOS on an Acer Nitro 5).
+Pointer motion is ignored on a graphics-mode terminal, so that drawing
+never moves or goes away by itself. The daemon keeps its last frame and,
+when nothing changed, re-presents the 192 rows around the centre every
+50 ms tick (`pointer_rows` in `crates/jos-splash/src/server.rs`). The
+installer and the login screen start after `moused` and draw a full frame
+once they have switched terminals, which covers the pointer drawn at boot.
+
 ## What the loader and kernel do (verified against FreeBSD 15.1 sources)
 
 - `stand/efi/loader/efi_main.c` splits `LoadOptions` on spaces into

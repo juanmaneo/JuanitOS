@@ -9,12 +9,20 @@ pub mod keys;
 #[cfg(target_os = "freebsd")]
 pub mod vt;
 
+use std::ops::Range;
+
 use jos_gfx::{Image, Rgba};
 
 /// Something a full-screen program can be presented on.
 pub trait Display {
     fn size(&self) -> (u32, u32);
     fn present(&mut self, frame: &Image) -> anyhow::Result<()>;
+    /// Present only `rows` of `frame` (repairing what something else drew
+    /// over part of the screen). Defaults to the whole frame.
+    fn present_rows(&mut self, frame: &Image, rows: Range<u32>) -> anyhow::Result<()> {
+        let _ = rows;
+        self.present(frame)
+    }
     /// Restore the text console (end of the splash, console mode).
     fn restore_console(&mut self) -> anyhow::Result<()>;
     /// Hand the terminal to another program on the *same* VT (the login
@@ -109,6 +117,11 @@ pub struct NullDisplay {
     /// Bytes typed while frame N is on screen (counted from 1): keys
     /// pressed while the program is busy rather than waiting for them.
     pub typed_at_frame: Option<(usize, Vec<u8>)>,
+    /// Rows given to `present_rows`, call by call; they do not count as
+    /// frames.
+    pub repaired: Vec<Range<u32>>,
+    /// Fail `present_rows`.
+    pub fail_repair: bool,
 }
 
 impl NullDisplay {
@@ -124,6 +137,14 @@ impl NullDisplay {
     pub fn type_bytes(&mut self, bytes: &[u8]) {
         self.keys.extend(bytes);
     }
+
+    fn check_size(&self, frame: &Image) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            frame.width() == self.width && frame.height() == self.height,
+            "frame size mismatch"
+        );
+        Ok(())
+    }
 }
 
 impl Display for NullDisplay {
@@ -132,10 +153,7 @@ impl Display for NullDisplay {
     }
 
     fn present(&mut self, frame: &Image) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            frame.width() == self.width && frame.height() == self.height,
-            "frame size mismatch"
-        );
+        self.check_size(frame)?;
         if self.fail_after_frames.is_some_and(|n| self.presented >= n) {
             anyhow::bail!("framebuffer gone");
         }
@@ -146,6 +164,13 @@ impl Display for NullDisplay {
         if self.keep_frames {
             self.last_frame = Some(frame.clone());
         }
+        Ok(())
+    }
+
+    fn present_rows(&mut self, frame: &Image, rows: Range<u32>) -> anyhow::Result<()> {
+        self.check_size(frame)?;
+        anyhow::ensure!(!self.fail_repair, "framebuffer gone");
+        self.repaired.push(rows);
         Ok(())
     }
 
@@ -255,6 +280,22 @@ mod tests {
     }
 
     #[test]
+    fn null_display_records_repairs_apart_from_frames() {
+        let mut d = NullDisplay::new(4, 4);
+        let frame = Image::new(4, 4, Rgba::TRANSPARENT);
+        d.present_rows(&frame, 1..3).unwrap();
+        assert_eq!(d.presented, 0);
+        assert_eq!(d.repaired.first(), Some(&(1..3)));
+        assert!(d
+            .present_rows(&Image::new(5, 4, Rgba::TRANSPARENT), 0..1)
+            .is_err());
+        d.fail_repair = true;
+        let err = d.present_rows(&frame, 0..4).unwrap_err();
+        assert_eq!(err.to_string(), "framebuffer gone");
+        assert_eq!(d.repaired.len(), 1);
+    }
+
+    #[test]
     fn release_defaults_to_nothing() {
         struct Bare;
         impl Display for Bare {
@@ -273,6 +314,9 @@ mod tests {
         }
         let mut b = Bare;
         assert!(b.release().is_ok());
+        assert!(b
+            .present_rows(&Image::new(1, 1, Rgba::TRANSPARENT), 0..1)
+            .is_ok());
         assert!(b.present(&Image::new(1, 1, Rgba::TRANSPARENT)).is_ok());
         assert!(b.restore_console().is_ok());
         assert_eq!((b.size(), b.poll_key()), ((1, 1), None));

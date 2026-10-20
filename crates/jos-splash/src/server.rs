@@ -4,11 +4,12 @@
 //! tested with a [`NullDisplay`](jos_fb::NullDisplay). [`serve`] wires
 //! it to a Unix datagram socket and the keyboard on hosts that have them.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use anyhow::Context;
 use jos_gfx::scene::render_screen;
-use jos_gfx::{Scene, Stage};
+use jos_gfx::{Image, Rgba, Scene, Stage};
 
 use crate::proto::{Finish, Message};
 use jos_fb::keys::{Decoder, Key};
@@ -16,6 +17,18 @@ use jos_fb::Display;
 
 /// Poll period for the socket and the keyboard.
 pub const TICK: Duration = Duration::from_millis(50);
+
+/// Rows the vt(4) mouse pointer can dirty. When `moused` starts (devd runs
+/// it as soon as a mouse or touchpad attaches, in the middle of the boot)
+/// it turns the pointer on, and vt draws it once at the centre of the
+/// screen, right over the card title, together with the blank text cells
+/// under it (up to 16x32 pixels each). vt ignores pointer motion on a
+/// graphics-mode terminal, so that one drawing stays until repainted: the
+/// daemon re-presents these rows every [`TICK`].
+pub fn pointer_rows(height: u32) -> Range<u32> {
+    let cy = height / 2;
+    cy.saturating_sub(64)..(cy + 128).min(height)
+}
 
 /// What the loop should do after handling an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +44,8 @@ pub struct Splash<D: Display> {
     display: D,
     scene: Scene,
     dirty: bool,
+    /// The last frame presented.
+    frame: Image,
     /// Frames presented so far (for tests and `--dry-run` reporting).
     pub frames: usize,
 }
@@ -45,6 +60,7 @@ impl<D: Display> Splash<D> {
             display,
             scene,
             dirty: true,
+            frame: Image::new(0, 0, Rgba::TRANSPARENT),
             frames: 0,
         }
     }
@@ -107,14 +123,20 @@ impl<D: Display> Splash<D> {
         }
     }
 
-    /// Redraw if anything changed since the last frame.
+    /// Draw a new frame if anything changed since the last one, otherwise
+    /// repair the rows under the vt pointer ([`pointer_rows`]).
     pub fn redraw(&mut self) -> anyhow::Result<()> {
-        if !self.dirty {
-            return Ok(());
-        }
         let (w, h) = self.display.size();
-        let frame = render_screen(&self.scene, w, h);
-        self.display.present(&frame).context("presenting frame")?;
+        if !self.dirty {
+            return self
+                .display
+                .present_rows(&self.frame, pointer_rows(h))
+                .context("repairing frame");
+        }
+        self.frame = render_screen(&self.scene, w, h);
+        self.display
+            .present(&self.frame)
+            .context("presenting frame")?;
         self.frames += 1;
         self.dirty = false;
         Ok(())
@@ -253,6 +275,31 @@ mod tests {
         assert_eq!(s.frames, 2);
         assert!(s.scene().is_lit(Stage::Network));
         assert!(!s.scene().is_lit(Stage::Desktop));
+    }
+
+    #[test]
+    fn the_rows_under_the_pointer_are_repaired_between_frames() {
+        let mut s = Splash::new(NullDisplay::new(800, 600), None);
+        s.redraw().unwrap();
+        assert!(s.display().repaired.is_empty(), "a new frame covers it");
+        s.redraw().unwrap();
+        s.redraw().unwrap();
+        assert_eq!(s.frames, 1);
+        assert_eq!(s.display().repaired, vec![236..428, 236..428]);
+        // The band covers the card title and never leaves the screen.
+        assert_eq!(pointer_rows(40), 0..40);
+        assert_eq!(pointer_rows(1080), 476..668);
+
+        let mut s = Splash::new(
+            NullDisplay {
+                fail_repair: true,
+                ..NullDisplay::new(64, 40)
+            },
+            None,
+        );
+        s.redraw().unwrap();
+        let err = s.redraw().unwrap_err();
+        assert!(format!("{err:#}").contains("repairing frame"), "{err:#}");
     }
 
     #[test]

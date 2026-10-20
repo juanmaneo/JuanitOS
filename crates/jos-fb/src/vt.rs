@@ -14,6 +14,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Read;
+use std::ops::Range;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -211,6 +212,10 @@ impl Display for VtDisplay {
     }
 
     fn present(&mut self, frame: &Image) -> anyhow::Result<()> {
+        self.present_rows(frame, 0..self.height)
+    }
+
+    fn present_rows(&mut self, frame: &Image, rows: Range<u32>) -> anyhow::Result<()> {
         anyhow::ensure!(
             frame.width() == self.width && frame.height() == self.height,
             "frame {}x{} does not match the framebuffer {}x{}",
@@ -220,7 +225,7 @@ impl Display for VtDisplay {
             self.height
         );
         let row_bytes = (self.width as usize) * 4;
-        for y in 0..self.height {
+        for y in rows.start..rows.end.min(self.height) {
             let Some(row) = frame.row(y) else { break };
             let Some(buf) = self.row_buf.get_mut(..row_bytes) else {
                 break;
