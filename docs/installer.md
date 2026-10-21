@@ -186,7 +186,9 @@ moves. `rc.conf` runs a single `moused -p auto` (all evdev pointing
 devices, hotplug through devd) rather than devd's per-device instances:
 devfs sends no events for devices that attach while the kernel is still
 cold, so a PS/2 mouse or touchpad never got its own `moused` (seen under
-QEMU). A left click focuses and activates what it lands on: it
+QEMU). On the live medium `rc.local` starts it before the installer:
+`rc.d/local` comes before `rc.d/moused` in the boot order, so the mouse
+would otherwise only work once the installer exits. A left click focuses and activates what it lands on: it
 presses a button, ticks a box, selects a disk, ticks a device, or puts
 the caret in a field (at the nearest character, counted in average
 character widths). Without `moused` the installer says so on the console

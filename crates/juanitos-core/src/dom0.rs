@@ -388,6 +388,9 @@ if [ -x /usr/local/bin/jos-splash ]; then
 	/usr/local/bin/jos-splash stage desktop
 	/usr/local/bin/jos-splash finish --console
 fi
+# rc.d/local comes before rc.d/moused, which would only run once the
+# installer exits: start it now so the installer has the mouse.
+service moused start > /dev/null 2>&1
 if [ -x /usr/local/bin/jos-install ]; then
 	/usr/local/bin/jos-install --live < /dev/console > /dev/console 2>&1
 fi
@@ -652,10 +655,9 @@ mod tests {
         assert!(BINARIES.contains(&"jos-splash"));
         // The live installer needs the text console before LOGIN.
         let local = live_rc_local();
-        assert!(
-            local.find("jos-splash finish --console").unwrap()
-                < local.find("jos-install --live").unwrap()
-        );
+        let at = |s: &str| local.find(s).unwrap();
+        assert!(at("jos-splash finish --console") < at("service moused start"));
+        assert!(at("service moused start") < at("jos-install --live"));
     }
 
     #[test]
