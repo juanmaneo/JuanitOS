@@ -180,9 +180,13 @@ Keyboard: `Tab`/`Shift-Tab` or `Up`/`Down` move between fields,
 filter what they accept (digits for the swap size, host-name and
 user-name characters), passwords are masked.
 
-Mouse and touchpad: the installer reads `/dev/sysmouse`, where devd's
-`moused` publishes every pointing device, and draws its own pointer once
-the mouse moves. A left click focuses and activates what it lands on: it
+Mouse and touchpad: the installer reads `/dev/sysmouse`, where `moused`
+publishes every pointing device, and draws its own pointer once the mouse
+moves. `rc.conf` runs a single `moused -p auto` (all evdev pointing
+devices, hotplug through devd) rather than devd's per-device instances:
+devfs sends no events for devices that attach while the kernel is still
+cold, so a PS/2 mouse or touchpad never got its own `moused` (seen under
+QEMU). A left click focuses and activates what it lands on: it
 presses a button, ticks a box, selects a disk, ticks a device, or puts
 the caret in a field (at the nearest character, counted in average
 character widths). Without `moused` the installer says so on the console

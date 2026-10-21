@@ -314,8 +314,20 @@ pub fn rc_conf(flavor: Flavor, opts: &Dom0Options) -> String {
     s.push_str("# Graphical boot (see docs/boot-splash.md); Esc shows the console\n");
     s.push_str("jos_splash_enable=\"YES\"\n");
     s.push_str("rc_startmsgs=\"NO\"\n");
+    s.push_str(MOUSED_RC_CONF);
     s
 }
+
+/// One `moused -p auto` for every mouse and touchpad, hotplug included
+/// (the installer reads them through `/dev/sysmouse`). devd's per-device
+/// instances miss what attaches while the kernel is cold (devfs sends no
+/// events then: a PS/2 touchpad never got one) and would double the rest.
+const MOUSED_RC_CONF: &str = "\
+# Mice and touchpads: one moused for all of them (moused(8) -p auto)
+moused_enable=\"YES\"
+moused_port=\"auto\"
+moused_nondefault_enable=\"NO\"
+";
 
 /// `/boot/loader.conf` for a dom0. `pool` is the boot pool of an installed
 /// system (unused for the live medium).
@@ -644,6 +656,19 @@ mod tests {
             local.find("jos-splash finish --console").unwrap()
                 < local.find("jos-install --live").unwrap()
         );
+    }
+
+    #[test]
+    fn one_moused_serves_every_pointing_device() {
+        for flavor in [Flavor::Live, Flavor::Installed] {
+            let rc = rc_conf(flavor, &Dom0Options::default());
+            assert!(rc.contains("moused_enable=\"YES\"\n"), "{flavor:?}");
+            assert!(rc.contains("moused_port=\"auto\"\n"), "{flavor:?}");
+            assert!(
+                rc.contains("moused_nondefault_enable=\"NO\"\n"),
+                "{flavor:?}"
+            );
+        }
     }
 
     #[test]

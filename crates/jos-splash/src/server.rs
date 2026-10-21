@@ -18,9 +18,8 @@ use jos_fb::Display;
 /// Poll period for the socket and the keyboard.
 pub const TICK: Duration = Duration::from_millis(50);
 
-/// Rows the vt(4) mouse pointer can dirty. When `moused` starts (devd runs
-/// it as soon as a mouse or touchpad attaches, in the middle of the boot)
-/// it turns the pointer on, and vt draws it once at the centre of the
+/// Rows the vt(4) mouse pointer can dirty. When `rc.d/moused` runs (in the
+/// middle of the boot) it turns the pointer on, and vt draws it once at the centre of the
 /// screen, right over the card title, together with the blank text cells
 /// under it (up to 16x32 pixels each). vt ignores pointer motion on a
 /// graphics-mode terminal, so that one drawing stays until repainted: the
