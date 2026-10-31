@@ -702,7 +702,7 @@ impl<'a> Builder<'a> {
         // EFI/BOOT/BOOTX64.EFI, as Debian and Ubuntu media provide), and
         // jos-boot loads the loader from its own volume, so the loader must
         // be visible there too.
-        self.fs.copy_tree(&esp_dir, &root.join("EFI"), &[])?;
+        self.fs.copy_tree(&esp_dir, &root, &[])?;
 
         let bios = p.bios && root.join("boot/cdboot").is_file();
         let args = iso_args(p, &root, &esp_img, &iso, bios);
@@ -1911,10 +1911,12 @@ mod tests {
         b.iso_build().unwrap();
 
         assert!(s.0.join("work/efiboot").join(dom0::ESP_IA32).is_file());
-        let efi = s.0.join("work/rootfs/EFI");
-        assert!(efi.join(dom0::ESP_DEFAULT).is_file());
-        assert!(efi.join(dom0::ESP_IA32).is_file());
-        assert!(efi.join(dom0::ESP_LOADER).is_file());
+        let rootfs = s.0.join("work/rootfs");
+        for f in [dom0::ESP_DEFAULT, dom0::ESP_IA32, dom0::ESP_LOADER] {
+            assert!(f.starts_with("EFI/"), "{f}");
+            assert!(rootfs.join(f).is_file(), "{f}");
+        }
+        assert!(!rootfs.join("EFI/EFI").exists());
         let calls = m.calls();
         let cd = calls.iter().position(|c| c.contains("cd9660")).unwrap();
         assert!(calls[cd].contains("cdboot"));
