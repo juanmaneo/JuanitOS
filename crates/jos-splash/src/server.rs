@@ -230,16 +230,14 @@ pub fn serve<D: Display>(
     Ok(splash.into_display())
 }
 
-/// Send one message to a running daemon. A missing socket means no splash
-/// is running (text boot, or already finished): that is not an error for
-/// the rc.d scripts, so `Ok(false)` is returned instead.
+/// Send one message to a running daemon. A missing socket (the send
+/// ends in `NotFound` or `ConnectionRefused`) means no splash is running
+/// (text boot, already finished, or the stale socket of a crash): that is
+/// not an error for the rc.d scripts, so `Ok(false)` is returned instead.
 #[cfg(unix)]
 pub fn send(msg: &Message, socket_path: &std::path::Path) -> anyhow::Result<bool> {
     use std::os::unix::net::UnixDatagram;
 
-    if !socket_path.exists() {
-        return Ok(false);
-    }
     let sent =
         UnixDatagram::unbound().and_then(|sock| sock.send_to(msg.encode().as_bytes(), socket_path));
     match sent {
@@ -433,21 +431,34 @@ mod tests {
     }
 
     /// Run `serve` on `display` in a thread, send `msgs` once it listens,
-    /// and return its result.
+    /// and return its result. The server thread waits for a signal before
+    /// it starts, so while it is held back the socket is stale or absent
+    /// and the client's first send always fails: the retry body below
+    /// always runs at least once, whatever the scheduler does, which
+    /// keeps its coverage deterministic.
     #[cfg(unix)]
     fn serve_with(
         display: NullDisplay,
         path: &std::path::Path,
         msgs: &[&str],
     ) -> anyhow::Result<NullDisplay> {
+        let (go, wait) = std::sync::mpsc::channel::<()>();
         let p = path.to_path_buf();
-        let server = std::thread::spawn(move || serve(Splash::new(display, None), &p));
+        let server = std::thread::spawn(move || {
+            let _ = wait.recv();
+            serve(Splash::new(display, None), &p)
+        });
         let probe = std::os::unix::net::UnixDatagram::unbound().unwrap();
         for msg in msgs {
             while probe.send_to(msg.as_bytes(), path).is_err() {
                 std::thread::sleep(Duration::from_millis(5));
+                // Let the server start (the channel carries one message;
+                // the later sends are dropped with the receiver).
+                let _ = go.send(());
             }
         }
+        // Also start the server when there is nothing to send.
+        let _ = go.send(());
         server.join().unwrap()
     }
 
@@ -513,12 +524,18 @@ mod tests {
         drop(std::os::unix::net::UnixDatagram::bind(&path).unwrap());
         assert!(!send(&Message::Status("early".into()), &path).unwrap());
         let path2 = path.clone();
+        // The server thread waits for a signal, so the first send below
+        // meets the stale socket and fails: the retry body always runs,
+        // whatever the scheduler does.
+        let (go, wait) = std::sync::mpsc::channel::<()>();
         let server = std::thread::spawn(move || {
+            let _ = wait.recv();
             serve(Splash::new(NullDisplay::new(320, 200), None), &path2)
         });
         // Wait for the server to replace the stale socket.
         while !send(&Message::Stage(Stage::Network), &path).unwrap() {
             std::thread::sleep(Duration::from_millis(10));
+            let _ = go.send(());
         }
         assert!(send(&Message::Finish(Finish::Keep), &path).unwrap());
         let display = server.join().unwrap().unwrap();
