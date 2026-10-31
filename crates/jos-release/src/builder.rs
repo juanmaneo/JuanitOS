@@ -697,6 +697,13 @@ impl<'a> Builder<'a> {
             ],
         )?;
 
+        // The same files as ordinary ISO 9660 entries. Firmware that reads
+        // the disc's file system finds them there (Ventoy looks for
+        // EFI/BOOT/BOOTX64.EFI, as Debian and Ubuntu media provide), and
+        // jos-boot loads the loader from its own volume, so the loader must
+        // be visible there too.
+        self.fs.copy_tree(&esp_dir, &root.join("EFI"), &[])?;
+
         let bios = p.bios && root.join("boot/cdboot").is_file();
         let args = iso_args(p, &root, &esp_img, &iso, bios);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1904,6 +1911,10 @@ mod tests {
         b.iso_build().unwrap();
 
         assert!(s.0.join("work/efiboot").join(dom0::ESP_IA32).is_file());
+        let efi = s.0.join("work/rootfs/EFI");
+        assert!(efi.join(dom0::ESP_DEFAULT).is_file());
+        assert!(efi.join(dom0::ESP_IA32).is_file());
+        assert!(efi.join(dom0::ESP_LOADER).is_file());
         let calls = m.calls();
         let cd = calls.iter().position(|c| c.contains("cd9660")).unwrap();
         assert!(calls[cd].contains("cdboot"));
