@@ -40,6 +40,7 @@ installs, but no qube will start.
 /usr/local/src/juanitos   this repository + vendored crates (stage 2)
 El Torito: EFI (efiboot.img: jos-boot.efi as BOOTX64.EFI + EFI/FREEBSD/LOADER.EFI
            + loader_ia32.efi as BOOTIA32.EFI) and, when present, BIOS cdboot
+/EFI                      the same EFI files, visible in the ISO 9660 tree
 System area: protective MBR + GPT (isoboot, ESP → efiboot.img) for USB sticks
 ```
 
@@ -71,6 +72,16 @@ must be a plain, fully allocated copy: a sparse file (holes punched where
 the image is zero, as `mkfs.ext4 -d` or `debugfs write` do) cannot be
 mapped and Ventoy stops with `No bootfile found for UEFI!`. Any normal
 `cp` or file-manager copy is fine.
+
+Under UEFI, Ventoy's `ventoy_x64.efi` presents the ISO as a virtual disc
+and loads `\EFI\BOOT\BOOTX64.EFI` from whatever file system appears on
+it. Normally that is the El Torito image, which the firmware mounts
+itself. With `Ctrl+u` on the menu entry ("UEFI FS" in the corner),
+Ventoy loads its own ISO 9660 driver instead and reads the ISO's `/EFI`
+tree; this is the path for firmware that does not mount El Torito images
+on Ventoy's disc. That is why the ISO carries the EFI files twice, as
+Debian and Ubuntu media do. Both paths reach the installer with Ventoy
+1.1.18 under QEMU/OVMF.
 
 Ventoy normally injects a prebuilt `geom_ventoy.ko` matching the ISO's
 FreeBSD version, and only Ventoy 1.1.08 (December 2025) and later have one
@@ -105,16 +116,18 @@ extensions and no Secure Boot. What works and what does not:
   Yosemite) have 64-bit EFI and start `BOOTX64.EFI` (`jos-boot`). The
   earliest models have 32-bit EFI and start `BOOTIA32.EFI` (FreeBSD's
   `loader_ia32.efi`, text boot).
-- **Prefer `dd` over Ventoy on a Mac.** Ventoy's `BOOTX64.EFI` is a
-  Secure Boot shim. On a machine without Secure Boot it prints a line such
-  as `Not a Secure Boot Platform 14` and continues; we see the same line
-  on OVMF, where the boot goes on normally. That line is harmless on a
-  Mac too. What breaks is the next step: Ventoy's GRUB and its disk
-  emulation on Apple's old firmware. This is why other ISOs, Debian's
-  included, fail through Ventoy on the same Mac while they boot when
-  written directly. rEFInd may also not list a Ventoy stick in its
-  default MBR layout. Reinstalling Ventoy with a GPT layout
-  (`Ventoy2Disk.sh -i -g`) may help; we have not verified this.
+- **Ventoy on a Mac.** Ventoy's `BOOTX64.EFI` is a Secure Boot shim.
+  Without Secure Boot it prints `Not a Secure Boot Platform 14` (14 is
+  `EFI_NOT_FOUND`: there is no `SecureBoot` variable) and continues to
+  Ventoy's menu; Ubuntu shows the same line. Apple firmware keeps its
+  console in graphics mode, so if Ventoy then fails to find a boot file,
+  its `No bootfile found for UEFI!` can stay invisible and the screen
+  seems stuck on that shim line. If a Mac stops there with JuanitOS, try
+  the ISO with `Ctrl+u` (see above; not yet verified on a Mac). On a MacBook Air 7,1 Ubuntu 26.04 boots
+  from the same Ventoy stick; on a Yosemite-era MacBook Pro Debian 13
+  does not, so results vary by model and Ventoy version. rEFInd may not
+  list a Ventoy stick in its default MBR layout (the Option-key picker
+  does). `dd` avoids Ventoy altogether.
 - **Console mode.** Apple firmware starts applications with its console
   in graphics mode, which hides all text output. `jos-boot` switches the
   `EFI_CONSOLE_CONTROL_PROTOCOL` to graphics mode before drawing the card.
