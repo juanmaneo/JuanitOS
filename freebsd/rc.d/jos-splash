@@ -2,7 +2,7 @@
 #
 # PROVIDE: jos-splash
 # REQUIRE: FILESYSTEMS
-# BEFORE: hostname
+# BEFORE: hostname kld random
 #
 # Starts the JuanitOS boot splash as early as rc(8) allows: the file
 # systems are mounted (so /var/run exists and /usr/local/bin is readable),
@@ -10,6 +10,12 @@
 # while booting muted (loader.conf: splash=, boot_mute via jos-boot), so the
 # first thing the daemon does is redraw the very same picture with the
 # "storage" icon lit.
+#
+# The kernel drops its splash at the first console write, and
+# rc_startmsgs=NO only silences startmsg: rc.d/kld ("Loading kernel
+# modules:") and rc.d/random ("Setting up harvesting:") echo regardless.
+# Both come right after FILESYSTEMS too, so this script is ordered before
+# them: the daemon owns the screen before anything is printed.
 #
 # /etc/rc.conf:
 #   jos_splash_enable="YES"
@@ -27,6 +33,7 @@ load_rc_config $name
 : ${jos_splash_bin:="/usr/local/bin/jos-splash"}
 
 pidfile="/var/run/jos-splash.pid"
+socket="/var/run/jos-splash.sock"
 start_cmd="jos_splash_start"
 stop_cmd="jos_splash_stop"
 status_cmd="jos_splash_status"
@@ -36,8 +43,16 @@ jos_splash_start()
 	[ -x "${jos_splash_bin}" ] || return 0
 	# Only worth it on a graphics console.
 	[ -c /dev/ttyv0 ] || return 0
+	rm -f "${socket}"
 	/usr/sbin/daemon -f -p "${pidfile}" "${jos_splash_bin}" run \
 	    --vt "${jos_splash_vt}" --reached storage
+	# It switches terminals before it listens: the next scripts may print
+	# once the socket is there (a daemon that fails leaves it absent).
+	n=0
+	while [ ! -S "${socket}" ] && [ ${n} -lt 25 ]; do
+		sleep 0.2
+		n=$((n + 1))
+	done
 }
 
 jos_splash_stop()
@@ -48,7 +63,7 @@ jos_splash_stop()
 
 jos_splash_status()
 {
-	if [ -S /var/run/jos-splash.sock ]; then
+	if [ -S "${socket}" ]; then
 		echo "jos-splash is running."
 	else
 		echo "jos-splash is not running."

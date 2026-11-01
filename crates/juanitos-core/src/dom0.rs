@@ -701,6 +701,21 @@ mod tests {
     }
 
     #[test]
+    fn the_boot_splash_owns_the_screen_before_rc_prints() {
+        // The kernel splash dies at the first console write; rc.d/kld and
+        // rc.d/random echo even with rc_startmsgs=NO (seen under QEMU:
+        // "Loading kernel modules:" over a black screen between the kernel
+        // card and the daemon's first frame).
+        let s = RC_D_JOS_SPLASH;
+        assert!(s.contains("# BEFORE: hostname kld random"));
+        // daemon(8) returns at the fork: the script waits until the daemon
+        // listens, which it only does after its first frame.
+        let at = |needle: &str| s.find(needle).unwrap();
+        assert!(at("--reached storage") < at("while [ ! -S \"${socket}\" ]"));
+        assert!(at("rm -f \"${socket}\"") < at("--reached storage"));
+    }
+
+    #[test]
     fn going_single_user_draws_nothing_and_brings_the_console_back() {
         // init(8) runs `rc.shutdown single` for `shutdown now`, then a
         // shell on ttyv0: that must not hide behind a graphics terminal.

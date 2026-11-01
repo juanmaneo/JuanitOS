@@ -260,7 +260,11 @@ fn is_idle(kind: std::io::ErrorKind) -> bool {
     matches!(kind, WouldBlock | TimedOut | Interrupted)
 }
 
-/// Serve on a Unix datagram socket until a `finish` message.
+/// Serve on a Unix datagram socket until a `finish` message. The first
+/// frame is drawn before the socket appears: `rc.d/jos-splash` waits for
+/// the socket, and the scripts after it may print to the console once it
+/// is there (the kernel splash would not survive that; ours is on another
+/// terminal).
 #[cfg(unix)]
 pub fn serve<D: Display>(
     mut splash: Splash<D>,
@@ -274,23 +278,23 @@ pub fn serve<D: Display>(
         std::fs::remove_file(socket_path)
             .with_context(|| format!("removing stale {}", socket_path.display()))?;
     }
-    let sock = UnixDatagram::bind(socket_path)
-        .and_then(|s| s.set_read_timeout(Some(TICK)).map(|()| s))
-        .with_context(|| format!("binding {}", socket_path.display()))?;
-
-    let outcome = pump(&mut splash, &sock);
+    let outcome = splash.redraw().and_then(|()| {
+        let sock = UnixDatagram::bind(socket_path)
+            .and_then(|s| s.set_read_timeout(Some(TICK)).map(|()| s))
+            .with_context(|| format!("binding {}", socket_path.display()))?;
+        pump(&mut splash, &sock)
+    });
     splash.end(outcome)?;
     let _ = std::fs::remove_file(socket_path);
     Ok(splash.into_display())
 }
 
-/// The first frame, then [`step`] until the loop ends.
+/// [`step`] until the loop ends.
 #[cfg(unix)]
 fn pump<D: Display>(
     splash: &mut Splash<D>,
     sock: &std::os::unix::net::UnixDatagram,
 ) -> anyhow::Result<Flow> {
-    splash.redraw()?;
     let mut buf = [0u8; 512];
     loop {
         let received = sock.recv(&mut buf).map(|n| buf.get(..n).unwrap_or(&[]));
@@ -688,15 +692,30 @@ mod tests {
         let nowhere = d.0.join("missing/s.sock");
         let err = serve(Splash::new(NullDisplay::new(8, 8), None, false), &nowhere).unwrap_err();
         assert!(format!("{err:#}").contains("binding"), "{err:#}");
+        // The first frame comes before the socket: a daemon that cannot
+        // draw never has one, so rc.d/jos-splash does not wait for it.
+        let sock = d.0.join("s.sock");
+        let err = serve(
+            Splash::new(
+                NullDisplay {
+                    fail_after_frames: Some(0),
+                    ..NullDisplay::new(8, 8)
+                },
+                None,
+                false,
+            ),
+            &sock,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("framebuffer gone"), "{err:#}");
+        assert!(!sock.exists());
 
         let gone = |frames| NullDisplay {
             fail_after_frames: Some(frames),
             ..NullDisplay::new(8, 8)
         };
-        let sock = d.0.join("s.sock");
-        // The first frame, a frame after a message, the last frame.
+        // A frame after a message, the last frame.
         for (display, msgs) in [
-            (gone(0), &[][..]),
             (gone(1), &["stage network"][..]),
             (gone(1), &["finish keep"][..]),
         ] {

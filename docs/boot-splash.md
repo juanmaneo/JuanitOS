@@ -143,6 +143,16 @@ never touches the picture, `mmap`s the framebuffer and draws the card with
 *storage* lit. Then it listens on the Unix datagram socket
 `/var/run/jos-splash.sock`:
 
+The kernel drops its own splash at the first console write, and
+`rc_startmsgs="NO"` only silences `startmsg`: `rc.d/kld` (*Loading kernel
+modules:*) and `rc.d/random` (*Setting up harvesting:*) `echo` regardless,
+and both come right after `FILESYSTEMS` too. Seen under QEMU in 100 ms
+steps: the kernel card, then those lines on a black screen, then the
+daemon's first frame. So `rc.d/jos-splash` is ordered `BEFORE: kld random`
+and, since `daemon(8)` returns at the fork, waits until the socket exists;
+the daemon binds it only after its first frame. Nothing is printed before
+the card is on its own terminal.
+
 ```text
 stage <boot|kernel|storage|network|qubes|desktop>   light that icon (and earlier ones)
 leave <stage>                                      shutdown: turn that icon (and later ones) off
