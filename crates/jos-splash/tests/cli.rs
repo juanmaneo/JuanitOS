@@ -50,6 +50,15 @@ fn renders_screens_and_cards() {
     ]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("(720x420)"));
+    // The way down names what is stopping instead; the bytes differ.
+    let down = dir.join("down.png");
+    let out = splash(&["render", down.to_str().unwrap(), "--card", "--shutdown"]);
+    assert!(out.status.success());
+    let up = dir.join("up.png");
+    assert!(splash(&["render", up.to_str().unwrap(), "--card"])
+        .status
+        .success());
+    assert_ne!(std::fs::read(&down).unwrap(), std::fs::read(&up).unwrap());
 
     let out = splash(&["render", card.to_str().unwrap(), "--stage", "warp"]);
     assert!(!out.status.success());

@@ -11,7 +11,8 @@
 # every icon lit and turns the desktop icon off. rc.d/jos then turns the
 # qubes icon off, rc.d/jos-splash-network the network one, and the
 # kernel's shutdown splash (boot and kernel lit) follows when the disks are
-# synced: the icons go out from right to left.
+# synced: the icons go out from right to left, the progress bar empties
+# with them and the status line names what is stopping.
 #
 # `shutdown now` is not a power-off: init(8) runs rc.shutdown with "single"
 # (seen here as $rc_shutdown) and then starts a shell on the console,
@@ -51,11 +52,11 @@ jos_splash_shutdown_stop()
 	checkyesno jos_splash_enable || return 0
 	[ -x "${jos_splash_bin}" ] || return 0
 	# The boot splash ended at the login screen; one still running (the
-	# boot never got that far) is reused.
+	# boot never got that far) is reused and turns around with `leave`.
 	if ! pgrep -q -F "${pidfile}" 2>/dev/null; then
 		rm -f "${socket}"
 		/usr/sbin/daemon -f -p "${pidfile}" "${jos_splash_bin}" run \
-		    --vt "${jos_splash_vt}" --reached desktop
+		    --vt "${jos_splash_vt}" --reached desktop --shutdown
 		# It switches terminals before it listens.
 		n=0
 		while [ ! -S "${socket}" ] && [ ${n} -lt 25 ]; do
@@ -63,7 +64,6 @@ jos_splash_shutdown_stop()
 			n=$((n + 1))
 		done
 	fi
-	"${jos_splash_bin}" status "Shutting down"
 	"${jos_splash_bin}" leave desktop
 }
 

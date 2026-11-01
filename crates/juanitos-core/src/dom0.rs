@@ -684,15 +684,17 @@ mod tests {
         assert!(s.contains("KEYWORD: shutdown"));
         assert!(s.contains("REQUIRE: LOGIN jos jos-splash-finish"));
         assert!(s.contains("BEFORE: jos-login"));
-        assert!(s.contains("--reached desktop"));
-        assert!(s.find("status \"Shutting down\"") < s.find("leave desktop"));
+        assert!(s.find("--reached desktop --shutdown") < s.find("leave desktop"));
         for (script, leaves) in [
             (RC_D_JOS, "leave qubes"),
             (RC_D_JOS_SPLASH_NETWORK, "leave network"),
         ] {
             assert!(script.contains("KEYWORD: shutdown"), "{leaves}");
             assert!(script.contains(leaves));
+            // The daemon names the step in progress itself.
+            assert!(!script.contains("jos_splash_bin}\" status"), "{leaves}");
         }
+        assert!(RC_D_JOS.contains("stage qubes"));
         assert!(RC_D_JOS_LOGIN.contains("KEYWORD: shutdown"));
         // Stopping the boot splash would end the shutdown one.
         assert!(!RC_D_JOS_SPLASH.contains("KEYWORD: shutdown"));

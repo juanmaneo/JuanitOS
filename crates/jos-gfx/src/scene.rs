@@ -23,7 +23,10 @@ const TITLE_Y: i32 = 210;
 const ICON_SIZE: i32 = 44;
 const ICON_PITCH: i32 = 88;
 const ICON_Y: i32 = 270;
-const STATUS_Y: i32 = 350;
+/// The progress bar under the icons, as wide as their row.
+const BAR_Y: i32 = 340;
+const BAR_H: i32 = 6;
+const STATUS_Y: i32 = 362;
 const TEXT_SCALE: i32 = 2;
 const TITLE_SCALE: i32 = 3;
 
@@ -85,7 +88,11 @@ impl Stage {
 pub struct Scene {
     /// Stages reached so far (their icons are lit).
     pub lit: [bool; 6],
-    /// Optional one-line status under the icons.
+    /// The icons are going out, right to left (the shutdown): the status
+    /// line names what is stopping rather than what is starting.
+    pub shutting_down: bool,
+    /// Optional one-line status under the icons; without one the step in
+    /// progress is named ([`Scene::step_label`]).
     pub status: Option<String>,
     /// Optional menu (pre-loader): items and the selected index.
     pub menu: Option<Menu>,
@@ -108,9 +115,36 @@ impl Scene {
     pub fn new() -> Self {
         Scene {
             lit: [false; 6],
+            shutting_down: false,
             status: None,
             menu: None,
         }
+    }
+
+    /// How many icons are lit: `reach` and `leave` keep them a prefix of
+    /// [`STAGES`].
+    fn lit_count(&self) -> usize {
+        self.lit.iter().filter(|lit| **lit).count()
+    }
+
+    /// The step in progress, for the status line when nothing more
+    /// specific was said: the stage after the lit ones ("STARTING
+    /// NETWORK"), or on the way down the last lit one going out
+    /// ("STOPPING QUBES"; "SHUTTING DOWN" once only storage and the
+    /// kernel's part are left). None when there is no step left.
+    pub fn step_label(&self) -> Option<String> {
+        let mut stages = STAGES.iter().zip(self.lit);
+        let (verb, stage) = if self.shutting_down {
+            match stages.rfind(|(_, lit)| *lit)?.0 {
+                Stage::Boot | Stage::Kernel | Stage::Storage => {
+                    return Some("SHUTTING DOWN".into())
+                }
+                stage => ("STOPPING", stage),
+            }
+        } else {
+            ("STARTING", stages.find(|(_, lit)| !*lit)?.0)
+        };
+        Some(alloc::format!("{verb} {}", stage.name().to_uppercase()))
     }
 
     /// Light `stage` and every stage before it (a late notification must
@@ -150,8 +184,7 @@ impl Scene {
             return img;
         }
 
-        let n = STAGES.len() as i32;
-        let row_w = (n - 1) * ICON_PITCH + ICON_SIZE;
+        let row_w = row_width(STAGES.len());
         let x0 = cx - row_w / 2;
         for (i, stage) in STAGES.iter().enumerate() {
             let lit = self.is_lit(*stage);
@@ -177,8 +210,22 @@ impl Scene {
             }
         }
 
-        if let Some(status) = &self.status {
-            font::draw_text_centered(&mut img, cx, STATUS_Y, status, TEXT_SCALE, THEME.text_muted);
+        // The progress bar reaches the last lit icon.
+        img.rounded_rect(Rect::new(x0, BAR_Y, row_w, BAR_H), 3.0, THEME.highlight);
+        let fill = row_width(self.lit_count());
+        if fill > 0 {
+            img.rounded_rect(Rect::new(x0, BAR_Y, fill, BAR_H), 3.0, THEME.accent);
+        }
+
+        if let Some(status) = self.status.clone().or_else(|| self.step_label()) {
+            font::draw_text_centered(
+                &mut img,
+                cx,
+                STATUS_Y,
+                &status,
+                TEXT_SCALE,
+                THEME.text_muted,
+            );
         }
         img
     }
@@ -203,6 +250,15 @@ impl Scene {
         }
         let hint_y = CARD_HEIGHT as i32 - font::text_height(1) - 12;
         font::draw_text_centered(img, cx, hint_y, &menu.hint, 1, THEME.text_muted);
+    }
+}
+
+/// Width of a row of `n` icons, from the first one's left edge to the
+/// last one's right edge (0 for none).
+fn row_width(n: usize) -> i32 {
+    match n as i32 {
+        0 => 0,
+        n => (n - 1) * ICON_PITCH + ICON_SIZE,
     }
 }
 
@@ -310,6 +366,71 @@ mod tests {
             .filter(|p| **p == THEME.accent)
             .count();
         assert!(all_accent > accent);
+    }
+
+    /// Pixels of colour `c` in the rows of the progress bar.
+    fn bar_pixels(img: &Image, c: crate::Rgba) -> usize {
+        (BAR_Y..BAR_Y + BAR_H)
+            .flat_map(|y| (0..CARD_WIDTH as i32).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.get(x, y) == Some(c))
+            .count()
+    }
+
+    #[test]
+    fn the_progress_bar_reaches_the_last_lit_icon() {
+        let mut s = Scene::new();
+        let none = s.render_card();
+        assert_eq!(bar_pixels(&none, THEME.accent), 0);
+        assert!(bar_pixels(&none, THEME.highlight) > 400 * BAR_H as usize);
+        s.reach(Stage::Boot);
+        let one = bar_pixels(&s.render_card(), THEME.accent);
+        assert!(one > 0 && one <= (ICON_SIZE * BAR_H) as usize, "{one}");
+        s.reach(Stage::Desktop);
+        let all = bar_pixels(&s.render_card(), THEME.accent);
+        assert!(all > 5 * one, "{all}");
+        assert_eq!(row_width(0), 0);
+        assert_eq!(row_width(1), ICON_SIZE);
+        assert_eq!(row_width(6), 5 * ICON_PITCH + ICON_SIZE);
+    }
+
+    #[test]
+    fn the_step_in_progress_is_named() {
+        let mut s = Scene::new();
+        assert_eq!(s.step_label().as_deref(), Some("STARTING BOOT"));
+        s.reach(Stage::Storage);
+        assert_eq!(s.step_label().as_deref(), Some("STARTING NETWORK"));
+        s.reach(Stage::Qubes);
+        assert_eq!(s.step_label().as_deref(), Some("STARTING DESKTOP"));
+        s.reach(Stage::Desktop);
+        assert_eq!(s.step_label(), None);
+
+        s.shutting_down = true;
+        assert_eq!(s.step_label().as_deref(), Some("STOPPING DESKTOP"));
+        s.leave(Stage::Desktop);
+        assert_eq!(s.step_label().as_deref(), Some("STOPPING QUBES"));
+        s.leave(Stage::Qubes);
+        assert_eq!(s.step_label().as_deref(), Some("STOPPING NETWORK"));
+        s.leave(Stage::Network);
+        assert_eq!(s.step_label().as_deref(), Some("SHUTTING DOWN"));
+        s.leave(Stage::Kernel);
+        assert_eq!(s.step_label().as_deref(), Some("SHUTTING DOWN"));
+        s.leave(Stage::Boot);
+        assert_eq!(s.step_label(), None);
+
+        // Drawn in place of an absent status, never over a given one.
+        let muted = |s: &Scene| {
+            s.render_card()
+                .pixels()
+                .iter()
+                .filter(|p| **p == THEME.text_muted)
+                .count()
+        };
+        assert_eq!(muted(&s), 0);
+        s.reach(Stage::Network);
+        let labelled = muted(&s);
+        assert!(labelled > 50);
+        s.status = Some("HI".into());
+        assert!(muted(&s) < labelled);
     }
 
     #[test]

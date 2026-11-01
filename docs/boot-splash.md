@@ -17,7 +17,14 @@ and hand the picture to each other.
 
 The card is 720×420 pixels and is always placed with the kernel's own
 centring formula `((screen - card) / 2)`, so it does not move between
-phases. Background is pure black, which is what `vt(4)` blanks to.
+phases. Background is pure black, which is what `vt(4)` blanks to. Under
+the icons a progress bar reaches the last lit one, and a status line
+names the step in progress: *STARTING NETWORK* once storage is lit, and
+so on, with no percentage; at shutdown the icons go out from the right,
+the bar empties with them and the line reads *STOPPING QUBES*, ...,
+*SHUTTING DOWN* (`Scene::step_label` in `crates/jos-gfx/src/scene.rs`).
+An explicit status (`jos-splash status ...`, the pre-loader's note about
+a failed boot) is shown instead while it is set.
 
 ## Components
 
@@ -139,7 +146,7 @@ never touches the picture, `mmap`s the framebuffer and draws the card with
 ```text
 stage <boot|kernel|storage|network|qubes|desktop>   light that icon (and earlier ones)
 leave <stage>                                      shutdown: turn that icon (and later ones) off
-status <text>                                      one line under the icons
+status <text>                                      one line under the icons (empty: the step label again)
 finish [keep|console]                              end: leave the frame / restore the console
 ```
 
@@ -168,7 +175,7 @@ Hooks:
 |-----------------------|-----------------|-----------------------------------------|
 | `jos-splash`          | `FILESYSTEMS`   | starts the daemon (`--reached storage`) |
 | `jos-splash-network`  | `NETWORKING`    | `stage network`                         |
-| `jos`                 | `LOGIN`         | `status Starting qubes`, `stage qubes`  |
+| `jos`                 | `LOGIN`         | `stage qubes`                           |
 | `jos-splash-finish`   | `LOGIN jos`     | `stage desktop`, then `finish` if the login screen is enabled and installed, else `finish --console` |
 | `jos-login`           | `LOGIN seatd dbus jos-splash-finish` | nothing; starts `jos-greet` under daemon(8) |
 
@@ -178,8 +185,8 @@ in reverse boot order, and the icons go out from right to left:
 | rc.d script (stop)    | Order (verified with `rcorder -k shutdown` on 15.1) | Sends |
 |-----------------------|-----------------------------|-------------------------------------------|
 | `jos-login`           | first                       | nothing; stops the greeter (and the session) |
-| `jos-splash-shutdown` | right after                 | starts the daemon again (`--reached desktop`), `status Shutting down`, `leave desktop` |
-| `jos`                 | before the system services  | `status Stopping qubes`, stops the qubes, `leave qubes` |
+| `jos-splash-shutdown` | right after                 | starts the daemon again (`--reached desktop --shutdown`), `leave desktop` |
+| `jos`                 | before the system services  | stops the qubes, `leave qubes`          |
 | `jos-splash-network`  | before the network goes down | `leave network`                         |
 
 The kernel's own `shutdown_splash` (the boot PNG: boot and kernel lit)

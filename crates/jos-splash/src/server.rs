@@ -52,11 +52,15 @@ pub struct Splash<D: Display> {
 }
 
 impl<D: Display> Splash<D> {
-    pub fn new(display: D, reached: Option<Stage>) -> Self {
+    /// `reached` is the stage already lit when the daemon starts;
+    /// `shutting_down` runs the card backwards from the start (the
+    /// shutdown daemon), which a `leave` message also does.
+    pub fn new(display: D, reached: Option<Stage>, shutting_down: bool) -> Self {
         let mut scene = Scene::new();
         if let Some(stage) = reached {
             scene.reach(stage);
         }
+        scene.shutting_down = shutting_down;
         Splash {
             display,
             scene,
@@ -102,8 +106,9 @@ impl<D: Display> Splash<D> {
                 Flow::Continue
             }
             Message::Leave(stage) => {
-                if self.scene.is_lit(stage) {
+                if self.scene.is_lit(stage) || !self.scene.shutting_down {
                     self.scene.leave(stage);
+                    self.scene.shutting_down = true;
                     self.dirty = true;
                 }
                 Flow::Continue
@@ -344,7 +349,7 @@ mod tests {
 
     #[test]
     fn stages_light_up_and_only_changes_redraw() {
-        let mut s = Splash::new(NullDisplay::new(800, 600), Some(Stage::Storage));
+        let mut s = Splash::new(NullDisplay::new(800, 600), Some(Stage::Storage), false);
         s.redraw().unwrap();
         assert_eq!(s.frames, 1);
         s.redraw().unwrap();
@@ -363,7 +368,7 @@ mod tests {
 
     #[test]
     fn the_rows_under_the_pointer_are_repaired_between_frames() {
-        let mut s = Splash::new(NullDisplay::new(800, 600), None);
+        let mut s = Splash::new(NullDisplay::new(800, 600), None, false);
         s.redraw().unwrap();
         assert!(s.display().repaired.is_empty(), "a new frame covers it");
         s.redraw().unwrap();
@@ -380,6 +385,7 @@ mod tests {
                 ..NullDisplay::new(64, 40)
             },
             None,
+            false,
         );
         s.redraw().unwrap();
         let err = s.redraw().unwrap_err();
@@ -388,22 +394,35 @@ mod tests {
 
     #[test]
     fn shutdown_turns_the_icons_off_from_the_right() {
-        let mut s = Splash::new(NullDisplay::new(320, 200), Some(Stage::Desktop));
+        let mut s = Splash::new(NullDisplay::new(320, 200), Some(Stage::Desktop), true);
+        assert_eq!(s.scene().step_label().as_deref(), Some("STOPPING DESKTOP"));
         s.redraw().unwrap();
         assert_eq!(s.handle(Message::Leave(Stage::Qubes)), Flow::Continue);
         s.redraw().unwrap();
         assert_eq!(s.frames, 2);
         assert!(s.scene().is_lit(Stage::Network));
         assert!(!s.scene().is_lit(Stage::Desktop));
+        assert_eq!(s.scene().step_label().as_deref(), Some("STOPPING NETWORK"));
         // Already dark: nothing to draw.
         s.handle(Message::Leave(Stage::Desktop));
         s.redraw().unwrap();
         assert_eq!(s.frames, 2);
+
+        // A boot daemon reused at shutdown turns around on the first
+        // `leave`, even of a stage that is already dark.
+        let mut s = Splash::new(NullDisplay::new(320, 200), Some(Stage::Network), false);
+        s.redraw().unwrap();
+        assert_eq!(s.scene().step_label().as_deref(), Some("STARTING QUBES"));
+        s.handle(Message::Leave(Stage::Desktop));
+        assert!(s.scene().shutting_down);
+        s.redraw().unwrap();
+        assert_eq!(s.frames, 2);
+        assert_eq!(s.scene().step_label().as_deref(), Some("STOPPING NETWORK"));
     }
 
     #[test]
     fn status_is_uppercased_and_cleared() {
-        let mut s = Splash::new(NullDisplay::new(640, 480), None);
+        let mut s = Splash::new(NullDisplay::new(640, 480), None, false);
         s.handle(Message::Status("Starting network".into()));
         assert_eq!(s.scene().status.as_deref(), Some("STARTING NETWORK"));
         s.handle(Message::Status(String::new()));
@@ -412,14 +431,14 @@ mod tests {
 
     #[test]
     fn finish_modes() {
-        let mut s = Splash::new(NullDisplay::new(640, 480), None);
+        let mut s = Splash::new(NullDisplay::new(640, 480), None, false);
         assert_eq!(s.handle(Message::Finish(Finish::Keep)), Flow::ExitKeep);
         s.finish(Flow::ExitKeep).unwrap();
         assert!(s.scene().is_lit(Stage::Desktop));
         assert!(!s.display().restored);
         assert_eq!(s.frames, 1);
 
-        let mut c = Splash::new(NullDisplay::new(640, 480), None);
+        let mut c = Splash::new(NullDisplay::new(640, 480), None, false);
         assert_eq!(
             c.handle(Message::Finish(Finish::Console)),
             Flow::ExitConsole
@@ -432,7 +451,7 @@ mod tests {
     fn escape_toggles_the_console() {
         let mut d = NullDisplay::new(640, 480);
         d.type_bytes(b"a\x1b");
-        let mut s = Splash::new(d, None);
+        let mut s = Splash::new(d, None, false);
         s.redraw().unwrap();
         s.handle_keys().unwrap();
         assert!(s.hidden() && s.display().restored);
@@ -464,7 +483,7 @@ mod tests {
         let mut d = NullDisplay::new(640, 480);
         // Arrow keys start with ESC but are not Escape.
         d.type_bytes(b"x\x1b[A\x1b[B");
-        let mut s = Splash::new(d, None);
+        let mut s = Splash::new(d, None, false);
         s.handle_keys().unwrap();
         assert!(!s.hidden());
     }
@@ -475,7 +494,7 @@ mod tests {
             fail_release: true,
             ..NullDisplay::new(64, 40)
         };
-        let mut s = Splash::new(stuck, None);
+        let mut s = Splash::new(stuck, None, false);
         s.display_mut().type_bytes(b"\x1b");
         let err = s.handle_keys().unwrap_err();
         assert!(
@@ -484,7 +503,7 @@ mod tests {
         );
         assert!(!s.hidden());
 
-        let mut s = Splash::new(NullDisplay::new(64, 40), None);
+        let mut s = Splash::new(NullDisplay::new(64, 40), None, false);
         s.display_mut().type_bytes(b"\x1b");
         s.handle_keys().unwrap();
         s.display_mut().fail_release = true;
@@ -501,7 +520,7 @@ mod tests {
     fn finishing_behind_the_console_leaves_it() {
         let mut d = NullDisplay::new(64, 40);
         d.type_bytes(b"\x1b");
-        let mut s = Splash::new(d, None);
+        let mut s = Splash::new(d, None, false);
         s.handle_keys().unwrap();
         s.finish(Flow::ExitKeep).unwrap();
         assert_eq!(s.frames, 0);
@@ -513,7 +532,7 @@ mod tests {
     #[test]
     fn every_loop_outcome() {
         use std::io::{Error, ErrorKind};
-        let mut s = Splash::new(NullDisplay::new(320, 200), None);
+        let mut s = Splash::new(NullDisplay::new(320, 200), None, false);
         // A message that changes the scene is drawn in the same turn.
         assert_eq!(step(&mut s, Ok(b"stage network")).unwrap(), None);
         assert_eq!(s.frames, 1);
@@ -540,7 +559,7 @@ mod tests {
         // Esc is handled even when nothing arrived, and the loop goes on.
         let mut d = NullDisplay::new(320, 200);
         d.type_bytes(b"\x1b");
-        let mut s = Splash::new(d, None);
+        let mut s = Splash::new(d, None, false);
         let idle = Err(Error::from(ErrorKind::WouldBlock));
         assert_eq!(step(&mut s, idle).unwrap(), None);
         assert!(s.hidden());
@@ -557,7 +576,7 @@ mod tests {
 
     #[test]
     fn an_error_gives_the_console_back() {
-        let mut s = Splash::new(NullDisplay::new(8, 8), None);
+        let mut s = Splash::new(NullDisplay::new(8, 8), None, false);
         let err = s.end(Err(anyhow::anyhow!("framebuffer gone"))).unwrap_err();
         assert_eq!(err.to_string(), "framebuffer gone");
         assert!(s.display().restored);
@@ -567,7 +586,7 @@ mod tests {
             fail_release: true,
             ..NullDisplay::new(8, 8)
         };
-        let mut s = Splash::new(stuck, None);
+        let mut s = Splash::new(stuck, None, false);
         let err = s.end(Err(anyhow::anyhow!("boom"))).unwrap_err();
         assert_eq!(err.to_string(), "boom");
         assert!(!s.display().restored);
@@ -595,7 +614,7 @@ mod tests {
 
     #[test]
     fn the_same_status_twice_draws_once() {
-        let mut s = Splash::new(NullDisplay::new(64, 40), None);
+        let mut s = Splash::new(NullDisplay::new(64, 40), None, false);
         s.handle(Message::Status("Starting".into()));
         s.redraw().unwrap();
         s.handle(Message::Status("Starting".into()));
@@ -640,7 +659,7 @@ mod tests {
         let p = path.to_path_buf();
         let server = std::thread::spawn(move || {
             let _ = wait.recv();
-            serve(Splash::new(display, None), &p)
+            serve(Splash::new(display, None, false), &p)
         });
         let probe = std::os::unix::net::UnixDatagram::unbound().unwrap();
         for msg in msgs {
@@ -663,11 +682,11 @@ mod tests {
         // A stale path that cannot be removed (a non-empty directory).
         let stuck = d.0.join("stuck");
         std::fs::create_dir_all(stuck.join("x")).unwrap();
-        let err = serve(Splash::new(NullDisplay::new(8, 8), None), &stuck).unwrap_err();
+        let err = serve(Splash::new(NullDisplay::new(8, 8), None, false), &stuck).unwrap_err();
         assert!(format!("{err:#}").contains("removing stale"), "{err:#}");
         // A socket in a directory that does not exist.
         let nowhere = d.0.join("missing/s.sock");
-        let err = serve(Splash::new(NullDisplay::new(8, 8), None), &nowhere).unwrap_err();
+        let err = serve(Splash::new(NullDisplay::new(8, 8), None, false), &nowhere).unwrap_err();
         assert!(format!("{err:#}").contains("binding"), "{err:#}");
 
         let gone = |frames| NullDisplay {
@@ -724,7 +743,7 @@ mod tests {
         let (go, wait) = std::sync::mpsc::channel::<()>();
         let server = std::thread::spawn(move || {
             let _ = wait.recv();
-            serve(Splash::new(NullDisplay::new(320, 200), None), &path2)
+            serve(Splash::new(NullDisplay::new(320, 200), None, false), &path2)
         });
         // Wait for the server to replace the stale socket.
         while !send(&Message::Stage(Stage::Network), &path).unwrap() {

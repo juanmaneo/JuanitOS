@@ -35,9 +35,6 @@ serve_pidfile="/var/run/juanitos/serve.pid"
 jos_start()
 {
 	echo "Starting JuanitOS qubes."
-	if [ -x "${jos_splash_bin}" ]; then
-		"${jos_splash_bin}" status "Starting qubes"
-	fi
 	# The request broker (jos-copy in the qubes, docs/inter-qube.md).
 	if checkyesno jos_serve_enable; then
 		mkdir -p /var/run/juanitos
@@ -47,18 +44,16 @@ jos_start()
 	# Each qube gets its own detached `jos supervise` process, logging to
 	# /var/run/juanitos/<name>.log.
 	"${jos_bin}" --config "${jos_config}" autostart
+	# The boot splash (rc.d/jos-splash), if any: it names the step in
+	# progress itself ("Starting qubes" until this, then the desktop).
 	if [ -x "${jos_splash_bin}" ]; then
 		"${jos_splash_bin}" stage qubes
-		"${jos_splash_bin}" status
 	fi
 }
 
 jos_stop()
 {
 	echo "Stopping JuanitOS qubes."
-	if [ -x "${jos_splash_bin}" ]; then
-		"${jos_splash_bin}" status "Stopping qubes"
-	fi
 	if [ -e "${serve_pidfile}" ]; then
 		kill "$(cat "${serve_pidfile}")" 2>/dev/null
 		rm -f "${serve_pidfile}"
@@ -80,7 +75,6 @@ jos_stop()
 	# The shutdown splash (rc.d/jos-splash-shutdown), if any.
 	if [ -x "${jos_splash_bin}" ]; then
 		"${jos_splash_bin}" leave qubes
-		"${jos_splash_bin}" status "Shutting down"
 	fi
 }
 

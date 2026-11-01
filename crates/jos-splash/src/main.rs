@@ -68,6 +68,10 @@ struct RunArgs {
     /// Stage already reached when the daemon starts.
     #[arg(long, default_value = "storage")]
     reached: String,
+    /// The shutdown: the icons go out from the right, the status line
+    /// names what is stopping.
+    #[arg(long)]
+    shutdown: bool,
     /// Do not touch the console: serve on the socket with a fake display.
     #[arg(long)]
     dry_run: bool,
@@ -83,8 +87,12 @@ struct RenderArgs {
     /// Highest stage to light (`none` for all dark).
     #[arg(long, default_value = "kernel")]
     stage: String,
+    /// Status line; without one the step in progress is named.
     #[arg(long)]
     status: Option<String>,
+    /// The card on its way down.
+    #[arg(long)]
+    shutdown: bool,
     /// Only the card, not a full screen (the kernel centres it itself).
     #[arg(long)]
     card: bool,
@@ -159,6 +167,7 @@ fn render(a: &RenderArgs) -> anyhow::Result<()> {
     if let Some(stage) = parse_stage(&a.stage)? {
         scene.reach(stage);
     }
+    scene.shutting_down = a.shutdown;
     scene.status = a.status.as_ref().map(|s| s.to_uppercase());
     let img = if a.card {
         scene.render_card()
@@ -179,7 +188,7 @@ fn render(a: &RenderArgs) -> anyhow::Result<()> {
 fn run_daemon(a: &RunArgs, socket: &std::path::Path) -> anyhow::Result<()> {
     let reached = parse_stage(&a.reached)?;
     if a.dry_run {
-        return run_dry(reached, socket);
+        return run_dry(a, reached, socket);
     }
     let mut display = jos_fb::vt::VtDisplay::open(a.vt)?;
     let keyboards = display.listen_keyboards();
@@ -187,7 +196,7 @@ fn run_daemon(a: &RunArgs, socket: &std::path::Path) -> anyhow::Result<()> {
         "jos-splash: drawing on VT {}, {keyboards} evdev node(s)",
         a.vt
     );
-    server::serve(Splash::new(display, reached), socket)?;
+    server::serve(Splash::new(display, reached, a.shutdown), socket)?;
     Ok(())
 }
 
@@ -195,7 +204,7 @@ fn run_daemon(a: &RunArgs, socket: &std::path::Path) -> anyhow::Result<()> {
 fn run_daemon(a: &RunArgs, socket: &std::path::Path) -> anyhow::Result<()> {
     let reached = parse_stage(&a.reached)?;
     if a.dry_run {
-        return run_dry(reached, socket);
+        return run_dry(a, reached, socket);
     }
     bail!("the framebuffer backend only exists on FreeBSD; use --dry-run here")
 }
@@ -207,9 +216,10 @@ fn run_daemon(a: &RunArgs, _socket: &std::path::Path) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-fn run_dry(reached: Option<Stage>, socket: &std::path::Path) -> anyhow::Result<()> {
+fn run_dry(a: &RunArgs, reached: Option<Stage>, socket: &std::path::Path) -> anyhow::Result<()> {
     println!("jos-splash: dry run, listening on {}", socket.display());
-    let display = server::serve(Splash::new(NullDisplay::new(1280, 800), reached), socket)?;
+    let splash = Splash::new(NullDisplay::new(1280, 800), reached, a.shutdown);
+    let display = server::serve(splash, socket)?;
     println!(
         "jos-splash: {} frame(s) presented, console {}",
         display.presented,
