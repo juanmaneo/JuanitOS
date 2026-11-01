@@ -5,7 +5,8 @@
 //! first free one, `ttyv8`), switches to it, puts it in graphics mode so
 //! console output never dirties the shown picture, and maps the
 //! framebuffer. Keys typed on that terminal are read in raw mode so Esc can
-//! drop the user on the text console.
+//! drop the user on the text console; the keyboards' evdev nodes bring the
+//! Esc that takes the screen back ([`VtDisplay::listen_keyboards`]).
 //!
 //! All `unsafe` is in this file and limited to the system calls themselves
 //! (`ioctl`, `mmap`, `munmap`, `tcgetattr`/`tcsetattr`, `fcntl`); every
@@ -23,10 +24,16 @@ use anyhow::{bail, Context};
 use jos_gfx::Image;
 
 use crate::mouse::{self, Mouse};
-use crate::{ioc, pack_row, Display, RgbOffsets};
+use crate::{evdev, ioc, pack_row, Display, RgbOffsets};
 
 /// Where `moused` publishes every mouse and touchpad.
 pub const SYSMOUSE: &str = "/dev/sysmouse";
+
+/// Where `evdev(4)` publishes the keyboards (and mice): `event*` nodes.
+pub const INPUT_DIR: &str = "/dev/input";
+
+/// The text console, `ttyv0`, as a 1-based terminal number.
+pub const CONSOLE_VT: i32 = 1;
 
 /// `struct fbtype` from `sys/fbio.h`.
 #[repr(C)]
@@ -56,7 +63,6 @@ pub const POST_SWITCH_SETTLE: std::time::Duration = std::time::Duration::from_mi
 pub struct VtDisplay {
     tty: File,
     vt: i32,
-    previous_vt: i32,
     width: u32,
     height: u32,
     stride: usize,
@@ -68,6 +74,7 @@ pub struct VtDisplay {
     row_buf: Vec<u8>,
     console_restored: bool,
     mouse: Option<File>,
+    keyboards: Vec<File>,
 }
 
 fn ioctl_int(fd: libc::c_int, req: u32, value: libc::c_int, what: &str) -> anyhow::Result<()> {
@@ -90,6 +97,25 @@ fn ioctl_out<T: Default>(fd: libc::c_int, req: u32, what: &str) -> anyhow::Resul
     Ok(out)
 }
 
+/// Switch to terminal `vt` (the one `fd` is open on) in graphics mode.
+/// vt(4) marks the screen invalid on a window switch and repaints it (black
+/// cells, border) from its 25 Hz timer, after `VT_WAITACTIVE` returns and
+/// regardless of `KD_GRAPHICS`. A frame drawn before that repaint is wiped,
+/// so the timer is given a few ticks before this returns.
+fn take_terminal(fd: libc::c_int, vt: i32) -> anyhow::Result<()> {
+    ioctl_int(fd, ioc::VT_ACTIVATE, vt, "VT_ACTIVATE")?;
+    ioctl_int(fd, ioc::VT_WAITACTIVE, vt, "VT_WAITACTIVE")?;
+    ioctl_int(fd, ioc::KDSETMODE, ioc::KD_GRAPHICS, "KDSETMODE")?;
+    std::thread::sleep(POST_SWITCH_SETTLE);
+    Ok(())
+}
+
+/// Text mode on `fd`'s terminal, then the console on screen.
+fn show_console(fd: libc::c_int) -> anyhow::Result<()> {
+    ioctl_int(fd, ioc::KDSETMODE, ioc::KD_TEXT, "KDSETMODE")?;
+    ioctl_int(fd, ioc::VT_ACTIVATE, CONSOLE_VT, "VT_ACTIVATE")
+}
+
 impl VtDisplay {
     /// Open `/dev/ttyv{vt-1}`, switch to it and map its framebuffer.
     pub fn open(vt: i32) -> anyhow::Result<Self> {
@@ -109,7 +135,6 @@ impl VtDisplay {
             .with_context(|| format!("opening {}", path.display()))?;
         let fd = tty.as_raw_fd();
 
-        let previous_vt: i32 = ioctl_out(fd, ioc::VT_GETACTIVE, "VT_GETACTIVE").unwrap_or(1);
         let fb: FbType = ioctl_out(fd, ioc::FBIOGTYPE, "FBIOGTYPE")?;
         if fb.fb_depth != 32 {
             bail!(
@@ -144,14 +169,7 @@ impl VtDisplay {
         // SAFETY: fcntl with F_GETFL takes no further arguments.
         let saved_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
 
-        ioctl_int(fd, ioc::VT_ACTIVATE, vt, "VT_ACTIVATE")?;
-        ioctl_int(fd, ioc::VT_WAITACTIVE, vt, "VT_WAITACTIVE")?;
-        ioctl_int(fd, ioc::KDSETMODE, ioc::KD_GRAPHICS, "KDSETMODE")?;
-        // vt(4) marks the screen invalid on a window switch and repaints it
-        // (black cells, border) from its 25 Hz timer, after VT_WAITACTIVE
-        // returns and regardless of KD_GRAPHICS. A frame drawn before that
-        // repaint is wiped, so let the timer run a few ticks first.
-        std::thread::sleep(POST_SWITCH_SETTLE);
+        take_terminal(fd, vt)?;
 
         // SAFETY: mapping `map_len` bytes of the device at offset 0; vt(4)
         // validates the range against the framebuffer size.
@@ -167,8 +185,7 @@ impl VtDisplay {
         };
         if map == libc::MAP_FAILED {
             let err = std::io::Error::last_os_error();
-            let _ = ioctl_int(fd, ioc::KDSETMODE, ioc::KD_TEXT, "KDSETMODE");
-            let _ = ioctl_int(fd, ioc::VT_ACTIVATE, previous_vt, "VT_ACTIVATE");
+            let _ = show_console(fd);
             return Err(err).context("mmap framebuffer");
         }
 
@@ -181,7 +198,6 @@ impl VtDisplay {
         Ok(VtDisplay {
             tty,
             vt,
-            previous_vt,
             width,
             height,
             stride,
@@ -193,7 +209,31 @@ impl VtDisplay {
             row_buf: vec![0u8; stride],
             console_restored: false,
             mouse: None,
+            keyboards: Vec::new(),
         })
+    }
+
+    /// Also read the keyboards through their evdev nodes (see
+    /// [`evdev`]), so that Esc is seen while the console is on screen.
+    /// Returns how many nodes were opened: none without `evdev` in the
+    /// kernel, which only means the console cannot be left with Esc.
+    pub fn listen_keyboards(&mut self) -> usize {
+        let Ok(entries) = std::fs::read_dir(INPUT_DIR) else {
+            return 0;
+        };
+        // Mice have nodes too; they never report KEY_ESC.
+        self.keyboards = entries
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("event"))
+            .filter_map(|e| {
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(e.path())
+                    .ok()
+            })
+            .collect();
+        self.keyboards.len()
     }
 
     /// Start reading the mouse from `/dev/sysmouse` (fails when `moused`
@@ -263,15 +303,14 @@ impl Display for VtDisplay {
     }
 
     fn restore_console(&mut self) -> anyhow::Result<()> {
-        let fd = self.fd();
-        ioctl_int(fd, ioc::KDSETMODE, ioc::KD_TEXT, "KDSETMODE")?;
-        let target = if self.previous_vt >= 1 && self.previous_vt != self.vt {
-            self.previous_vt
-        } else {
-            1
-        };
-        ioctl_int(fd, ioc::VT_ACTIVATE, target, "VT_ACTIVATE")?;
+        show_console(self.fd())?;
         self.console_restored = true;
+        Ok(())
+    }
+
+    fn reclaim(&mut self) -> anyhow::Result<()> {
+        take_terminal(self.fd(), self.vt)?;
+        self.console_restored = false;
         Ok(())
     }
 
@@ -301,6 +340,21 @@ impl Display for VtDisplay {
             Err(_) => Vec::new(),
         }
     }
+
+    fn escape_pressed(&mut self) -> bool {
+        let mut pressed = false;
+        let mut buf = [0u8; evdev::EVENT * 64];
+        for dev in &mut self.keyboards {
+            // Every node is drained, so a press is never seen twice.
+            while let Ok(n) = dev.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                pressed |= evdev::pressed(buf.get(..n).unwrap_or(&[])).contains(&evdev::KEY_ESC);
+            }
+        }
+        pressed
+    }
 }
 
 impl Drop for VtDisplay {
@@ -313,8 +367,7 @@ impl Drop for VtDisplay {
         // A crash must not leave the console in graphics mode on a dead VT;
         // a deliberate `finish keep` is the only case where we stay.
         if !self.console_restored && std::thread::panicking() {
-            let _ = ioctl_int(self.fd(), ioc::KDSETMODE, ioc::KD_TEXT, "KDSETMODE");
-            let _ = ioctl_int(self.fd(), ioc::VT_ACTIVATE, 1, "VT_ACTIVATE");
+            let _ = show_console(self.fd());
         }
     }
 }

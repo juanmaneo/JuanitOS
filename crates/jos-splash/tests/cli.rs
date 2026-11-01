@@ -92,9 +92,11 @@ fn a_socket_we_may_not_write_fails_the_client() {
     let sock = dir.join("s.sock");
     let _listener = std::os::unix::net::UnixDatagram::bind(&sock).unwrap();
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let out = splash(&["--socket", sock.to_str().unwrap(), "stage", "network"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("sending to"));
+    for args in [["stage", "network"], ["finish", "--console"]] {
+        let out = splash(&["--socket", sock.to_str().unwrap(), args[0], args[1]]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("sending to"));
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -148,7 +150,11 @@ fn dry_run_daemon(tag: &str, finish: &[&str]) -> String {
         .into_iter()
         .chain(finish.iter().copied())
         .collect();
-    assert!(splash(&finish).status.success());
+    let out = splash(&finish);
+    assert!(out.status.success());
+    // `finish` returns once the daemon has ended (its socket is gone).
+    assert!(out.stderr.is_empty(), "{:?}", out.stderr);
+    assert!(!sock.exists());
     // Never hang the test suite on a daemon that missed the message.
     for _ in 0..500 {
         if daemon.try_wait().unwrap().is_some() {
@@ -163,4 +169,18 @@ fn dry_run_daemon(tag: &str, finish: &[&str]) -> String {
     let out = daemon.wait_with_output().unwrap();
     assert!(out.status.success());
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A listener that never ends (not a daemon): `finish` gives up after its
+/// timeout instead of hanging the rc.d script that called it.
+#[cfg(unix)]
+#[test]
+fn finish_does_not_wait_forever() {
+    let sock = std::env::temp_dir().join(format!("jos-splash-deaf-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let _deaf = std::os::unix::net::UnixDatagram::bind(&sock).unwrap();
+    let out = splash(&["--socket", sock.to_str().unwrap(), "finish"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("did not end"));
+    let _ = std::fs::remove_file(&sock);
 }

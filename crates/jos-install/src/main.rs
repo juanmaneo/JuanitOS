@@ -237,6 +237,7 @@ fn install(
     };
 
     if interactive && wants_gui(cli.ui, cli.dry_run, framebuffer)? {
+        end_splash(runner, false);
         match run_graphical(cli, runner, plan.clone(), &hw) {
             Err(e) if cli.ui == Ui::Auto => {
                 eprintln!("jos-install: graphical installer unavailable ({e:#}); using text mode");
@@ -244,7 +245,27 @@ fn install(
             done => return done,
         }
     }
+    end_splash(runner, true);
     text_install(cli, runner, plan, &hw, p)
+}
+
+/// On the live medium the boot splash is still up when the installer
+/// starts: `rc.local` leaves ending it to us, since only the installer
+/// knows which front end it will use. The wizard draws on the splash's
+/// own terminal, so the picture stays until its first frame; the text
+/// questions need the console back, with `vidcontrol` in case the splash
+/// is already gone (the wizard just failed, or there never was one).
+/// Neither command matters elsewhere, so their failures are ignored.
+fn end_splash(runner: &dyn Runner, console: bool) {
+    let args: &[&str] = if console {
+        &["finish", "--console"]
+    } else {
+        &["finish"]
+    };
+    let _ = runner.run("jos-splash", args);
+    if console {
+        let _ = runner.run("vidcontrol", &["-s", "1"]);
+    }
 }
 
 /// Every PCI device; none where `pciconf` is missing (a development host).
@@ -643,6 +664,25 @@ mod tests {
         assert!(out.starts_with("Host checks:"), "{out}");
         assert!(r.is_err(), "no disk to install to");
         let _ = std::fs::remove_dir_all(&dist);
+    }
+
+    #[test]
+    fn the_splash_ends_when_the_installer_takes_over() {
+        // Text questions: the console comes back, splash or not.
+        let m = MockRunner::new().missing("jos-splash");
+        let (r, _) = install_with(&["--dry-run", "--ignore-doctor"], &m, false, "");
+        assert!(r.is_err(), "no disk answer");
+        let calls = m.calls();
+        let at = |cmd: &str| calls.iter().position(|c| c == cmd).unwrap();
+        assert!(at("jos-splash finish --console") < at("vidcontrol -s 1"));
+        assert!(!calls.iter().any(|c| c == "jos-splash finish"));
+        // The wizard keeps the picture (and here cannot start: no vt(4)).
+        let m = MockRunner::new();
+        let (r, _) = install_with(&["--dry-run", "--ui", "gui"], &m, true, "");
+        assert!(r.is_err());
+        let calls = m.calls();
+        assert!(calls.iter().any(|c| c == "jos-splash finish"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("vidcontrol")));
     }
 
     #[test]

@@ -45,6 +45,8 @@ pub struct Splash<D: Display> {
     dirty: bool,
     /// The last frame presented.
     frame: Image,
+    /// The text console is on screen instead of the card (Esc).
+    hidden: bool,
     /// Frames presented so far (for tests and `--dry-run` reporting).
     pub frames: usize,
 }
@@ -60,8 +62,14 @@ impl<D: Display> Splash<D> {
             scene,
             dirty: true,
             frame: Image::new(0, 0, Rgba::TRANSPARENT),
+            hidden: false,
             frames: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub fn hidden(&self) -> bool {
+        self.hidden
     }
 
     #[cfg(test)]
@@ -72,6 +80,11 @@ impl<D: Display> Splash<D> {
     #[cfg(test)]
     pub fn display(&self) -> &D {
         &self.display
+    }
+
+    #[cfg(test)]
+    pub fn display_mut(&mut self) -> &mut D {
+        &mut self.display
     }
 
     pub fn into_display(self) -> D {
@@ -112,26 +125,56 @@ impl<D: Display> Splash<D> {
         }
     }
 
-    /// Consume pending keys: Esc ends the splash on the console. Escape
-    /// sequences (arrows, function keys) are decoded and ignored, so only
-    /// the Escape key itself counts.
-    pub fn handle_keys(&mut self) -> Flow {
+    /// Consume pending keys: Esc hides the card behind the text console
+    /// and brings it back, like Plymouth. On the card's own terminal it
+    /// arrives as a byte (escape sequences for arrows etc. are decoded and
+    /// ignored, so only the Escape key itself counts); while the console is
+    /// on screen that terminal gets nothing, so the keyboards are read
+    /// directly ([`Display::escape_pressed`]). Both are always drained: a
+    /// press seen on the terminal must not count again from the keyboard.
+    pub fn handle_keys(&mut self) -> anyhow::Result<()> {
         let mut decoder = Decoder::new();
         let mut keys = Vec::new();
         while let Some(b) = self.display.poll_key() {
             keys.extend(decoder.feed(b));
         }
         keys.extend(decoder.flush());
-        if keys.contains(&Key::Esc) {
-            Flow::ExitConsole
+        let on_terminal = keys.contains(&Key::Esc);
+        let on_keyboard = self.display.escape_pressed();
+        let pressed = if self.hidden {
+            on_keyboard
         } else {
-            Flow::Continue
+            on_terminal
+        };
+        if pressed {
+            self.toggle()?;
         }
+        Ok(())
+    }
+
+    /// Hide the card behind the console, or take the screen back (with a
+    /// full frame, since the kernel repainted the terminal meanwhile).
+    fn toggle(&mut self) -> anyhow::Result<()> {
+        if self.hidden {
+            self.display.reclaim().context("taking the screen back")?;
+            self.dirty = true;
+        } else {
+            self.display
+                .restore_console()
+                .context("showing the console")?;
+        }
+        self.hidden = !self.hidden;
+        Ok(())
     }
 
     /// Draw a new frame if anything changed since the last one, otherwise
-    /// repair the rows under the vt pointer ([`pointer_rows`]).
+    /// repair the rows under the vt pointer ([`pointer_rows`]). Nothing
+    /// while the console is on screen: the scene is drawn when it comes
+    /// back.
     pub fn redraw(&mut self) -> anyhow::Result<()> {
+        if self.hidden {
+            return Ok(());
+        }
         let (w, h) = self.display.size();
         if !self.dirty {
             return self
@@ -148,7 +191,9 @@ impl<D: Display> Splash<D> {
         Ok(())
     }
 
-    /// Final housekeeping for a given exit mode.
+    /// Final housekeeping for a given exit mode. A console shown with Esc
+    /// stays: `keep` then leaves it to the login screen, which takes the
+    /// display itself.
     pub fn finish(&mut self, flow: Flow) -> anyhow::Result<()> {
         match flow {
             Flow::ExitKeep => {
@@ -199,10 +244,7 @@ pub fn step<D: Display>(
         Err(e) if is_idle(e.kind()) => {}
         Err(e) => return Err(e).context("reading splash socket"),
     }
-    let flow = splash.handle_keys();
-    if flow != Flow::Continue {
-        return Ok(Some(flow));
-    }
+    splash.handle_keys()?;
     splash.redraw()?;
     Ok(None)
 }
@@ -213,7 +255,7 @@ fn is_idle(kind: std::io::ErrorKind) -> bool {
     matches!(kind, WouldBlock | TimedOut | Interrupted)
 }
 
-/// Serve on a Unix datagram socket until a `finish` message or Esc.
+/// Serve on a Unix datagram socket until a `finish` message.
 #[cfg(unix)]
 pub fn serve<D: Display>(
     mut splash: Splash<D>,
@@ -278,6 +320,21 @@ pub fn send(msg: &Message, socket_path: &std::path::Path) -> anyhow::Result<bool
 #[cfg(not(unix))]
 pub fn send(_msg: &Message, _socket_path: &std::path::Path) -> anyhow::Result<bool> {
     Ok(false)
+}
+
+/// Wait until the daemon has removed its socket, i.e. has drawn its last
+/// frame or restored the console; `false` once `timeout` has passed.
+/// `finish` clients wait so that whatever comes next (the login screen,
+/// the installer) never has the splash draw over it.
+pub fn wait_gone(socket_path: &std::path::Path, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while socket_path.exists() {
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(TICK);
+    }
+    true
 }
 
 #[cfg(test)]
@@ -372,16 +429,85 @@ mod tests {
     }
 
     #[test]
-    fn escape_key_ends_on_console() {
+    fn escape_toggles_the_console() {
         let mut d = NullDisplay::new(640, 480);
         d.type_bytes(b"a\x1b");
         let mut s = Splash::new(d, None);
-        assert_eq!(s.handle_keys(), Flow::ExitConsole);
+        s.redraw().unwrap();
+        s.handle_keys().unwrap();
+        assert!(s.hidden() && s.display().restored);
+        // Hidden: nothing is drawn, not even the pointer repair, but the
+        // scene keeps up with the messages.
+        s.handle(Message::Stage(Stage::Network));
+        s.redraw().unwrap();
+        assert_eq!(s.frames, 1);
+        assert!(s.display().repaired.is_empty());
+        // The terminal gets no keys while the console is active; the
+        // keyboards do. A byte that still arrives there is ignored.
+        s.display_mut().type_bytes(b"\x1b");
+        s.handle_keys().unwrap();
+        assert!(s.hidden());
+        s.display_mut().escapes.push_back(true);
+        s.handle_keys().unwrap();
+        assert!(!s.hidden() && !s.display().restored);
+        assert_eq!(s.display().reclaimed, 1);
+        // Back with a full frame of the current scene.
+        s.redraw().unwrap();
+        assert_eq!(s.frames, 2);
+        assert!(s.scene().is_lit(Stage::Network));
+        // Shown: a keyboard Esc on its own (the terminal saw none) is the
+        // same press already counted, or one on another terminal.
+        s.display_mut().escapes.push_back(true);
+        s.handle_keys().unwrap();
+        assert!(!s.hidden());
+
         let mut d = NullDisplay::new(640, 480);
         // Arrow keys start with ESC but are not Escape.
         d.type_bytes(b"x\x1b[A\x1b[B");
         let mut s = Splash::new(d, None);
-        assert_eq!(s.handle_keys(), Flow::Continue);
+        s.handle_keys().unwrap();
+        assert!(!s.hidden());
+    }
+
+    #[test]
+    fn a_console_that_cannot_be_switched_is_an_error() {
+        let stuck = NullDisplay {
+            fail_release: true,
+            ..NullDisplay::new(64, 40)
+        };
+        let mut s = Splash::new(stuck, None);
+        s.display_mut().type_bytes(b"\x1b");
+        let err = s.handle_keys().unwrap_err();
+        assert!(
+            format!("{err:#}").contains("showing the console"),
+            "{err:#}"
+        );
+        assert!(!s.hidden());
+
+        let mut s = Splash::new(NullDisplay::new(64, 40), None);
+        s.display_mut().type_bytes(b"\x1b");
+        s.handle_keys().unwrap();
+        s.display_mut().fail_release = true;
+        s.display_mut().escapes.push_back(true);
+        let err = s.handle_keys().unwrap_err();
+        assert!(
+            format!("{err:#}").contains("taking the screen back"),
+            "{err:#}"
+        );
+        assert!(s.hidden());
+    }
+
+    #[test]
+    fn finishing_behind_the_console_leaves_it() {
+        let mut d = NullDisplay::new(64, 40);
+        d.type_bytes(b"\x1b");
+        let mut s = Splash::new(d, None);
+        s.handle_keys().unwrap();
+        s.finish(Flow::ExitKeep).unwrap();
+        assert_eq!(s.frames, 0);
+        assert!(s.scene().is_lit(Stage::Desktop));
+        s.finish(Flow::ExitConsole).unwrap();
+        assert!(s.display().restored);
     }
 
     #[test]
@@ -411,15 +537,22 @@ mod tests {
             Some(Flow::ExitConsole)
         );
 
-        // Esc ends the loop even when nothing arrived.
+        // Esc is handled even when nothing arrived, and the loop goes on.
         let mut d = NullDisplay::new(320, 200);
         d.type_bytes(b"\x1b");
         let mut s = Splash::new(d, None);
         let idle = Err(Error::from(ErrorKind::WouldBlock));
-        assert_eq!(step(&mut s, idle).unwrap(), Some(Flow::ExitConsole));
+        assert_eq!(step(&mut s, idle).unwrap(), None);
+        assert!(s.hidden());
+        // A key problem ends the turn with its error.
+        s.display_mut().fail_release = true;
+        s.display_mut().escapes.push_back(true);
+        let idle = Err(Error::from(ErrorKind::WouldBlock));
+        let err = step(&mut s, idle).unwrap_err();
+        assert!(format!("{err:#}").contains("screen back"), "{err:#}");
         // Leaving with nothing to finish does nothing.
         s.finish(Flow::Continue).unwrap();
-        assert!(!s.display().restored);
+        assert_eq!(s.display().reclaimed, 0);
     }
 
     #[test]
@@ -443,6 +576,21 @@ mod tests {
         s.end(Ok(Flow::ExitKeep)).unwrap();
         assert_eq!(s.frames, 1);
         assert!(!s.display().restored);
+    }
+
+    #[test]
+    fn waiting_for_the_daemon_to_go() {
+        let d = std::env::temp_dir().join(format!("jos-splash-gone-{}", std::process::id()));
+        std::fs::write(&d, "").unwrap();
+        assert!(!wait_gone(&d, Duration::from_millis(1)));
+        let path = d.clone();
+        let remover = std::thread::spawn(move || {
+            std::thread::sleep(TICK * 2);
+            std::fs::remove_file(path).unwrap();
+        });
+        assert!(wait_gone(&d, Duration::from_secs(10)));
+        remover.join().unwrap();
+        assert!(wait_gone(&d, Duration::ZERO), "already gone");
     }
 
     #[test]

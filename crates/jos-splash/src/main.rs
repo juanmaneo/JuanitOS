@@ -5,7 +5,8 @@
 //! and lights up one icon per stage as the other rc.d hooks report
 //! progress with `jos-splash stage <name>`. `finish` hands the screen to
 //! the login screen, `jos-greet` (keeping the picture), or back to the text
-//! console. At shutdown it is started again with every icon lit, and
+//! console; Esc shows the console meanwhile, and again brings the card
+//! back. At shutdown it is started again with every icon lit, and
 //! `jos-splash leave <name>` turns them off from the right.
 //! See `docs/boot-splash.md`.
 
@@ -41,7 +42,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Run the daemon on the framebuffer until `finish` or Esc.
+    /// Run the daemon on the framebuffer until `finish`.
     Run(RunArgs),
     /// Report that a boot stage was reached (lights its icon).
     Stage { name: String },
@@ -50,7 +51,7 @@ enum Cmd {
     /// Show a one-line status under the icons (empty clears it).
     Status { text: Vec<String> },
     /// End the splash: keep the picture for the greeter, or restore the
-    /// text console.
+    /// text console. Returns once the daemon is gone.
     Finish {
         #[arg(long)]
         console: bool,
@@ -130,7 +131,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 Finish::Keep
             };
-            send(&Message::Finish(mode), &cli.socket)
+            finish(mode, &cli.socket)
         }
         Cmd::Render(a) => render(&a),
     }
@@ -140,6 +141,16 @@ fn send(msg: &Message, socket: &std::path::Path) -> anyhow::Result<()> {
     // No daemon (text boot, or already finished) is not an error for the
     // rc.d scripts that call us.
     let _ = server::send(msg, socket)?;
+    Ok(())
+}
+
+/// How long `finish` waits for the daemon's last frame or console switch.
+const FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn finish(mode: Finish, socket: &std::path::Path) -> anyhow::Result<()> {
+    if server::send(&Message::Finish(mode), socket)? && !server::wait_gone(socket, FINISH_TIMEOUT) {
+        eprintln!("jos-splash: the daemon did not end within {FINISH_TIMEOUT:?}");
+    }
     Ok(())
 }
 
@@ -170,8 +181,12 @@ fn run_daemon(a: &RunArgs, socket: &std::path::Path) -> anyhow::Result<()> {
     if a.dry_run {
         return run_dry(reached, socket);
     }
-    let display = jos_fb::vt::VtDisplay::open(a.vt)?;
-    eprintln!("jos-splash: drawing on VT {}", a.vt);
+    let mut display = jos_fb::vt::VtDisplay::open(a.vt)?;
+    let keyboards = display.listen_keyboards();
+    eprintln!(
+        "jos-splash: drawing on VT {}, {keyboards} evdev node(s)",
+        a.vt
+    );
     server::serve(Splash::new(display, reached), socket)?;
     Ok(())
 }

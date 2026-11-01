@@ -153,11 +153,15 @@ FAT ESP does not need. Neither applies to Core 2–era machines.
 
 ## The graphical installer
 
-`rc.local` starts `jos-install --live` once the boot splash has finished.
+`rc.local` starts `jos-install --live` with the boot splash still up.
 On a machine with a framebuffer console it opens a full-screen wizard on
-`vt(4)` (virtual terminal 10, `--vt` to change it), drawn with the same
-font, palette and logo as the boot splash, so the hand-over from boot to
-installer is seamless.
+`vt(4)` (virtual terminal 10, `--vt` to change it, the splash's own
+terminal), drawn with the same font, palette and logo as the boot splash,
+so the hand-over from boot to installer is seamless: the installer ends
+the splash itself (`jos-splash finish`, which returns once the daemon has
+drawn its last frame) and the picture stays until the wizard's first
+frame. The text front end asks for the console back instead
+(`finish --console`).
 
 The flow borrows from the two installers QubesOS users know:
 

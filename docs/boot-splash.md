@@ -144,8 +144,23 @@ finish [keep|console]                              end: leave the frame / restor
 ```
 
 Clients are the same binary: `jos-splash stage network`. A missing socket
-is not an error for them, so the rc scripts work on a text boot too. Esc
-on the keyboard ends the splash on the text console.
+is not an error for them, so the rc scripts work on a text boot too.
+`finish` returns once the daemon is gone (it removes its socket after its
+last frame or the console switch), so what comes next never has the
+splash draw over it.
+
+Esc works like Plymouth's: it hides the card behind the text console
+(`ttyv0`, so the `rc` messages and any prompt are there, live), and Esc
+again brings the card back with a full frame, at boot and at shutdown.
+The console only gives keys to the active terminal, so while `ttyv0` is
+on screen the daemon's own terminal hears nothing: it also reads the
+keyboards' `evdev(4)` nodes (`/dev/input/event*`, `crates/jos-fb/src/evdev.rs`).
+With the default `kern.evdev.rcpt_mask` every keyboard driver copies its
+events there, and reading them takes nothing away from the console. The
+two sources are drained every tick and only one is listened to in each
+state (the terminal while the card is shown, the keyboards while the
+console is), so one press never toggles twice. Without `evdev` (a custom
+kernel) Esc still shows the console; only the way back is missing.
 
 Hooks:
 
@@ -191,8 +206,14 @@ login screen (`jos-greet` on `ttyv8`, `docs/relibc-cosmic.md`) then
 switches to its terminal and draws over it in the same palette and font,
 and the compositor takes that terminal after login. The installed system enables all of
 this with `jos_splash_enable="YES"` and `rc_startmsgs="NO"` in `rc.conf`.
-The live medium does the same but always ends on the console, where the
-installer runs.
+On the live medium `rc.local` only sends `stage desktop`; the installer
+ends the splash itself once it knows which front end it uses (`end_splash`
+in `crates/jos-install/src/main.rs`): `finish` for the wizard, which draws
+on the splash's own terminal so the picture stays until its first frame,
+`finish --console` (and `vidcontrol -s 1`, in case the splash is already
+gone) for the text questions. Ending it from `rc.local` showed the
+console, and the `rc` messages, for the seconds the installer spent
+probing the hardware.
 
 All FreeBSD-specific calls (`ioctl`, `mmap`, termios) are in
 `crates/jos-fb/src/vt.rs` behind `cfg(target_os = "freebsd")`, shared with

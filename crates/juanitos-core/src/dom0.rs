@@ -382,17 +382,19 @@ pub fn live_rc_local() -> String {
     "#!/bin/sh
 # JuanitOS live medium: run the installer on the console. Exit it to get a
 # shell; `jos-install` can be re-run from there.
-# rc.local runs before LOGIN, so end the boot splash here rather than in
-# rc.d/jos-splash-finish: the installer needs the text console.
+# rc.local runs before LOGIN, so the boot splash ends here rather than in
+# rc.d/jos-splash-finish: the installer finishes it itself once it knows
+# whether it draws on the splash's terminal or asks on the text console.
 if [ -x /usr/local/bin/jos-splash ]; then
 	/usr/local/bin/jos-splash stage desktop
-	/usr/local/bin/jos-splash finish --console
 fi
 # rc.d/local comes before rc.d/moused, which would only run once the
 # installer exits: start it now so the installer has the mouse.
 service moused start > /dev/null 2>&1
 if [ -x /usr/local/bin/jos-install ]; then
 	/usr/local/bin/jos-install --live < /dev/console > /dev/console 2>&1
+elif [ -x /usr/local/bin/jos-splash ]; then
+	/usr/local/bin/jos-splash finish --console
 fi
 "
     .to_string()
@@ -653,11 +655,13 @@ mod tests {
             assert!(!f.1.contains('\r'), "{name} must have LF line endings");
         }
         assert!(BINARIES.contains(&"jos-splash"));
-        // The live installer needs the text console before LOGIN.
+        // The live installer ends the splash itself (jos-install's
+        // `end_splash`); the picture stays up until then.
         let local = live_rc_local();
         let at = |s: &str| local.find(s).unwrap();
-        assert!(at("jos-splash finish --console") < at("service moused start"));
+        assert!(at("jos-splash stage desktop") < at("service moused start"));
         assert!(at("service moused start") < at("jos-install --live"));
+        assert!(at("jos-install --live") < at("jos-splash finish --console"));
     }
 
     #[test]

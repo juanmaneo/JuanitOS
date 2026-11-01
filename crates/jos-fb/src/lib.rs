@@ -1,10 +1,12 @@
 //! Full-screen graphics on FreeBSD's `vt(4)` console, shared by the boot
 //! splash (`jos-splash`) and the graphical installer (`jos-install`).
 //!
-//! The [`Display`] trait, pixel packing, ioctl numbers and the keyboard
-//! decoder ([`keys`]) are pure and unit-tested on any host; the system
-//! calls live in [`vt`] (FreeBSD only).
+//! The [`Display`] trait, pixel packing, ioctl numbers and the decoders
+//! for the keyboard ([`keys`], [`evdev`]) and the mouse ([`mouse`]) are
+//! pure and unit-tested on any host; the system calls live in [`vt`]
+//! (FreeBSD only).
 
+pub mod evdev;
 pub mod keys;
 pub mod mouse;
 #[cfg(target_os = "freebsd")]
@@ -24,8 +26,15 @@ pub trait Display {
         let _ = rows;
         self.present(frame)
     }
-    /// Restore the text console (end of the splash, console mode).
+    /// Show the text console (`ttyv0`) instead of the program's terminal:
+    /// the end of the splash, or a pause until [`reclaim`](Self::reclaim).
     fn restore_console(&mut self) -> anyhow::Result<()>;
+    /// Take the screen back after [`restore_console`](Self::restore_console):
+    /// the program's terminal, in graphics mode again. The caller presents
+    /// a full frame afterwards; the kernel repainted the terminal meanwhile.
+    fn reclaim(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// Hand the terminal to another program on the *same* VT (the login
     /// screen starting a desktop session): back to text mode with the tty
     /// settings restored, without switching away. The display must not be
@@ -40,6 +49,13 @@ pub trait Display {
     /// display was asked to listen to the mouse.
     fn poll_mouse(&mut self) -> Vec<mouse::Mouse> {
         Vec::new()
+    }
+    /// Was Escape pressed on a keyboard since the last call? Read from the
+    /// keyboards themselves ([`evdev`]) where the display was asked to,
+    /// so it also works while another terminal is on screen and
+    /// [`poll_key`](Self::poll_key) gets nothing; `false` otherwise.
+    fn escape_pressed(&mut self) -> bool {
+        false
     }
 }
 
@@ -130,6 +146,10 @@ pub struct NullDisplay {
     pub fail_repair: bool,
     /// Packets `poll_mouse` returns, one call each.
     pub mouse: std::collections::VecDeque<Vec<mouse::Mouse>>,
+    /// What `escape_pressed` answers, one call each (then `false`).
+    pub escapes: std::collections::VecDeque<bool>,
+    /// Calls to `reclaim`.
+    pub reclaimed: usize,
 }
 
 impl NullDisplay {
@@ -188,6 +208,13 @@ impl Display for NullDisplay {
         Ok(())
     }
 
+    fn reclaim(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.fail_release, "cannot take the screen back");
+        self.restored = false;
+        self.reclaimed += 1;
+        Ok(())
+    }
+
     fn release(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.fail_release, "cannot release the display");
         self.released = true;
@@ -200,6 +227,10 @@ impl Display for NullDisplay {
 
     fn poll_mouse(&mut self) -> Vec<mouse::Mouse> {
         self.mouse.pop_front().unwrap_or_default()
+    }
+
+    fn escape_pressed(&mut self) -> bool {
+        self.escapes.pop_front().unwrap_or(false)
     }
 }
 
@@ -271,8 +302,16 @@ mod tests {
         assert!(d.poll_mouse().is_empty());
         d.restore_console().unwrap();
         assert!(d.restored);
+        d.reclaim().unwrap();
+        assert!(!d.restored);
+        assert_eq!(d.reclaimed, 1);
         d.release().unwrap();
         assert!(d.released);
+        d.escapes.extend([false, true]);
+        assert_eq!(
+            [d.escape_pressed(), d.escape_pressed(), d.escape_pressed()],
+            [false, true, false]
+        );
 
         // On request it fails like a framebuffer that went away.
         let mut d = NullDisplay {
@@ -286,6 +325,7 @@ mod tests {
         assert_eq!(d.presented, 1);
         assert!(d.release().is_err() && !d.released);
         assert!(d.restore_console().is_err() && !d.restored);
+        assert!(d.reclaim().is_err() && d.reclaimed == 0);
 
         // Keys arriving while a given frame is shown.
         let mut d = NullDisplay {
@@ -334,10 +374,12 @@ mod tests {
         }
         let mut b = Bare;
         assert!(b.release().is_ok());
+        assert!(b.reclaim().is_ok());
         assert!(b
             .present_rows(&Image::new(1, 1, Rgba::TRANSPARENT), 0..1)
             .is_ok());
         assert!(b.poll_mouse().is_empty());
+        assert!(!b.escape_pressed());
         assert!(b.present(&Image::new(1, 1, Rgba::TRANSPARENT)).is_ok());
         assert!(b.restore_console().is_ok());
         assert_eq!((b.size(), b.poll_key()), ((1, 1), None));

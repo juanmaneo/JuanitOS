@@ -45,7 +45,7 @@ Mac). The boot card shows six icons that light up in order
 |-----------|----------------|-------------------|
 | 1 boot    | `jos-boot.efi` hands over to FreeBSD's loader, which reads the kernel (the screen goes black for 1–3 s, this is expected) | The loader failed silently. Reboot: the card then says *The last boot did not finish* and boots verbose. Photograph the last screen. |
 | 2 kernel  | The kernel probes the hardware and mounts the root file system | A failed root mount (e.g. *error 19*) switches to text by itself after a few seconds (`jos_bootwatch`) and shows the messages: photograph them. A screen that stays frozen means a driver hangs: reboot and choose *Boot verbose* (below), then photograph the last lines. |
-| 3 storage | `rc(8)` starts the services and brings the network up (DHCP can take a while without a cable) | Wait a minute, then press **Esc**: the splash ends on the text console and shows what `rc` is doing. |
+| 3 storage | `rc(8)` starts the services and brings the network up (DHCP can take a while without a cable) | Wait a minute, then press **Esc**: the text console shows what `rc` is doing (Esc again brings the card back). |
 | 4 network | The splash ends and the installer starts | Press **Esc**, as above. |
 | all       | The graphical installer (or the text installer on a machine without a framebuffer) | — |
 
