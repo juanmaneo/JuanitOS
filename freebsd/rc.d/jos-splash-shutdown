@@ -12,11 +12,18 @@
 # qubes icon off, rc.d/jos-splash-network the network one, and the
 # kernel's shutdown splash (boot and kernel lit) follows when the disks are
 # synced: the icons go out from right to left.
+#
+# `shutdown now` is not a power-off: init(8) runs rc.shutdown with "single"
+# (seen here as $rc_shutdown) and then starts a shell on the console,
+# ttyv0. That shell would be invisible behind a graphics terminal left
+# active by the splash or the login screen, so in that case nothing is
+# drawn and the display is switched back to ttyv0 instead. This script has
+# no rcvar for that reason: the console must come back even with the
+# splash disabled.
 
 . /etc/rc.subr
 
 name="jos_splash_shutdown"
-rcvar="jos_splash_enable"
 
 load_rc_config jos_splash
 
@@ -31,8 +38,18 @@ stop_cmd="jos_splash_shutdown_stop"
 
 jos_splash_shutdown_stop()
 {
-	[ -x "${jos_splash_bin}" ] || return 0
 	[ -c /dev/ttyv0 ] || return 0
+	if [ "${rc_shutdown}" = "single" ]; then
+		# A boot splash still up (the boot never finished) ends on the
+		# console; vidcontrol covers the login screen's terminal.
+		if [ -x "${jos_splash_bin}" ]; then
+			"${jos_splash_bin}" finish --console
+		fi
+		/usr/sbin/vidcontrol -s 1 < /dev/ttyv0
+		return 0
+	fi
+	checkyesno jos_splash_enable || return 0
+	[ -x "${jos_splash_bin}" ] || return 0
 	# The boot splash ended at the login screen; one still running (the
 	# boot never got that far) is reused.
 	if ! pgrep -q -F "${pidfile}" 2>/dev/null; then

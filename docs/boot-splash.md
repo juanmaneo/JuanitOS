@@ -174,6 +174,18 @@ icon off. `rc.d/jos-splash` itself has no `shutdown` keyword: its stop
 session for the shutdown splash (compositor and seat released by stopping
 `jos-login`) is not verified on hardware yet.
 
+`shutdown now` is not a power-off. `init(8)` runs `rc.shutdown single`
+(`reboot` for `-p`, `-h` and `-r`; the argument is `$rc_shutdown` in every
+rc.d script it stops), kills what is left and starts a single-user shell
+on `ttyv0`. A `vt(4)` window stays active when its process dies, so with
+the card on `ttyv9` (or the login screen's `ttyv8`) still on screen that
+shell is invisible and the machine looks hung (seen on an Acer Nitro 5).
+`jos-splash-shutdown` therefore draws nothing for `single`: it ends a boot
+splash still running (`finish --console`) and switches the display to
+`ttyv0` with `vidcontrol -s 1`. The script has no rcvar so that this
+happens with the splash disabled too; the card is drawn only when
+`jos_splash_enable` is on.
+
 `finish` (keep) lights every icon and leaves the frame on screen; the
 login screen (`jos-greet` on `ttyv8`, `docs/relibc-cosmic.md`) then
 switches to its terminal and draws over it in the same palette and font,
@@ -280,9 +292,10 @@ once they have switched terminals, which covers the pointer drawn at boot.
   (`getty` keeps `ttyv0`). 32-bit EFI (`BOOTIA32.EFI` is FreeBSD's
   `loader_ia32.efi`) has no `jos-boot` card, but it still gets efifb when
   the firmware provides GOP.
-- A daemon crash would leave the console in graphics mode; the panic
-  path restores text mode, and `jos-splash finish --console` (what
-  `service jos-splash stop` runs) can be typed blind.
+- The daemon gives the console back when it exits on an error or a
+  panic; one that is killed leaves its terminal on screen. `vt(4)` does
+  not lock a graphics-mode terminal, so Alt+F1 (or `vidcontrol -s 1`)
+  brings `ttyv0` back.
 - `vt_fb_bitblt_argb` pixel order and the exact moment the greeter takes
   over have not yet been exercised on hardware; the QEMU/OVMF path is the
   first test target (`jos-release qemu`).

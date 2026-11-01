@@ -695,6 +695,21 @@ mod tests {
     }
 
     #[test]
+    fn going_single_user_draws_nothing_and_brings_the_console_back() {
+        // init(8) runs `rc.shutdown single` for `shutdown now`, then a
+        // shell on ttyv0: that must not hide behind a graphics terminal.
+        let s = RC_D_JOS_SPLASH_SHUTDOWN;
+        let at = |needle: &str| s.find(needle).unwrap();
+        assert!(at("\"${rc_shutdown}\" = \"single\"") < at("finish --console"));
+        assert!(at("finish --console") < at("/usr/sbin/vidcontrol -s 1 < /dev/ttyv0"));
+        // Nothing of that depends on the splash being enabled...
+        assert!(!s.contains("rcvar="));
+        // ...but the card does.
+        assert!(at("vidcontrol -s 1") < at("checkyesno jos_splash_enable"));
+        assert!(at("checkyesno jos_splash_enable") < at("--reached desktop"));
+    }
+
+    #[test]
     fn boot_ok_mark_is_cleared_unconditionally() {
         let rc = RC_D_JOS_BOOTOK;
         assert!(rc.contains("REQUIRE: FILESYSTEMS"));

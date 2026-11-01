@@ -162,6 +162,20 @@ impl<D: Display> Splash<D> {
             Flow::Continue => Ok(()),
         }
     }
+
+    /// Wrap up the loop's outcome: [`finish`](Self::finish) for a normal
+    /// one; after an error the console is given back first (a daemon that
+    /// died must not leave the screen on its dead graphics terminal), and
+    /// the error is what is reported.
+    pub fn end(&mut self, outcome: anyhow::Result<Flow>) -> anyhow::Result<()> {
+        match outcome {
+            Ok(flow) => self.finish(flow),
+            Err(e) => {
+                let _ = self.display.restore_console();
+                Err(e)
+            }
+        }
+    }
 }
 
 /// One turn of the server loop: what `recv` returned (a datagram, or the
@@ -217,17 +231,26 @@ pub fn serve<D: Display>(
         .and_then(|s| s.set_read_timeout(Some(TICK)).map(|()| s))
         .with_context(|| format!("binding {}", socket_path.display()))?;
 
-    splash.redraw()?;
-    let mut buf = [0u8; 512];
-    let flow = loop {
-        let received = sock.recv(&mut buf).map(|n| buf.get(..n).unwrap_or(&[]));
-        if let Some(flow) = step(&mut splash, received)? {
-            break flow;
-        }
-    };
-    splash.finish(flow)?;
+    let outcome = pump(&mut splash, &sock);
+    splash.end(outcome)?;
     let _ = std::fs::remove_file(socket_path);
     Ok(splash.into_display())
+}
+
+/// The first frame, then [`step`] until the loop ends.
+#[cfg(unix)]
+fn pump<D: Display>(
+    splash: &mut Splash<D>,
+    sock: &std::os::unix::net::UnixDatagram,
+) -> anyhow::Result<Flow> {
+    splash.redraw()?;
+    let mut buf = [0u8; 512];
+    loop {
+        let received = sock.recv(&mut buf).map(|n| buf.get(..n).unwrap_or(&[]));
+        if let Some(flow) = step(splash, received)? {
+            return Ok(flow);
+        }
+    }
 }
 
 /// Send one message to a running daemon. A missing socket (the send
@@ -396,6 +419,29 @@ mod tests {
         assert_eq!(step(&mut s, idle).unwrap(), Some(Flow::ExitConsole));
         // Leaving with nothing to finish does nothing.
         s.finish(Flow::Continue).unwrap();
+        assert!(!s.display().restored);
+    }
+
+    #[test]
+    fn an_error_gives_the_console_back() {
+        let mut s = Splash::new(NullDisplay::new(8, 8), None);
+        let err = s.end(Err(anyhow::anyhow!("framebuffer gone"))).unwrap_err();
+        assert_eq!(err.to_string(), "framebuffer gone");
+        assert!(s.display().restored);
+
+        // A console that cannot be restored does not hide the error.
+        let stuck = NullDisplay {
+            fail_release: true,
+            ..NullDisplay::new(8, 8)
+        };
+        let mut s = Splash::new(stuck, None);
+        let err = s.end(Err(anyhow::anyhow!("boom"))).unwrap_err();
+        assert_eq!(err.to_string(), "boom");
+        assert!(!s.display().restored);
+
+        // A normal outcome is finished as such.
+        s.end(Ok(Flow::ExitKeep)).unwrap();
+        assert_eq!(s.frames, 1);
         assert!(!s.display().restored);
     }
 
