@@ -146,14 +146,37 @@ fn workspaces(ctx: &Ctx) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Fail early, saying how to install it, when `cargo <subcommand>` is
-/// missing.
-fn require(subcommand: &str, install: &str) -> anyhow::Result<()> {
-    let probe = Command::new("cargo")
+/// Is `cargo <subcommand>` installed?
+fn has_subcommand(subcommand: &str) -> bool {
+    Command::new("cargo")
         .args([subcommand, "--version"])
-        .output();
-    if !probe.map(|o| o.status.success()).unwrap_or(false) {
-        bail!("cargo-{subcommand} is not installed:\n  {install}");
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Make sure `cargo <subcommand>` is available, installing it on first
+/// use: `install` holds the commands that install it, one per line. CI
+/// preinstalls the tools, so this only runs on a fresh machine.
+fn require(subcommand: &str, install: &str) -> anyhow::Result<()> {
+    if has_subcommand(subcommand) {
+        return Ok(());
+    }
+    println!("cargo-{subcommand} is missing; installing it (first use only):");
+    for line in install.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        println!("$ {line}");
+        let mut words = line.split_whitespace();
+        let program = words.next().unwrap_or_default();
+        let st = Command::new(program)
+            .args(words)
+            .status()
+            .with_context(|| format!("running `{line}`"))?;
+        if !st.success() {
+            bail!("`{line}` failed ({st})");
+        }
+    }
+    if !has_subcommand(subcommand) {
+        bail!("cargo-{subcommand} is still missing after:\n  {install}");
     }
     Ok(())
 }
