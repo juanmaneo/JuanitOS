@@ -938,7 +938,7 @@ pub fn sample_wizard() -> Wizard {
         status,
         detail: detail.into(),
     };
-    // A Lenovo P16s-like laptop: Intel Arc iGPU for the dom0, NVIDIA for
+    // A hybrid-graphics laptop: Intel Arc iGPU for the dom0, NVIDIA for
     // CUDA.
     let dev = |addr: PciAddr, vendor: u16, device: u16, class: u32, d: &str| PciDevice {
         addr,

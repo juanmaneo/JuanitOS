@@ -224,7 +224,7 @@ session for the shutdown splash (compositor and seat released by stopping
 rc.d script it stops), kills what is left and starts a single-user shell
 on `ttyv0`. A `vt(4)` window stays active when its process dies, so with
 the card on `ttyv9` (or the login screen's `ttyv8`) still on screen that
-shell is invisible and the machine looks hung (seen on an Acer Nitro 5).
+shell is invisible and the machine looks hung (seen on real hardware).
 `jos-splash-shutdown` therefore draws nothing for `single`: it ends a boot
 splash still running (`finish --console`) and switches the display to
 `ttyv0` with `vidcontrol -s 1`. The script has no rcvar so that this
@@ -284,7 +284,7 @@ terminal. `rc.d/moused` (enabled in `rc.conf`, it runs between the
 storage and network stages) ends with `vidcontrol -m on` on every
 `ttyv`: vt then draws its pointer once at the
 centre of the screen, with the blank text cells under it, which is where
-the card's title is (it erased the "I" of JUANITOS on an Acer Nitro 5).
+the card's title is (it erased the "I" of JUANITOS on real hardware).
 Pointer motion is ignored on a graphics-mode terminal, so that drawing
 never moves or goes away by itself. The daemon keeps its last frame and,
 when nothing changed, re-presents the 192 rows around the centre every

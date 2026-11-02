@@ -15,8 +15,8 @@ In the firmware (BIOS/UEFI) setup:
   no qube can start; without VT-d it warns on `iommu hardware` (no ACPI
   DMAR table) and only passthrough (`sys-net`'s NIC, `gpu`) fails.
 - **Graphics on a hybrid laptop:** keep the hybrid mode in which the
-  internal panel is driven by the integrated GPU (Intel Arc on the Lenovo
-  16P). The dom0 desktop runs on that GPU; the discrete NVIDIA card is
+  internal panel is driven by the integrated GPU (Intel Arc, say). The
+  dom0 desktop runs on that GPU; the discrete NVIDIA card is
   the one handed to the `gpu` qube.
 
 Note the firmware version (shown on the setup's main page).
@@ -37,8 +37,8 @@ Have a second USB stick formatted FAT32 at hand to bring the report back.
 
 ## 3. Boot and watch the icons
 
-Pick the stick in the firmware's boot menu (F12 on Lenovo, Option on a
-Mac). The boot card shows six icons that light up in order
+Pick the stick in the firmware's boot menu (often F12; Option on Apple
+EFI firmware). The boot card shows six icons that light up in order
 (`docs/boot-splash.md`). The last one lit tells how far the boot got:
 
 | Lit up to | What runs next | If it stops there |

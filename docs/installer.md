@@ -146,9 +146,9 @@ extensions and no Secure Boot. What works and what does not:
 - **Write the ISO with `dd`, then hold Option (Alt) at the chime.** The
   Apple boot picker shows the stick's ESP as "EFI Boot". rEFInd also
   lists a `dd`-written stick, since it is a plain GPT disk with a FAT ESP.
-  Macs from late 2007 on (MacBookPro3,1 and later, everything that runs
-  Yosemite) have 64-bit EFI and start `BOOTX64.EFI` (`jos-boot`). The
-  earliest models have 32-bit EFI and start `BOOTIA32.EFI` (FreeBSD's
+  Macs from late 2007 on have 64-bit EFI and start `BOOTX64.EFI`
+  (`jos-boot`). The earliest models have 32-bit EFI and start
+  `BOOTIA32.EFI` (FreeBSD's
   `loader_ia32.efi`, text boot).
 - **Ventoy on a Mac.** Ventoy's `BOOTX64.EFI` is a Secure Boot shim.
   Without Secure Boot it prints `Not a Secure Boot Platform 14` (14 is
@@ -170,8 +170,8 @@ extensions and no Secure Boot. What works and what does not:
   GRUB and OpenCore handle). FreeBSD's own `loader.efi` does not do this.
   Booted directly on a Mac, it can show a black screen while it works.
 - **Qubes need EPT.** bhyve on Intel requires EPT and unrestricted guest
-  (Nehalem, 2008, and later). A Core 2 Duo has VT-x without either, and
-  its chipset has no VT-d. On such a Mac, the live ISO tests the boot
+  (Nehalem, 2008, and later). Core 2 CPUs have VT-x without either, and
+  their chipsets have no VT-d. On such a machine, the live ISO tests the boot
   chain, the installer and the dom0 desktop, but no qube can start.
   The installer's Hardware page (`jos doctor`) reports it as a failed
   check ("VT-x lacks EPT and unrestricted guest, which bhyve requires"),
@@ -182,8 +182,8 @@ Apple's own `boot.efi` is closed source, and the open parts of Darwin
 needs. The public knowledge of Apple EFI quirks lives in rEFInd, GRUB and
 OpenCore. Of those quirks, only console control matters for JuanitOS.
 The others are Apple's "set OS" protocol, which keeps the integrated GPU
-visible on 2011+ dual-GPU MacBook Pros, and HFS+ boot volumes, which a
-FAT ESP does not need. Neither applies to Core 2–era machines.
+visible on Apple's dual-GPU laptops from 2011 on, and HFS+ boot volumes,
+which a FAT ESP does not need. Neither applies to Core 2–era machines.
 
 ## The graphical installer
 

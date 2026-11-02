@@ -201,8 +201,8 @@ the dom0 root, and `cosmic-comp` starts on FreeBSD up to "Failed to
 acquire session". Running the compositor needs a seat and a KMS device,
 which neither the QEMU build VM nor bhyve provide to a FreeBSD guest
 (`drm-kmod` has no virtio-gpu driver), so the first COSMIC session has
-to be on real hardware — a stage-1 ISO on the StarBook is the planned
-test.
+to be on real hardware (amd64 with an Intel or AMD GPU that `drm-kmod`
+drives), booted from a stage-1 ISO.
 
 On the host COSMIC is the *management* UI only: the long-term plan is a
 `jos`-backed applet (qube list, start/stop, colour labels) and
