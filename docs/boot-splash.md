@@ -255,12 +255,16 @@ the graphical installer; the state machine, protocol, pixel packing and
 keyboard decoding are tested on any host. `jos-splash run --dry-run` serves
 the socket with a fake display for testing the rc.d plumbing.
 
-After switching to its virtual terminal the daemon waits a few `vt(4)`
-timer ticks before drawing: the kernel repaints a freshly activated
-terminal (blank cells and border) from its 25 Hz timer *after*
-`VT_WAITACTIVE` returns, which otherwise wipes the first frame (seen on a
-real FreeBSD 15.1 boot under QEMU: a black screen until the next stage
-redrew).
+The kernel repaints a freshly activated terminal (blank cells, border,
+cursor) from its 25 Hz timer *after* `VT_WAITACTIVE` returns, which wipes
+a frame drawn before it (seen on a real FreeBSD 15.1 boot under QEMU: a
+black screen until the next stage redrew). Waiting a few ticks before the
+first frame left the screen black for that long on every switch (kernel
+card → daemon, console → card after Esc). Instead `VtDisplay` writes the
+first frame after a switch at once, watches its brightest pixel for the
+repaint, and writes the frame again as soon as that lands (or after 200 ms
+if it never does, e.g. when the terminal was on screen already): black for
+a couple of milliseconds instead of a visible blink.
 
 The mouse pointer is the other thing `vt(4)` draws over a graphics-mode
 terminal. `rc.d/moused` (enabled in `rc.conf`, it runs between the

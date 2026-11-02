@@ -19,12 +19,13 @@ use std::ops::Range;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use jos_gfx::Image;
 
 use crate::mouse::{self, Mouse};
-use crate::{evdev, ioc, pack_row, Display, RgbOffsets};
+use crate::{brightest, evdev, ioc, pack_pixel, pack_row, Display, RgbOffsets};
 
 /// Where `moused` publishes every mouse and touchpad.
 pub const SYSMOUSE: &str = "/dev/sysmouse";
@@ -56,9 +57,13 @@ struct FbRgbOffs {
     blue: i32,
 }
 
-/// How long the kernel is given to finish its own post-switch repaint
-/// before the first frame is written (vt(4) timer: 25 Hz, so a few ticks).
-pub const POST_SWITCH_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+/// How long the kernel is given for its post-switch repaint of the
+/// terminal (vt(4) timer: 25 Hz, so a few ticks) before the first frame
+/// after a switch is taken as final.
+pub const POST_SWITCH_SETTLE: Duration = Duration::from_millis(200);
+
+/// How often the frame is checked for that repaint meanwhile.
+const REPAINT_POLL: Duration = Duration::from_millis(2);
 
 pub struct VtDisplay {
     tty: File,
@@ -75,6 +80,8 @@ pub struct VtDisplay {
     console_restored: bool,
     mouse: Option<File>,
     keyboards: Vec<File>,
+    /// When the terminal was switched to, until the first frame since.
+    switched: Option<Instant>,
 }
 
 fn ioctl_int(fd: libc::c_int, req: u32, value: libc::c_int, what: &str) -> anyhow::Result<()> {
@@ -98,16 +105,16 @@ fn ioctl_out<T: Default>(fd: libc::c_int, req: u32, what: &str) -> anyhow::Resul
 }
 
 /// Switch to terminal `vt` (the one `fd` is open on) in graphics mode.
-/// vt(4) marks the screen invalid on a window switch and repaints it (black
-/// cells, border) from its 25 Hz timer, after `VT_WAITACTIVE` returns and
-/// regardless of `KD_GRAPHICS`. A frame drawn before that repaint is wiped,
-/// so the timer is given a few ticks before this returns.
-fn take_terminal(fd: libc::c_int, vt: i32) -> anyhow::Result<()> {
+/// Returns when the switch happened: vt(4) then marks the screen invalid
+/// and repaints it (black cells, border, cursor) from its 25 Hz timer,
+/// after `VT_WAITACTIVE` returns and regardless of `KD_GRAPHICS`, wiping
+/// a frame drawn before; `None` when `vt` was on screen already.
+fn take_terminal(fd: libc::c_int, vt: i32) -> anyhow::Result<Option<Instant>> {
+    let active: libc::c_int = ioctl_out(fd, ioc::VT_GETACTIVE, "VT_GETACTIVE")?;
     ioctl_int(fd, ioc::VT_ACTIVATE, vt, "VT_ACTIVATE")?;
     ioctl_int(fd, ioc::VT_WAITACTIVE, vt, "VT_WAITACTIVE")?;
     ioctl_int(fd, ioc::KDSETMODE, ioc::KD_GRAPHICS, "KDSETMODE")?;
-    std::thread::sleep(POST_SWITCH_SETTLE);
-    Ok(())
+    Ok((active != vt).then(Instant::now))
 }
 
 /// Text mode on `fd`'s terminal, then the console on screen.
@@ -169,7 +176,7 @@ impl VtDisplay {
         // SAFETY: fcntl with F_GETFL takes no further arguments.
         let saved_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
 
-        take_terminal(fd, vt)?;
+        let switched = take_terminal(fd, vt)?;
 
         // SAFETY: mapping `map_len` bytes of the device at offset 0; vt(4)
         // validates the range against the framebuffer size.
@@ -210,6 +217,7 @@ impl VtDisplay {
             console_restored: false,
             mouse: None,
             keyboards: Vec::new(),
+            switched,
         })
     }
 
@@ -262,6 +270,37 @@ impl VtDisplay {
             }
         }
     }
+
+    /// The first frame after a switch, already written: rather than a
+    /// black screen for the ticks the kernel takes to repaint the terminal
+    /// (see [`take_terminal`]), the frame is up at once, its brightest
+    /// pixel is watched for the repaint, and the frame is written again
+    /// as soon as that lands, or once the kernel had [`POST_SWITCH_SETTLE`]
+    /// to do it. Black for a [`REPAINT_POLL`] at most, instead of the
+    /// whole settle.
+    fn outlast_repaint(&mut self, frame: &Image, switched: Instant) -> anyhow::Result<()> {
+        let sentinel = brightest(frame)
+            .map(|(x, y, px)| {
+                (
+                    y as usize * self.stride + x as usize * 4,
+                    pack_pixel(px, self.offs),
+                )
+            })
+            .filter(|(off, _)| off % 4 == 0 && off + 4 <= self.map_len);
+        while switched.elapsed() < POST_SWITCH_SETTLE {
+            if let Some((off, wrote)) = sentinel {
+                // SAFETY: `off` is 4-aligned with `off + 4 <= map_len` and
+                // the mapping is live; volatile because the kernel writes
+                // there too.
+                let now = unsafe { std::ptr::read_volatile(self.map.add(off) as *const u32) };
+                if now != wrote {
+                    break;
+                }
+            }
+            std::thread::sleep(REPAINT_POLL);
+        }
+        self.present_rows(frame, 0..self.height)
+    }
 }
 
 impl Display for VtDisplay {
@@ -270,7 +309,11 @@ impl Display for VtDisplay {
     }
 
     fn present(&mut self, frame: &Image) -> anyhow::Result<()> {
-        self.present_rows(frame, 0..self.height)
+        self.present_rows(frame, 0..self.height)?;
+        match self.switched.take() {
+            Some(switched) => self.outlast_repaint(frame, switched),
+            None => Ok(()),
+        }
     }
 
     fn present_rows(&mut self, frame: &Image, rows: Range<u32>) -> anyhow::Result<()> {
@@ -309,7 +352,7 @@ impl Display for VtDisplay {
     }
 
     fn reclaim(&mut self) -> anyhow::Result<()> {
-        take_terminal(self.fd(), self.vt)?;
+        self.switched = take_terminal(self.fd(), self.vt)?;
         self.console_restored = false;
         Ok(())
     }

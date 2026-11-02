@@ -77,16 +77,34 @@ impl RgbOffsets {
     };
 }
 
+/// One pixel as the 32-bit word the framebuffer stores, channel layout
+/// `offs`.
+pub fn pack_pixel(px: Rgba, offs: RgbOffsets) -> u32 {
+    ((px.r as u32) << offs.red) | ((px.g as u32) << offs.green) | ((px.b as u32) << offs.blue)
+}
+
 /// Pack one row of RGBA pixels into native-endian 32-bit words with the
 /// channel layout `offs`. Writes `min(row.len(), out.len()/4)` pixels.
 pub fn pack_row(row: &[Rgba], offs: RgbOffsets, out: &mut [u8]) {
     let (chunks, _) = out.as_chunks_mut::<4>();
     for (px, chunk) in row.iter().zip(chunks) {
-        let v = ((px.r as u32) << offs.red)
-            | ((px.g as u32) << offs.green)
-            | ((px.b as u32) << offs.blue);
-        *chunk = v.to_ne_bytes();
+        *chunk = pack_pixel(*px, offs).to_ne_bytes();
     }
+}
+
+/// The brightest pixel of `frame` as `(x, y, pixel)`, `None` when the
+/// frame is all black. It is what [`vt`] watches to see the kernel's
+/// repaint of a terminal (black cells) land on a frame it just wrote.
+pub fn brightest(frame: &Image) -> Option<(u32, u32, Rgba)> {
+    let w = frame.width().max(1) as usize;
+    let light = |p: &Rgba| p.r as u32 + p.g as u32 + p.b as u32;
+    frame
+        .pixels()
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| light(p) > 0)
+        .max_by_key(|(_, p)| light(p))
+        .map(|(i, p)| ((i % w) as u32, (i / w) as u32, *p))
 }
 
 /// FreeBSD `ioccom.h` encoding.
@@ -275,6 +293,17 @@ mod tests {
         let mut short = [0u8; 4];
         pack_row(&row, RgbOffsets::BGRX, &mut short);
         assert_eq!(short, [0x33, 0x22, 0x11, 0]);
+        assert_eq!(pack_pixel(row[1], rgbx), 0x00cc_bbaa);
+    }
+
+    #[test]
+    fn the_brightest_pixel_is_located() {
+        assert!(brightest(&Image::new(3, 2, Rgba::rgb(0, 0, 0))).is_none());
+        assert!(brightest(&Image::new(0, 0, Rgba::TRANSPARENT)).is_none());
+        let mut img = Image::new(3, 2, Rgba::rgb(0, 0, 0));
+        img.blend(1, 0, Rgba::rgb(10, 10, 10));
+        img.blend(2, 1, Rgba::rgb(200, 100, 0));
+        assert_eq!(brightest(&img), Some((2, 1, Rgba::rgb(200, 100, 0))));
     }
 
     #[test]
