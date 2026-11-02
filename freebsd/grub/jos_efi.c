@@ -87,14 +87,14 @@ static grub_err_t add_meta(grub_uint32_t type, const void *data,
   return grub_bsd_add_meta(FREEBSD_MODINFO_METADATA | type, data, len);
 }
 
-static grub_err_t add_fw_handle(void) {
+static grub_err_t add_fw_handle() {
   grub_uint64_t systab = (grub_addr_t)grub_efi_system_table;
 
   grub_printf("jos_efi: system table at 0x%llx\n", (unsigned long long)systab);
   return add_meta(MODINFOMD_FW_HANDLE, &systab, sizeof(systab));
 }
 
-static grub_err_t add_arch(void) {
+static grub_err_t add_arch() {
   return add_meta(MODINFOMD_EFI_ARCH, "amd64", sizeof("amd64"));
 }
 
@@ -104,7 +104,7 @@ static int guid_eq(const void *a, const grub_efi_guid_t *b) {
 }
 
 /* The RSDP goes through the environment, as loader.efi's acpi.rsdp. */
-static grub_err_t set_rsdp(void) {
+static grub_err_t set_rsdp() {
   grub_efi_guid_t acpi20 = GRUB_EFI_ACPI_20_TABLE_GUID;
   grub_efi_guid_t acpi10 = GRUB_EFI_ACPI_TABLE_GUID;
   grub_efi_configuration_table_t *table =
@@ -138,7 +138,7 @@ static grub_err_t set_rsdp(void) {
   return grub_env_set("kFreeBSD.hint.acpi.0.rsdp", buf);
 }
 
-static grub_err_t add_framebuffer(void) {
+static grub_err_t add_framebuffer() {
   grub_efi_guid_t gop_guid = GRUB_EFI_GOP_GUID;
   struct grub_efi_gop *gop;
   struct grub_efi_gop_mode_info *info;
@@ -201,7 +201,7 @@ static void identity_map_runtime(grub_uint8_t *descriptors,
   }
 }
 
-static grub_err_t add_memory_map(void) {
+static grub_err_t add_memory_map() {
   grub_efi_uintn_t size = 0;
   grub_efi_uintn_t key;
   grub_efi_uintn_t desc_size;
@@ -269,7 +269,7 @@ static grub_err_t grub_cmd_jos_efi_meta(grub_command_t cmd
    for "elf kernel" and panic before the console exists ("unable to find
    kernel metadata"). The string is a literal in bsd.mod: rewrite it in the
    loaded module. */
-static grub_err_t fix_kernel_type(void) {
+static grub_err_t fix_kernel_type() {
   static const char old[] = "elf64 kernel";
   static const char new[] = "elf kernel";
   grub_dl_t bsd = grub_dl_get("bsd");

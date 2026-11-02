@@ -34,7 +34,7 @@ static struct callout bw_callout;
 static char bw_buf[BW_TAIL + 1];
 
 /* The last `BW_TAIL` bytes of the message buffer, NUL-terminated. */
-static size_t bw_tail(void) {
+static size_t bw_tail() {
   struct msgbuf *mbp = msgbufp;
   u_int seq;
   u_int want;

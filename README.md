@@ -275,9 +275,10 @@ with its reason.
 
 The C sources (the `jos_bootwatch` kernel module and the `jos_efi` GRUB
 module; `freebsd/geom_ventoy` is vendored and left as upstream has it)
-follow LLVM style, with braces around every `if`/`else`/`for`/`while`
-body (a statement added to an unbraced body is a classic bug; `--fix`
-inserts them): `.clang-format` is checked by `cargo xtask fmt` and
+are C23 (`-std=gnu23`) in LLVM style, with braces around every
+`if`/`else`/`for`/`while` body (a statement added to an unbraced body is
+a classic bug; `--fix` inserts them) and `f()` rather than `f(void)`
+(the same prototype since C23): `.clang-format` is checked by `cargo xtask fmt` and
 `.clang-tidy` by `cargo xtask lint`, every finding being an error.
 clang-tidy compiles the kernel module the way `bsd.kmod.mk` does and the
 GRUB module with its `compile_flags.txt`, so `lint` fetches the kernel

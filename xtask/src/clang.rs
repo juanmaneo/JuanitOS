@@ -353,14 +353,15 @@ fn download(url: &str, dst: &Path) -> anyhow::Result<()> {
 }
 
 /// What `make` hands the compiler for an amd64 kernel module
-/// (`sys/conf/kmod.mk` and `kern.mk`), minus optimisation and debug
-/// flags. The kernel's headers are system headers to clang-tidy:
-/// findings in them are FreeBSD's business, not ours.
+/// (`sys/conf/kmod.mk` and `kern.mk`, with the `CSTD=gnu23` of our
+/// module Makefiles), minus optimisation and debug flags. The kernel's
+/// headers are system headers to clang-tidy: findings in them are
+/// FreeBSD's business, not ours.
 fn kmod_flags(profile: &Profile, headers: &Path) -> Vec<String> {
     let sys = headers.join("usr/src/sys");
     let kmod = headers.join("kmod");
     let mut flags: Vec<String> = [
-        "-std=gnu17",
+        "-std=gnu23",
         "-D_KERNEL",
         "-DKLD_MODULE",
         "-nostdinc",
@@ -585,7 +586,7 @@ mod tests {
         let p = profile("https://m");
         let flags = kmod_flags(&p, Path::new("/c/freebsd-15.1-RELEASE"));
         let text = flags.join(" ");
-        assert!(text.starts_with("-std=gnu17 -D_KERNEL -DKLD_MODULE -nostdinc "));
+        assert!(text.starts_with("-std=gnu23 -D_KERNEL -DKLD_MODULE -nostdinc "));
         assert!(text.contains("--target=x86_64-unknown-freebsd15.1"));
         assert!(text.contains("-include /c/freebsd-15.1-RELEASE/kmod/opt_global.h"));
         assert!(text.contains("-isystem /c/freebsd-15.1-RELEASE/kmod "));

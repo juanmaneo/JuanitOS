@@ -1,4 +1,4 @@
--std=gnu17
+-std=gnu23
 -ffreestanding
 -fno-common
 -fno-PIE

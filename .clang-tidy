@@ -16,6 +16,7 @@ Checks: >
   bugprone-*,
   clang-analyzer-*,
   misc-*,
+  modernize-redundant-void-arg,
   performance-*,
   readability-*,
   -bugprone-easily-swappable-parameters,
@@ -30,5 +31,8 @@ HeaderFilterRegex: '.*'
 FormatStyle: file
 # Braces around every if/else/for/while body, however short (a statement
 # added to an unbraced body is a classic bug); .clang-format inserts them.
+# modernize-redundant-void-arg: the sources are C23 (-std=gnu23), where
+# `f()` declares a function without parameters as `f(void)` did; write
+# `f()`.
 CheckOptions:
   readability-braces-around-statements.ShortStatementLines: 0
