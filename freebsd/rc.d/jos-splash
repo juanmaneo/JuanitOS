@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # PROVIDE: jos-splash
-# REQUIRE: FILESYSTEMS
+# REQUIRE: FILESYSTEMS jos-kms
 # BEFORE: hostname kld random
 #
 # Starts the JuanitOS boot splash as early as rc(8) allows: the file
@@ -13,9 +13,13 @@
 #
 # The kernel drops its splash at the first console write, and
 # rc_startmsgs=NO only silences startmsg: rc.d/kld ("Loading kernel
-# modules:") and rc.d/random ("Setting up harvesting:") echo regardless.
-# Both come right after FILESYSTEMS too, so this script is ordered before
-# them: the daemon owns the screen before anything is printed.
+# modules:"), rc.d/devmatch after it ("Autoloading module:") and
+# rc.d/random ("Setting up harvesting:") echo regardless. /etc/rc orders
+# the scripts of /etc/rc.d on their own first and runs them up to
+# FILESYSTEMS, where kld lands; /usr/local/etc/rc.d only joins afterwards.
+# So this script lives in /etc/rc.d: ordered before kld and random, it
+# keeps kld after FILESYSTEMS, and the daemon owns the screen before
+# anything is printed.
 #
 # /etc/rc.conf:
 #   jos_splash_enable="YES"

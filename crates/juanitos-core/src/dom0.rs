@@ -154,9 +154,16 @@ pub fn bootwatch_loader_conf() -> (String, String) {
 /// `/usr/local/etc/rc.d/jos`.
 pub const RC_D_JOS: &str = include_str!("../../../freebsd/rc.d/jos");
 
+/// Loads the dom0's KMS driver (`jos_kms_module`) before the boot splash
+/// maps the framebuffer, and without `rc.d/kld`'s console message.
+pub const RC_D_JOS_KMS: &str = include_str!("../../../freebsd/rc.d/jos-kms");
+
 /// Boot splash hooks (see `docs/boot-splash.md`): start the daemon early,
 /// light the network icon, end the splash before the greeter, and draw it
-/// again at shutdown.
+/// again at shutdown. `jos-splash` (with `jos-kms` and `jos-bootok`, which
+/// precede it) is installed in `/etc/rc.d`: `/etc/rc` orders the scripts
+/// there on their own first and runs them up to `FILESYSTEMS`, where
+/// `kld` lands; from `/usr/local/etc/rc.d` nothing can come before it.
 pub const RC_D_JOS_SPLASH: &str = include_str!("../../../freebsd/rc.d/jos-splash");
 pub const RC_D_JOS_SPLASH_NETWORK: &str = include_str!("../../../freebsd/rc.d/jos-splash-network");
 pub const RC_D_JOS_SPLASH_FINISH: &str = include_str!("../../../freebsd/rc.d/jos-splash-finish");
@@ -280,11 +287,11 @@ pub fn rc_conf(flavor: Flavor, opts: &Dom0Options) -> String {
     s.push_str(&format!("hostname=\"{}\"\n", opts.hostname));
     s.push_str("sendmail_enable=\"NONE\"\n");
     s.push_str("sshd_enable=\"NO\"\n");
-    let mut modules: Vec<&str> = KERNEL_MODULES.to_vec();
+    s.push_str(&format!("kld_list=\"{}\"\n", KERNEL_MODULES.join(" ")));
     if let Some(m) = opts.gpu_module.as_deref().filter(|_| opts.gui) {
-        modules.push(m);
+        s.push_str("# KMS driver for the dom0's display, loaded quietly before the boot splash\n");
+        s.push_str(&format!("jos_kms_module=\"{m}\"\n"));
     }
-    s.push_str(&format!("kld_list=\"{}\"\n", modules.join(" ")));
     match flavor {
         Flavor::Live => {
             s.push_str("# live medium: root is a read-only cd9660\n");
@@ -413,7 +420,8 @@ pub fn static_files() -> Vec<(&'static str, String, bool)> {
     let lf = |s: &str| s.replace("\r\n", "\n");
     vec![
         ("/usr/local/etc/rc.d/jos", lf(RC_D_JOS), true),
-        ("/usr/local/etc/rc.d/jos-splash", lf(RC_D_JOS_SPLASH), true),
+        ("/etc/rc.d/jos-kms", lf(RC_D_JOS_KMS), true),
+        ("/etc/rc.d/jos-splash", lf(RC_D_JOS_SPLASH), true),
         (
             "/usr/local/etc/rc.d/jos-splash-network",
             lf(RC_D_JOS_SPLASH_NETWORK),
@@ -430,7 +438,7 @@ pub fn static_files() -> Vec<(&'static str, String, bool)> {
             true,
         ),
         ("/usr/local/etc/rc.d/jos-login", lf(RC_D_JOS_LOGIN), true),
-        ("/usr/local/etc/rc.d/jos-bootok", lf(RC_D_JOS_BOOTOK), true),
+        ("/etc/rc.d/jos-bootok", lf(RC_D_JOS_BOOTOK), true),
         ("/usr/local/libexec/jos-session", lf(JOS_SESSION), true),
         (PAM_JOS_GREET_PATH, lf(PAM_JOS_GREET), false),
         (
@@ -497,7 +505,7 @@ mod tests {
         assert!(!no_gui.contains("seatd_enable"));
         assert!(!no_gui.contains("jos_login_enable"));
         assert!(
-            no_gui.contains("kld_list=\"vmm nmdm if_bridge\""),
+            !no_gui.contains("jos_kms_module"),
             "no KMS driver without a desktop"
         );
 
@@ -508,7 +516,9 @@ mod tests {
                 ..opts
             },
         );
-        assert!(amd.contains("kld_list=\"vmm nmdm if_bridge amdgpu\""));
+        // rc.d/jos-kms loads it before the splash; kld would announce it.
+        assert!(amd.contains("jos_kms_module=\"amdgpu\""));
+        assert!(amd.contains("kld_list=\"vmm nmdm if_bridge\""));
     }
 
     #[test]
@@ -640,15 +650,16 @@ mod tests {
         assert!(rc.contains("jos_splash_enable=\"YES\""));
         assert!(rc.contains("rc_startmsgs=\"NO\""));
         let files = static_files();
-        for name in [
-            "jos-splash",
-            "jos-splash-network",
-            "jos-splash-finish",
-            "jos-splash-shutdown",
-            "jos-login",
-            "jos-bootok",
+        for (dir, name) in [
+            ("/etc/rc.d", "jos-kms"),
+            ("/etc/rc.d", "jos-splash"),
+            ("/usr/local/etc/rc.d", "jos-splash-network"),
+            ("/usr/local/etc/rc.d", "jos-splash-finish"),
+            ("/usr/local/etc/rc.d", "jos-splash-shutdown"),
+            ("/usr/local/etc/rc.d", "jos-login"),
+            ("/etc/rc.d", "jos-bootok"),
         ] {
-            let path = format!("/usr/local/etc/rc.d/{name}");
+            let path = format!("{dir}/{name}");
             let f = files.iter().find(|(p, _, _)| *p == path).unwrap();
             assert!(f.2, "{name} must be executable");
             assert!(f.1.contains("PROVIDE: "), "{name} needs rc.d headers");
@@ -707,12 +718,25 @@ mod tests {
         // "Loading kernel modules:" over a black screen between the kernel
         // card and the daemon's first frame).
         let s = RC_D_JOS_SPLASH;
+        assert!(s.contains("# REQUIRE: FILESYSTEMS jos-kms"));
         assert!(s.contains("# BEFORE: hostname kld random"));
         // daemon(8) returns at the fork: the script waits until the daemon
         // listens, which it only does after its first frame.
         let at = |needle: &str| s.find(needle).unwrap();
         assert!(at("--reached storage") < at("while [ ! -S \"${socket}\" ]"));
         assert!(at("rm -f \"${socket}\"") < at("--reached storage"));
+        // The KMS driver replaces the framebuffer the daemon would map, and
+        // kld_list would make rc.d/kld announce it.
+        let k = RC_D_JOS_KMS;
+        assert!(k.contains("# BEFORE: jos-splash kld"));
+        assert!(k.contains("kldload -n \"${jos_kms_module}\""));
+        assert!(!k.contains("echo"));
+        // A local script cannot come before kld (first pass of /etc/rc).
+        let files = static_files();
+        for name in ["jos-kms", "jos-splash", "jos-bootok"] {
+            let path = format!("/etc/rc.d/{name}");
+            assert!(files.iter().any(|(p, _, _)| *p == path), "{name}");
+        }
     }
 
     #[test]

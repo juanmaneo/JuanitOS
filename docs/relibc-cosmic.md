@@ -73,7 +73,7 @@ builds COSMIC itself.
 | Need                 | Linux usual     | FreeBSD host                          |
 |----------------------|-----------------|---------------------------------------|
 | compositor + shell   | `cosmic-*`      | built from `pop-os/cosmic-epoch` (`epoch-1.10.0`) by `tools/dev/cosmic-build.sh`, shipped as a local `pkg` repository |
-| KMS drivers          | kernel          | `graphics/drm-kmod`; the installer adds `amdgpu`/`i915kms` to `kld_list` from `pciconf` |
+| KMS drivers          | kernel          | `graphics/drm-kmod`; the installer sets `jos_kms_module` to `amdgpu`/`i915kms` from `pciconf` (`rc.d/jos-kms` loads it before the boot splash) |
 | seat / VT handling   | `logind`        | `sysutils/seatd` (+ `libseat`)         |
 | desktop IPC          | `dbus`          | `devel/dbus`                           |
 | login                | `cosmic-greeter`| `jos-greet` (Rust, `crates/jos-greet`) on `ttyv8`; `cosmic-greeter` needs greetd |

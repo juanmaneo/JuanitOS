@@ -145,13 +145,26 @@ never touches the picture, `mmap`s the framebuffer and draws the card with
 
 The kernel drops its own splash at the first console write, and
 `rc_startmsgs="NO"` only silences `startmsg`: `rc.d/kld` (*Loading kernel
-modules:*) and `rc.d/random` (*Setting up harvesting:*) `echo` regardless,
-and both come right after `FILESYSTEMS` too. Seen under QEMU in 100 ms
-steps: the kernel card, then those lines on a black screen, then the
-daemon's first frame. So `rc.d/jos-splash` is ordered `BEFORE: kld random`
-and, since `daemon(8)` returns at the fork, waits until the socket exists;
-the daemon binds it only after its first frame. Nothing is printed before
-the card is on its own terminal.
+modules:*), `rc.d/devmatch` after it (*Autoloading module:*) and
+`rc.d/random` (*Setting up harvesting:*) `echo` regardless. Seen under
+QEMU in 100 ms steps: the kernel card, then those lines on a black
+screen, then the daemon's first frame. `BEFORE: kld random` alone did not
+help: `/etc/rc` orders the scripts of `/etc/rc.d` on their own first and
+runs them up to `FILESYSTEMS`, where `rcorder` happens to put `kld`;
+`/usr/local/etc/rc.d` only joins the second ordering. So `jos-splash`
+(with `jos-kms` and `jos-bootok`, which precede it) is installed in
+`/etc/rc.d`: in the first ordering its `BEFORE: kld` keeps `kld` after
+`FILESYSTEMS`, and the daemon owns the screen before anything is printed.
+Since `daemon(8)` returns at the fork, the script waits until the socket
+exists, and the daemon binds it only after its first frame.
+
+The dom0's KMS driver (`amdgpu`/`i915kms`) replaces `vt(4)`'s `efifb`,
+and whoever mapped the old framebuffer draws into nothing from then on.
+`drm-kmod` wants it loaded from `rc(8)`, i.e. `kld_list`, but that is
+the `kld` message above. `rc.d/jos-kms` (`REQUIRE: kldxref`, `BEFORE:
+jos-splash kld`) loads `jos_kms_module` from `rc.conf` with a quiet
+`kldload -n` instead, as early as `kld` would have; the kernel redraws its
+splash with the new driver (`vt_replace_backend`), so the picture stays.
 
 ```text
 stage <boot|kernel|storage|network|qubes|desktop>   light that icon (and earlier ones)

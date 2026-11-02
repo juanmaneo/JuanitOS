@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# PROVIDE: jos-kms
+# REQUIRE: kldxref
+# BEFORE: jos-splash kld
+#
+# Loads the dom0's KMS driver (graphics/drm-kmod: amdgpu or i915kms, from
+# the installer's look at pciconf) before the boot splash maps the
+# framebuffer: the driver replaces vt(4)'s efifb and whoever mapped the old
+# one draws into nothing. drm-kmod wants its modules loaded from rc(8)
+# rather than the loader, which is what kld_list is for, but rc.d/kld
+# announces what it loads on the console and that would end the kernel
+# splash. This loads quietly, as early as kld would.
+#
+# /etc/rc.conf:
+#   jos_kms_module="amdgpu"
+
+. /etc/rc.subr
+
+name="jos_kms"
+start_cmd="jos_kms_start"
+stop_cmd=":"
+
+load_rc_config $name
+
+: ${jos_kms_module:=""}
+
+jos_kms_start()
+{
+	[ -n "${jos_kms_module}" ] || return 0
+	/sbin/kldload -n "${jos_kms_module}"
+}
+
+run_rc_command "$1"
