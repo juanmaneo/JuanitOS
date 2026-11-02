@@ -255,14 +255,17 @@ fn install(
 /// own terminal, so the picture stays until its first frame; the text
 /// questions need the console back, with `vidcontrol` in case the splash
 /// is already gone (the wizard just failed, or there never was one).
-/// Neither command matters elsewhere, so their failures are ignored.
+/// Neither command matters elsewhere, so their failures are ignored. The
+/// daemon is named by its absolute path: under rc(8) nothing in
+/// `/usr/local/bin` is on the PATH, and a `finish` that silently failed
+/// left the daemon repainting its card over the wizard.
 fn end_splash(runner: &dyn Runner, console: bool) {
     let args: &[&str] = if console {
         &["finish", "--console"]
     } else {
         &["finish"]
     };
-    let _ = runner.run("jos-splash", args);
+    let _ = runner.run(juanitos_core::dom0::JOS_SPLASH_BIN, args);
     if console {
         let _ = runner.run("vidcontrol", &["-s", "1"]);
     }
@@ -669,19 +672,26 @@ mod tests {
     #[test]
     fn the_splash_ends_when_the_installer_takes_over() {
         // Text questions: the console comes back, splash or not.
-        let m = MockRunner::new().missing("jos-splash");
+        let m = MockRunner::new().missing("/usr/local/bin/jos-splash");
         let (r, _) = install_with(&["--dry-run", "--ignore-doctor"], &m, false, "");
         assert!(r.is_err(), "no disk answer");
         let calls = m.calls();
         let at = |cmd: &str| calls.iter().position(|c| c == cmd).unwrap();
-        assert!(at("jos-splash finish --console") < at("vidcontrol -s 1"));
-        assert!(!calls.iter().any(|c| c == "jos-splash finish"));
+        assert!(at("/usr/local/bin/jos-splash finish --console") < at("vidcontrol -s 1"));
+        assert!(!calls.iter().any(|c| c.ends_with("jos-splash finish")));
         // The wizard keeps the picture (and here cannot start: no vt(4)).
+        // rc.local runs the installer with rc(8)'s PATH, which has no
+        // /usr/local/bin: the daemon must be reached by its full path.
         let m = MockRunner::new();
         let (r, _) = install_with(&["--dry-run", "--ui", "gui"], &m, true, "");
         assert!(r.is_err());
         let calls = m.calls();
-        assert!(calls.iter().any(|c| c == "jos-splash finish"), "{calls:?}");
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "/usr/local/bin/jos-splash finish"),
+            "{calls:?}"
+        );
         assert!(!calls.iter().any(|c| c.starts_with("vidcontrol")));
     }
 

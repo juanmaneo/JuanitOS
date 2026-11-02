@@ -243,7 +243,11 @@ on the splash's own terminal so the picture stays until its first frame,
 `finish --console` (and `vidcontrol -s 1`, in case the splash is already
 gone) for the text questions. Ending it from `rc.local` showed the
 console, and the `rc` messages, for the seconds the installer spent
-probing the hardware.
+probing the hardware. The installer names the daemon by its full path
+(`dom0::JOS_SPLASH_BIN`): `rc(8)` runs `rc.local`, and so the installer,
+with a PATH without `/usr/local/bin`, and a `finish` that could not be
+found left the daemon repainting the rows under the vt pointer over the
+wizard every tick.
 
 All FreeBSD-specific calls (`ioctl`, `mmap`, termios) are in
 `crates/jos-fb/src/vt.rs` behind `cfg(target_os = "freebsd")`, shared with

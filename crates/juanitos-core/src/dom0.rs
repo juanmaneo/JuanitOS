@@ -384,27 +384,33 @@ pub fn loader_conf(flavor: Flavor, opts: &Dom0Options) -> String {
     s
 }
 
+/// The boot splash daemon and client, by absolute path: rc(8) runs with
+/// `PATH=/sbin:/bin:/usr/sbin:/usr/bin`, which `rc.local` and the live
+/// installer inherit, so `/usr/local/bin` is never searched there.
+pub const JOS_SPLASH_BIN: &str = "/usr/local/bin/jos-splash";
+
 /// `/etc/rc.local` on the live medium: hand the console to the installer.
 pub fn live_rc_local() -> String {
-    "#!/bin/sh
+    format!(
+        "#!/bin/sh
 # JuanitOS live medium: run the installer on the console. Exit it to get a
 # shell; `jos-install` can be re-run from there.
 # rc.local runs before LOGIN, so the boot splash ends here rather than in
 # rc.d/jos-splash-finish: the installer finishes it itself once it knows
 # whether it draws on the splash's terminal or asks on the text console.
-if [ -x /usr/local/bin/jos-splash ]; then
-	/usr/local/bin/jos-splash stage desktop
+if [ -x {JOS_SPLASH_BIN} ]; then
+	{JOS_SPLASH_BIN} stage desktop
 fi
 # rc.d/local comes before rc.d/moused, which would only run once the
 # installer exits: start it now so the installer has the mouse.
 service moused start > /dev/null 2>&1
 if [ -x /usr/local/bin/jos-install ]; then
 	/usr/local/bin/jos-install --live < /dev/console > /dev/console 2>&1
-elif [ -x /usr/local/bin/jos-splash ]; then
-	/usr/local/bin/jos-splash finish --console
+elif [ -x {JOS_SPLASH_BIN} ]; then
+	{JOS_SPLASH_BIN} finish --console
 fi
 "
-    .to_string()
+    )
 }
 
 /// `/etc/fstab` on the live medium (FreeBSD's `mkisoimages.sh` does the same).
@@ -666,13 +672,18 @@ mod tests {
             assert!(!f.1.contains('\r'), "{name} must have LF line endings");
         }
         assert!(BINARIES.contains(&"jos-splash"));
+        assert_eq!(JOS_SPLASH_BIN, "/usr/local/bin/jos-splash");
         // The live installer ends the splash itself (jos-install's
         // `end_splash`); the picture stays up until then.
         let local = live_rc_local();
         let at = |s: &str| local.find(s).unwrap();
-        assert!(at("jos-splash stage desktop") < at("service moused start"));
-        assert!(at("service moused start") < at("jos-install --live"));
-        assert!(at("jos-install --live") < at("jos-splash finish --console"));
+        assert!(at("/usr/local/bin/jos-splash stage desktop") < at("service moused start"));
+        assert!(at("service moused start") < at("/usr/local/bin/jos-install --live"));
+        assert!(at("jos-install --live") < at("/usr/local/bin/jos-splash finish --console"));
+        // rc(8)'s PATH has no /usr/local/bin: nothing here runs by name.
+        for line in local.lines().filter(|l| l.starts_with('\t')) {
+            assert!(line.starts_with("\t/usr/local/bin/"), "{line:?}");
+        }
     }
 
     #[test]
