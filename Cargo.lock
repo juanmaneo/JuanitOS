@@ -360,6 +360,7 @@ dependencies = [
  "anyhow",
  "clap",
  "jos-gfx",
+ "jos-ventoy-chain",
  "juanitos-core",
  "serde",
  "toml",

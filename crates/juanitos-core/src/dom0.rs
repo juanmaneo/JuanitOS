@@ -427,9 +427,14 @@ fi
     )
 }
 
+/// The live medium's root: the ISO's cd9660 file system, by its label.
+pub fn live_root_device(label: &str) -> String {
+    format!("/dev/iso9660/{label}")
+}
+
 /// `/etc/fstab` on the live medium (FreeBSD's `mkisoimages.sh` does the same).
 pub fn live_fstab(label: &str) -> String {
-    format!("/dev/iso9660/{label} / cd9660 ro 0 0\n")
+    format!("{} / cd9660 ro 0 0\n", live_root_device(label))
 }
 
 /// Files installed into every dom0 besides the binaries. `(path, content,

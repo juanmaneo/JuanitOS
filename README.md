@@ -99,7 +99,9 @@ learn whether the hardware can run JuanitOS before any disk is touched.
 ## Installing
 
 Boot the ISO (`dd` it to a USB stick, or drop the file on a Ventoy
-stick): after the splash, a graphical installer takes the screen,
+stick, with the `.iso.vcfg` built next to it for firmware where only
+Ventoy's GRUB2 mode boots, such as Intel Macs: see
+`docs/installer.md`): after the splash, a graphical installer takes the screen,
 the way QubesOS greets you with Anaconda. It is our own Rust program
 drawing straight on the FreeBSD console framebuffer (no X11, no Qt), laid
 out like Calamares: steps on the left, the current page on the right.

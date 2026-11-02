@@ -376,7 +376,9 @@ pub const AUTO_STEPS: &[(&str, &str, u64)] = &[
     ),
     (
         "copy the results to the host",
-        "cd /root/juanitos/release/out && cp -v *.iso *.iso.sha256 juanitos-dom0.txz MANIFEST /mnt/out/ && \
+        "cd /root/juanitos/release/out && rm -f /mnt/out/*.iso.vcfg && \
+         cp -v *.iso *.iso.sha256 juanitos-dom0.txz MANIFEST /mnt/out/ && \
+         for f in *.iso.vcfg; do [ ! -f \"$f\" ] || cp -v \"$f\" /mnt/out/; done && \
          cp -v /usr/local/share/juanitos/release.toml /mnt/out/ 2>/dev/null; \
          cp -v /root/juanitos/release/out/rootfs/usr/local/share/juanitos/release.toml /mnt/out/",
         30,

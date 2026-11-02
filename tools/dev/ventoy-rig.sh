@@ -5,7 +5,7 @@
 # through OVMF or the BIOS. Everything lives under $JOS_WORK/ventoy
 # (default ./target/work/ventoy), so `cargo clean` reclaims it.
 #
-#   tools/dev/ventoy-rig.sh make ISO [SIZE_GB]    build disk.img (default 10 GB) and copy ISO into it
+#   tools/dev/ventoy-rig.sh make ISO [SIZE_GB]    build disk.img (default 10 GB) and copy ISO (and ISO.vcfg) into it
 #   tools/dev/ventoy-rig.sh start [uefi|bios]     boot the stick with a blank 20 GB virtio target disk
 #   tools/dev/ventoy-rig.sh key KEYS...           QEMU monitor sendkey (ret, tab, esc, down, shift-a ...)
 #   tools/dev/ventoy-rig.sh type STRING           type a string (letters, digits, - / . space)
@@ -60,6 +60,8 @@ make)
 	mnt="$work/mnt"; mkdir -p "$mnt"
 	fuse2fs -o offset=1048576,fakeroot "$disk" "$mnt"
 	cp --sparse=never "$iso" "$mnt/" && sync
+	# Ventoy's custom boot menu for the ISO, with the direct kernel boot.
+	if [ -f "$iso.vcfg" ]; then cp "$iso.vcfg" "$mnt/"; fi
 	fusermount3 -u "$mnt" || fusermount -u "$mnt"
 	e2fsck -fn "$disk?offset=1048576" >/dev/null && echo "   ext4: clean"
 	ls -la "$disk" ;;

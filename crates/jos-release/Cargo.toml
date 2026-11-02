@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 juanitos-core = { path = "../juanitos-core" }
 jos-gfx = { path = "../jos-gfx", features = ["png"] }
+jos-ventoy-chain = { path = "../jos-ventoy-chain" }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

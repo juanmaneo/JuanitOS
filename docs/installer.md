@@ -102,7 +102,41 @@ writes a Ventoy stick image (the layout `Ventoy2Disk.sh` produces, the ISO
 copied in through `fuse2fs`), `start uefi|bios` boots it under QEMU/KVM
 with a blank virtio target disk, `key`/`type`/`shot` drive the installer
 through the QEMU monitor. The Disk page must list the target disk only,
-never the stick.
+never the stick. When the build left a `.iso.vcfg` next to the ISO,
+`make` copies it onto the stick too.
+
+### Ventoy's direct kernel boot
+
+On some firmware Ventoy's normal mode fails for every ISO, because its
+chain-load of the ISO's EFI loader fails, while Ventoy's GRUB itself runs
+fine. Apple's 64-bit EFI firmware (Intel Macs) is such firmware with
+Ventoy 1.1.18: only "GRUB2 mode" (Linux ISOs) boots there. For that
+firmware, `jos-release iso` writes
+`JuanitOS-<version>-amd64.iso.vcfg` next to the ISO. Copy it next to the
+ISO on the stick, under the same name plus `.vcfg`. Ventoy then shows
+its menu (a "custom boot menu") when the ISO is chosen:
+
+- **JuanitOS**: Ventoy's normal boot, unchanged (it calls the functions
+  of Ventoy's own `grub.cfg`), on UEFI and BIOS.
+- **JuanitOS, direct kernel boot (64-bit UEFI)**: shown on 64-bit UEFI only.
+  This is the default when Ventoy is in GRUB2 mode (`Ctrl+r` on
+  Ventoy's menu). Ventoy's GRUB boots the FreeBSD kernel itself with
+  `/boot/grub/juanitos-ventoy.cfg` from the ISO, which `jos-release`
+  generates (`crates/jos-release/src/ventoy.rs`):
+  - `jos_efi.mod` (`freebsd/grub`) passes the kernel what `loader.efi`
+    would: the EFI memory map, the system table, the framebuffer and the
+    ACPI tables.
+  - The kernel and its modules are loaded as `loader.conf` lists them,
+    and the root is named (`cd9660:/dev/iso9660/JUANITOS`).
+  - Ventoy's description of where the ISO lies on the stick (its "chain
+    blob") is preloaded for `geom_ventoy.ko`, which reads it through
+    `crates/jos-ventoy-chain`: on this path nothing writes the disk map
+    into the module file.
+
+The direct boot shows no kernel splash and does not go through
+`jos-boot` (see `docs/boot-splash.md`). The `.vcfg` is only written when
+the ISO has both `jos_efi.mod` and a `geom_ventoy.ko` with the chain
+reader in it; without the file, Ventoy boots the ISO as before.
 
 ### Intel Macs
 
@@ -122,10 +156,10 @@ extensions and no Secure Boot. What works and what does not:
   Ventoy's menu; Ubuntu shows the same line. Apple firmware keeps its
   console in graphics mode, so if Ventoy then fails to find a boot file,
   its `No bootfile found for UEFI!` can stay invisible and the screen
-  seems stuck on that shim line. If a Mac stops there with JuanitOS, try
-  the ISO with `Ctrl+u` (see above; not yet verified on a Mac). On a MacBook Air 7,1 Ubuntu 26.04 boots
-  from the same Ventoy stick; on a Yosemite-era MacBook Pro Debian 13
-  does not, so results vary by model and Ventoy version. rEFInd may not
+  seems stuck on that shim line. On Apple's 64-bit EFI with Ventoy
+  1.1.18, the normal mode can fail for every ISO, with only GRUB2 mode
+  booting (Linux ISOs). For JuanitOS that is the direct kernel boot
+  of the `.vcfg` (see "Ventoy's direct kernel boot" above). rEFInd may not
   list a Ventoy stick in its default MBR layout (the Option-key picker
   does). `dd` avoids Ventoy altogether.
 - **Console mode.** Apple firmware starts applications with its console

@@ -729,23 +729,27 @@ impl<'a> Builder<'a> {
             &dom0::rc_conf(Flavor::Live, &opts),
         )?;
         let mut loader_conf = dom0::loader_conf(Flavor::Live, &opts);
-        match self.ventoy_module() {
-            Ok(true) => loader_conf.push_str(&ventoy::loader_conf_lines()),
-            Ok(false) => {}
-            Err(e) => println!(
-                "   warning: geom_ventoy.ko not built ({e:#}); \
-                 the ISO needs Ventoy >= 1.1.08 or a dd-written stick"
-            ),
-        }
+        let chain = match self.ventoy_module() {
+            Ok(Some(chain)) => {
+                loader_conf.push_str(&ventoy::loader_conf_lines());
+                chain
+            }
+            Ok(None) => false,
+            Err(e) => {
+                println!(
+                    "   warning: geom_ventoy.ko not built ({e:#}); \
+                     the ISO needs Ventoy >= 1.1.08 or a dd-written stick"
+                );
+                false
+            }
+        };
         self.fs
             .write(&root.join("boot/loader.conf"), &loader_conf)?;
-        if let Err(e) = self.grub_module() {
-            println!(
-                "   warning: {}.mod not built ({e:#}); \
-                 Ventoy's direct kernel boot (Intel Macs) is unavailable",
-                dom0::GRUB_MODULE
-            );
-        }
+        let grub = self.grub_module().unwrap_or_else(|e| {
+            println!("   warning: {}.mod not built ({e:#})", dom0::GRUB_MODULE);
+            false
+        });
+        self.direct_boot(grub && chain)?;
         self.fs
             .write_executable(&root.join("etc/rc.local"), &dom0::live_rc_local())?;
 
@@ -947,21 +951,46 @@ impl Builder<'_> {
     }
 
     /// `geom_ventoy.ko` in the live root (see [`ventoy`]), with the chain
-    /// blob reader when there is one. `Ok(false)` when there is nothing to
-    /// build (no vendored source).
-    fn ventoy_module(&self) -> anyhow::Result<bool> {
+    /// blob reader when there is one: `Some(true)` when it has it, `None`
+    /// when there is nothing to build (no vendored source).
+    fn ventoy_module(&self) -> anyhow::Result<Option<bool>> {
         let chain = self
             .usable_chain_object()
             .map(|obj| format!("CHAIN_OBJ={}", Self::s(&obj)));
         let Some(mut bytes) = self.build_kmod(VENTOY_MODULE, chain.as_deref().as_slice())? else {
-            return Ok(false);
+            return Ok(None);
         };
         if !self.fs.dry_run {
             let at = ventoy::patch_module(&mut bytes)?;
             println!("   Ventoy disk map at file offset {at:#x}");
         }
         self.install_kmod("boot/kernel", VENTOY_MODULE, &bytes)?;
-        Ok(true)
+        Ok(Some(chain.is_some()))
+    }
+
+    /// Ventoy's direct kernel boot (64-bit UEFI), when the ISO has what it
+    /// needs (`jos_efi.mod`, and a `geom_ventoy.ko` reading the chain
+    /// blob): its GRUB script in the root and the `.vcfg` that offers it
+    /// next to the ISO. Otherwise neither, nor one from an earlier build.
+    fn direct_boot(&self, possible: bool) -> anyhow::Result<()> {
+        let cfg = self
+            .rootfs()
+            .join(ventoy::DIRECT_CFG.trim_start_matches('/'));
+        let vcfg = self.iso().with_extension("iso.vcfg");
+        if !possible {
+            println!("   Ventoy's direct kernel boot (64-bit UEFI) is unavailable");
+            self.fs.remove_file(&cfg)?;
+            self.fs.remove_file(&vcfg)?;
+            return Ok(());
+        }
+        let bootwatch = self
+            .rootfs()
+            .join(format!("boot/modules/{}.ko", dom0::BOOTWATCH_MODULE))
+            .is_file();
+        self.fs
+            .write(&cfg, &ventoy::direct_cfg(&self.profile.label, bootwatch))?;
+        self.fs.write(&vcfg, &ventoy::vcfg())?;
+        Ok(())
     }
 
     /// `jos_efi.mod` on the live ISO (see `freebsd/grub`): built with
@@ -2200,6 +2229,60 @@ mod tests {
     }
 
     #[test]
+    fn the_direct_boot_is_offered_when_both_modules_are_built() {
+        let s = Scratch::new("direct");
+        let mut profile = Profile::default();
+        s.put("work/juanitos-dom0.txz", b"tarball");
+        s.put("work/MANIFEST", b"manifest");
+        s.put(&format!("work/{}", profile.iso_name()), b"iso9660");
+        s.put(&format!("work/rootfs{}", dom0::LOADER_EFI), b"loader");
+        s.put("repo/freebsd/geom_ventoy/Makefile", b"KMOD=geom_ventoy\n");
+        s.put("root/usr/src/sys/conf/kmod.mk", b"");
+        s.put(
+            "repo/freebsd/geom_ventoy/geom_ventoy.ko",
+            &crate::ventoy::tests::fake_module(0x10000, 65536, true),
+        );
+        s.put("repo/freebsd/grub/Makefile", b"MOD=jos_efi\n");
+        s.put("repo/freebsd/grub/jos_efi.mod", b"\x7fELF module");
+        grub_tarball(&s, &mut profile);
+        s.put("work/rootfs/boot/modules/jos_bootwatch.ko", b"\x7fELF");
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let cfg = b.rootfs().join(ventoy::DIRECT_CFG.trim_start_matches('/'));
+        let vcfg = s.0.join(format!("work/{}.vcfg", profile.iso_name()));
+        let offered = || {
+            b.iso_build().unwrap();
+            assert_eq!(cfg.exists(), vcfg.exists());
+            cfg.exists()
+        };
+
+        // Without the chain reader, geom_ventoy.ko could not find the ISO.
+        assert!(!offered());
+
+        let obj = b.chain_object_path();
+        s.put(
+            obj.strip_prefix(&s.0).unwrap().to_str().unwrap(),
+            &crate::ventoy::tests::fake_object(&[crate::ventoy::CHAIN_ENTRY], &["panic"]),
+        );
+        assert!(offered());
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            ventoy::direct_cfg(&profile.label, true)
+        );
+        assert_eq!(std::fs::read_to_string(&vcfg).unwrap(), ventoy::vcfg());
+
+        // Without GRUB's module, an earlier build's files go ...
+        std::fs::remove_file(s.0.join("repo/freebsd/grub/jos_efi.mod")).unwrap();
+        assert!(!offered());
+        // ... or the ISO is not built.
+        for stale in [&cfg, &vcfg] {
+            std::fs::create_dir_all(stale.join("bob")).unwrap();
+            assert!(b.iso_build().is_err());
+            std::fs::remove_dir_all(stale).unwrap();
+        }
+    }
+
+    #[test]
     fn kernel_sources_come_from_the_verified_src_set() {
         let s = Scratch::new("ksrc");
         let profile = Profile::default();
@@ -2527,6 +2610,12 @@ mod tests {
         let grub = std::fs::read(&tarball).unwrap();
         let m = MockRunner::new();
         let b = real_builder(&m, &profile, &s.0);
+        // With the chain reader: the direct boot's files are written too.
+        let obj = b.chain_object_path();
+        s.put(
+            obj.strip_prefix(&s.0).unwrap().to_str().unwrap(),
+            &crate::ventoy::tests::fake_object(&[crate::ventoy::CHAIN_ENTRY], &["panic"]),
+        );
         let setup = || {
             s.put("work/juanitos-dom0.txz", b"tarball");
             s.put("work/MANIFEST", b"manifest");

@@ -364,6 +364,11 @@ once they have switched terminals, which covers the pointer drawn at boot.
   (`getty` keeps `ttyv0`). 32-bit EFI (`BOOTIA32.EFI` is FreeBSD's
   `loader_ia32.efi`) has no `jos-boot` card, but it still gets efifb when
   the firmware provides GOP.
+- **Ventoy's direct kernel boot** (the `.vcfg` entry for firmware where
+  only Ventoy's GRUB2 mode boots, `docs/installer.md`) bypasses
+  `jos-boot` and FreeBSD's loader, and so the kernel splash: the card
+  needs a pointer into the loader's preload area, which `jos_efi.mod`
+  cannot provide. The kernel messages show until `jos-splash` starts.
 - The daemon gives the console back when it exits on an error or a
   panic; one that is killed leaves its terminal on screen. `vt(4)` does
   not lock a graphics-mode terminal, so Alt+F1 (or `vidcontrol -s 1`)
