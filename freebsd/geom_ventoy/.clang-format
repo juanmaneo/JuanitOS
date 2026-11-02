@@ -1,0 +1,4 @@
+# Vendored from Ventoy (THIRD_PARTY.md): kept as upstream has it so the
+# local changes stay a readable diff. `cargo xtask fmt` and `lint` leave
+# the directory alone.
+DisableFormat: true

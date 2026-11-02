@@ -227,11 +227,11 @@ then Docker and Podman running containers on the next boot); `fbsd15-dev`,
 Project automation is a Rust program too ([cargo xtask](https://github.com/matklad/cargo-xtask)):
 
 ```sh
-cargo xtask ci            # security audit, fmt, clippy (host, FreeBSD, UEFI), tests + coverage gate, UEFI builds
+cargo xtask ci            # security audit, fmt, clippy + clang-tidy, tests + coverage gate, UEFI builds
 cargo xtask security-audit  # cargo-audit + cargo-deny (deny.toml) on all three lockfiles
 cargo xtask test          # just the tests (workspace + jos-boot's library on the host)
-cargo xtask lint          # clippy -D warnings on every target
-cargo xtask fmt --fix
+cargo xtask lint          # clippy -D warnings on every target, clang-tidy on the C sources
+cargo xtask fmt --fix     # rustfmt, and clang-format on the C sources
 cargo xtask coverage      # lines, functions, regions per file, checked against coverage.toml
 cargo xtask coverage --html --ratchet
 cargo xtask screenshots   # regenerate docs/images (installer pages, boot card)
@@ -259,6 +259,16 @@ unsound or yanked crate), on a license that is not compatible with
 BSD-3-Clause, and on a dependency from anywhere but crates.io; the
 policy is `deny.toml`, where an advisory that does not apply is ignored
 with its reason.
+
+The C sources (the `jos_bootwatch` kernel module; `freebsd/geom_ventoy`
+is vendored and left as upstream has it) follow LLVM style:
+`.clang-format` is checked by `cargo xtask fmt` and `.clang-tidy` by
+`cargo xtask lint`, every finding being an error. clang-tidy compiles the
+module the way `bsd.kmod.mk` does, so `lint` fetches the kernel headers
+of the FreeBSD release in `release/juanitos.toml` once (`src.txz`,
+verified against its MANIFEST) into `~/.cache/juanitos`. Both tools must
+be the LLVM major version in `.clang-version` (what CI installs): another
+version formats differently and has other checks.
 
 How the code stays testable on a Linux or macOS laptop:
 

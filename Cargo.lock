@@ -719,6 +719,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "juanitos-core",
  "serde",
  "serde_json",
  "toml",

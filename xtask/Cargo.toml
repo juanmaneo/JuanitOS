@@ -12,6 +12,9 @@ toml.workspace = true
 serde.workspace = true
 # llvm-cov's JSON summary (the only report with region counts).
 serde_json = "1"
+# FreeBSD MANIFEST parsing and sha256 checks (the kernel headers clang-tidy
+# needs are fetched the way jos-release fetches the distribution sets).
+juanitos-core = { path = "../crates/juanitos-core" }
 
 [lints]
 workspace = true

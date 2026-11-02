@@ -25,10 +25,26 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-audit,cargo-deny
-      # Host tools some jos-release tests need (they fail without them).
-      # mtools: writing into a disk image's ESP (disk.rs); tar and mkfifo
-      # come with the image.
-      - run: sudo apt-get update && sudo apt-get install -y mtools
+      # Host tools the checks need. mtools: jos-release tests write into
+      # a disk image's ESP (disk.rs; tar and mkfifo come with the image).
+      # clang-format and clang-tidy: the LLVM major version in
+      # .clang-version, from LLVM's apt repository (Ubuntu's packages lag
+      # behind); `cargo xtask fmt` and `lint` refuse any other version.
+      - run: |
+          llvm=$(cat .clang-version)
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-$llvm main" | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y mtools clang-format-$llvm clang-tidy-$llvm
+          sudo ln -sf /usr/bin/clang-format-$llvm /usr/local/bin/clang-format
+          sudo ln -sf /usr/bin/clang-tidy-$llvm /usr/local/bin/clang-tidy
+      # The FreeBSD kernel headers clang-tidy compiles against: `cargo
+      # xtask lint` fetches src.txz (250 MB) once per release and keeps
+      # the header directories here.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/juanitos
+          key: juanitos-cache-${{ hashFiles('release/juanitos.toml', 'xtask/src/clang.rs') }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |

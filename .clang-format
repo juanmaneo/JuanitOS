@@ -1,0 +1,15 @@
+# clang-format for the C sources JuanitOS maintains, checked by
+# `cargo xtask fmt` (applied with --fix). Vendored C (freebsd/geom_ventoy)
+# has its own .clang-format that turns formatting off, so it stays as
+# upstream has it.
+BasedOnStyle: LLVM
+# FreeBSD kernel headers are not self-contained: <sys/param.h>, then
+# <sys/systm.h>, must come before the others (FreeBSD's own .clang-format
+# has the same rule). The rest of an include block is sorted as usual.
+IncludeCategories:
+  - Regex: '^<sys/param\.h>'
+    Priority: 1
+  - Regex: '^<sys/systm\.h>'
+    Priority: 2
+  - Regex: '.*'
+    Priority: 3

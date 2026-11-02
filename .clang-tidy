@@ -1,0 +1,33 @@
+# clang-tidy for the C sources JuanitOS maintains, run by `cargo xtask lint`
+# with the FreeBSD kernel's compile flags (xtask/src/clang.rs). Every
+# finding is an error; a check that does not fit kernel C is switched off
+# here, with the reason, rather than silenced in the code.
+#
+# - bugprone-easily-swappable-parameters: design advice, not a bug finder.
+# - bugprone-signed-bitwise: kernel flag words are `int` (`boothowto &
+#   RB_MUTE`, `msg_flags & MSGBUF_WRAP`); it fires on every flag test.
+# - misc-include-cleaner: kernel headers are meant to be reached through
+#   <sys/param.h> and <sys/systm.h>, not included one by one.
+# - readability-braces-around-statements: LLVM style leaves single
+#   statements without braces.
+# - readability-identifier-length: kernel idioms are short (`hz`, `n`).
+# - readability-implicit-bool-conversion: C idioms (`!cn_mute`, returning
+#   the result of `&&`).
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-signed-bitwise,
+  -misc-include-cleaner,
+  -readability-braces-around-statements,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion
+WarningsAsErrors: '*'
+# Our own headers too; the kernel's are system headers (-isystem) and are
+# not reported.
+HeaderFilterRegex: '.*'
+FormatStyle: file

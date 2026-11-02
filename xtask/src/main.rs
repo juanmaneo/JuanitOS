@@ -4,8 +4,8 @@
 //! ```text
 //! cargo xtask ci                  everything CI runs, in order
 //! cargo xtask security-audit      cargo-audit + cargo-deny (deny.toml), all workspaces
-//! cargo xtask fmt [--fix]         rustfmt, all three workspaces
-//! cargo xtask lint                clippy -D warnings: host, FreeBSD, UEFI
+//! cargo xtask fmt [--fix]         rustfmt, all three workspaces; clang-format on the C sources
+//! cargo xtask lint                clippy -D warnings: host, FreeBSD, UEFI; clang-tidy on the C sources
 //! cargo xtask test                tests: workspace + jos-boot lib on the host
 //! cargo xtask coverage [--ratchet] [--html]
 //!                                 line coverage per crate, gated by coverage.toml
@@ -15,6 +15,7 @@
 //! Extra arguments after `--` go to the underlying cargo commands (e.g.
 //! `cargo xtask ci -- --offline`).
 
+mod clang;
 mod coverage;
 
 use std::path::{Path, PathBuf};
@@ -86,8 +87,10 @@ cargo xtask <task> [options] [-- <cargo args>]
   ci                     security audit, fmt, lint, coverage gate, UEFI builds
   security-audit         RustSec advisories (cargo-audit) and the deny.toml policy
                          (cargo-deny: advisories, licenses, sources) on every lockfile
-  fmt [--fix]            check (or apply) rustfmt in all workspaces
-  lint                   clippy -D warnings for host, FreeBSD and UEFI targets
+  fmt [--fix]            check (or apply) rustfmt in all workspaces and clang-format
+                         (LLVM style) on the C sources
+  lint                   clippy -D warnings for host, FreeBSD and UEFI targets, then
+                         clang-tidy on the C sources with the FreeBSD kernel headers
   test                   workspace tests + jos-boot's library tests on the host
   coverage [--ratchet] [--html]
                          line coverage per crate, checked against coverage.toml;
@@ -249,7 +252,7 @@ fn fmt(ctx: &Ctx, fix: bool) -> anyhow::Result<()> {
     for dir in workspaces(ctx) {
         cargo(ctx, &dir, args)?;
     }
-    Ok(())
+    clang::fmt(&ctx.root, fix)
 }
 
 /// Known vulnerabilities, unmaintained or yanked crates (both tools read
@@ -301,7 +304,7 @@ fn lint(ctx: &Ctx) -> anyhow::Result<()> {
     } else {
         println!("note: `rustup target add {UEFI}` to lint jos-boot and jos-firewall");
     }
-    Ok(())
+    clang::tidy(&ctx.root)
 }
 
 fn test(ctx: &Ctx) -> anyhow::Result<()> {
