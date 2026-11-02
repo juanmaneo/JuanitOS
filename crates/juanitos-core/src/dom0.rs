@@ -386,6 +386,7 @@ pub fn loader_conf(flavor: Flavor, opts: &Dom0Options) -> String {
     s.push_str(&format!("splash=\"{BOOT_SPLASH_PNG}\"\n"));
     s.push_str(&format!("shutdown_splash=\"{BOOT_SPLASH_PNG}\"\n"));
     s.push_str("kern.vt.splash_cpu=\"0\"\n");
+    s.push_str(EFI_POWEROFF_LOADER_CONF);
 
     s.push_str("# Passthrough devices: see /usr/local/share/juanitos/loader.conf.sample\n");
     if opts.pptdevs.is_empty() {
@@ -397,6 +398,18 @@ pub fn loader_conf(flavor: Flavor, opts: &Dom0Options) -> String {
     }
     s
 }
+
+/// Power off through ACPI S5, as every other OS does by default. FreeBSD
+/// first calls the firmware's `ResetSystem(EfiResetShutdown)` runtime
+/// service, which never returns on some firmware: the machine then sits
+/// at the shutdown splash with a CPU spinning (VirtualBox and bhyve UEFI
+/// guests, FreeBSD bug 247474; some boards, bug 277450). The ACPI path
+/// follows in the same handler chain, so nothing is lost where the EFI
+/// one works.
+const EFI_POWEROFF_LOADER_CONF: &str = "\
+# Power off with ACPI S5: the EFI runtime service hangs on some firmware
+hw.efi.poweroff=\"0\"
+";
 
 /// The boot splash daemon and client, by absolute path: rc(8) runs with
 /// `PATH=/sbin:/bin:/usr/sbin:/usr/bin`, which `rc.local` and the live
@@ -628,6 +641,7 @@ mod tests {
         );
         assert!(live.contains("splash=\"/boot/images/juanitos-splash.png\""));
         assert!(!live.contains("boot_mute"), "mute comes from jos-boot's -m");
+        assert!(live.contains("\nhw.efi.poweroff=\"0\"\n"), "{live}");
 
         assert!(!live.contains("zfs_load"));
 
@@ -639,6 +653,7 @@ mod tests {
             },
         );
         assert!(inst.contains("zfs_load=\"YES\""));
+        assert!(inst.contains("\nhw.efi.poweroff=\"0\"\n"), "{inst}");
         assert!(!inst.contains("hw.uart.console"));
         assert!(!inst.contains("boot_multicons"));
         assert!(inst.contains("\n#pptdevs=\"1/0/0 1/0/1\"\n"));

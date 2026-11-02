@@ -228,6 +228,16 @@ icon off. `rc.d/jos-splash` itself has no `shutdown` keyword: its stop
 session for the shutdown splash (compositor and seat released by stopping
 `jos-login`) is not verified on hardware yet.
 
+A machine that stays at that last picture with a CPU spinning is not the
+splash's doing: FreeBSD powers off through the firmware's EFI
+`ResetSystem(EfiResetShutdown)` before ACPI S5, and that runtime service
+never returns on some firmware (VirtualBox and bhyve UEFI guests,
+FreeBSD bug 247474; some boards, bug 277450). Seen in VirtualBox: `shutdown
+-p now` left CPU 0 in firmware code and the page daemon spinning on a lock.
+The dom0's `loader.conf` therefore sets `hw.efi.poweroff="0"`, which is
+the ACPI path every other OS uses by default; `sysctl hw.efi.poweroff=1`
+restores FreeBSD's order on a machine whose ACPI S5 does not work.
+
 `shutdown now` is not a power-off. `init(8)` runs `rc.shutdown single`
 (`reboot` for `-p`, `-h` and `-r`; the argument is `$rc_shutdown` in every
 rc.d script it stops), kills what is left and starts a single-user shell

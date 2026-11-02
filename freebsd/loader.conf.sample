@@ -34,6 +34,11 @@ zfs_load="YES"
 splash="/boot/images/juanitos-splash.png"
 shutdown_splash="/boot/images/juanitos-splash.png"
 kern.vt.splash_cpu="0"
+# Power off with ACPI S5 like every other OS. FreeBSD tries the firmware's
+# EFI ResetSystem(Shutdown) first, which never returns on some firmware
+# (VirtualBox and bhyve guests, some boards): the machine then sits at the
+# shutdown splash with a CPU spinning.
+hw.efi.poweroff="0"
 # Serial console in addition to the screen (kernel side):
 #boot_multicons="YES"
 #hw.uart.console="io:0x3f8,br:115200"
