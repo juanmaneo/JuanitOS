@@ -41,17 +41,20 @@ static size_t bw_tail(void) {
   size_t len = 0;
   int n;
 
-  if (mbp == NULL)
+  if (mbp == NULL) {
     return 0;
+  }
   want = min(BW_TAIL, mbp->msg_size);
-  if ((mbp->msg_flags & MSGBUF_WRAP) == 0 && mbp->msg_wseq < want)
+  if ((mbp->msg_flags & MSGBUF_WRAP) == 0 && mbp->msg_wseq < want) {
     seq = 0;
-  else
+  } else {
     seq = MSGBUF_SEQSUB(mbp, mbp->msg_wseq, want);
+  }
   while (len < BW_TAIL) {
     n = msgbuf_peekbytes(mbp, bw_buf + len, BW_TAIL - len, &seq);
-    if (n <= 0)
+    if (n <= 0) {
       break;
+    }
     len += n;
   }
   bw_buf[len] = '\0';
@@ -70,8 +73,9 @@ static void bw_reveal(size_t len) {
   /* A full buffer starts mid-line: begin the replay on a line boundary. */
   if (len == BW_TAIL) {
     const char *nl = strchr(bw_buf, '\n');
-    if (nl != NULL)
+    if (nl != NULL) {
       start = nl + 1;
+    }
   }
 
   cn_mute = 0;
@@ -89,8 +93,9 @@ static void bw_reveal(size_t len) {
 static void bw_tick(void *arg __unused) {
   size_t len;
 
-  if (root_mounted() || !cn_mute)
+  if (root_mounted() || !cn_mute) {
     return;
+  }
   len = bw_tail();
   if (bw_at_prompt(len)) {
     bw_reveal(len);
@@ -100,8 +105,9 @@ static void bw_tick(void *arg __unused) {
 }
 
 static void bw_start(void *arg __unused) {
-  if ((boothowto & RB_MUTE) == 0 || root_mounted())
+  if ((boothowto & RB_MUTE) == 0 || root_mounted()) {
     return;
+  }
   callout_reset(&bw_callout, hz, bw_tick, NULL);
 }
 SYSINIT(jos_bootwatch, SI_SUB_LAST, SI_ORDER_ANY, bw_start, NULL);

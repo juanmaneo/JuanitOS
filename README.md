@@ -261,9 +261,11 @@ policy is `deny.toml`, where an advisory that does not apply is ignored
 with its reason.
 
 The C sources (the `jos_bootwatch` kernel module; `freebsd/geom_ventoy`
-is vendored and left as upstream has it) follow LLVM style:
-`.clang-format` is checked by `cargo xtask fmt` and `.clang-tidy` by
-`cargo xtask lint`, every finding being an error. clang-tidy compiles the
+is vendored and left as upstream has it) follow LLVM style, with braces
+around every `if`/`else`/`for`/`while` body (a statement added to an
+unbraced body is a classic bug; `--fix` inserts them): `.clang-format` is
+checked by `cargo xtask fmt` and `.clang-tidy` by `cargo xtask lint`,
+every finding being an error. clang-tidy compiles the
 module the way `bsd.kmod.mk` does, so `lint` fetches the kernel headers
 of the FreeBSD release in `release/juanitos.toml` once (`src.txz`,
 verified against its MANIFEST) into `~/.cache/juanitos`. Both tools must

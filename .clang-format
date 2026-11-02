@@ -3,6 +3,10 @@
 # has its own .clang-format that turns formatting off, so it stays as
 # upstream has it.
 BasedOnStyle: LLVM
+# Every if/else/for/while body in braces: a statement added to an unbraced
+# body is a classic bug. clang-tidy's readability-braces-around-statements
+# fails the build on what this does not catch.
+InsertBraces: true
 # FreeBSD kernel headers are not self-contained: <sys/param.h>, then
 # <sys/systm.h>, must come before the others (FreeBSD's own .clang-format
 # has the same rule). The rest of an include block is sorted as usual.

@@ -8,8 +8,6 @@
 #   RB_MUTE`, `msg_flags & MSGBUF_WRAP`); it fires on every flag test.
 # - misc-include-cleaner: kernel headers are meant to be reached through
 #   <sys/param.h> and <sys/systm.h>, not included one by one.
-# - readability-braces-around-statements: LLVM style leaves single
-#   statements without braces.
 # - readability-identifier-length: kernel idioms are short (`hz`, `n`).
 # - readability-implicit-bool-conversion: C idioms (`!cn_mute`, returning
 #   the result of `&&`).
@@ -23,7 +21,6 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -bugprone-signed-bitwise,
   -misc-include-cleaner,
-  -readability-braces-around-statements,
   -readability-identifier-length,
   -readability-implicit-bool-conversion
 WarningsAsErrors: '*'
@@ -31,3 +28,7 @@ WarningsAsErrors: '*'
 # not reported.
 HeaderFilterRegex: '.*'
 FormatStyle: file
+# Braces around every if/else/for/while body, however short (a statement
+# added to an unbraced body is a classic bug); .clang-format inserts them.
+CheckOptions:
+  readability-braces-around-statements.ShortStatementLines: 0
