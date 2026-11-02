@@ -1,12 +1,17 @@
-//! A minimal "expect" over a child process's stdio: wait for a pattern,
-//! send a line. Used to drive the FreeBSD builder VM's serial console so
-//! stage 1 runs unattended from a Linux host (`jos-release builder --auto`).
+//! A minimal "expect" over a guest's serial console: wait for a pattern,
+//! send a line. Used to drive the FreeBSD builder VM so stage 1 runs
+//! unattended from a Linux host (`jos-release builder --auto`), the
+//! self-hosting round (`selfhost`) and the VirtualBox install test
+//! (`vbox`).
 //!
-//! Everything the guest prints is echoed to our stdout (and optionally a
-//! log file), so a hung build is visible rather than silent.
+//! The console is a pair of byte streams (QEMU's stdio with `-serial
+//! stdio`, VirtualBox's serial socket) plus a [`Guest`] that knows when the
+//! machine is gone. Everything the guest prints is echoed to our stdout
+//! (and optionally a log file), so a hung build is visible rather than
+//! silent.
 
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin};
+use std::process::Child;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -18,9 +23,36 @@ use anyhow::{bail, Context};
 const SEND_CHUNK: usize = 32;
 const SEND_PAUSE: Duration = Duration::from_millis(10);
 
-pub struct Console {
-    child: Child,
-    stdin: ChildStdin,
+/// The machine behind a console: how to tell that it has stopped, and how
+/// to stop one that will not.
+pub trait Guest: Send {
+    /// `None` while the guest runs; once it is gone, whether it powered
+    /// off cleanly.
+    fn finished(&mut self) -> Option<anyhow::Result<()>>;
+    /// Stop a guest that did not finish by itself.
+    fn kill(&mut self);
+}
+
+/// A QEMU process (or, in tests, a shell).
+impl Guest for Child {
+    fn finished(&mut self) -> Option<anyhow::Result<()>> {
+        // A failing try_wait is retried until the deadline.
+        let st = self.try_wait().ok().flatten()?;
+        Some(if st.success() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("qemu exited with {st}"))
+        })
+    }
+
+    fn kill(&mut self) {
+        let _ = Child::kill(self);
+    }
+}
+
+pub struct Console<'a> {
+    guest: Box<dyn Guest + 'a>,
+    input: Box<dyn Write + Send + 'a>,
     rx: mpsc::Receiver<Vec<u8>>,
     /// Unconsumed output, searched by `expect`.
     buf: Vec<u8>,
@@ -29,31 +61,42 @@ pub struct Console {
     log: Option<std::fs::File>,
 }
 
-impl Console {
+impl<'a> Console<'a> {
     /// Take over a child's piped stdin/stdout.
     pub fn attach(mut child: Child, log: Option<std::fs::File>) -> anyhow::Result<Self> {
-        let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             bail!("the child's stdin and stdout must be piped");
         };
+        Ok(Console::over(Box::new(child), stdin, stdout, log))
+    }
+
+    /// A console over any pair of streams: what the guest prints comes
+    /// from `output`, what we send goes to `input`.
+    pub fn over(
+        guest: Box<dyn Guest + 'a>,
+        input: impl Write + Send + 'a,
+        mut output: impl Read + Send + 'static,
+        log: Option<std::fs::File>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             loop {
                 // A read error ends the console like end of file does.
-                let n = stdout.read(&mut chunk).unwrap_or(0);
+                let n = output.read(&mut chunk).unwrap_or(0);
                 if n == 0 || tx.send(chunk.get(..n).unwrap_or(&[]).to_vec()).is_err() {
                     break;
                 }
             }
         });
-        Ok(Console {
-            child,
-            stdin,
+        Console {
+            guest,
+            input: Box::new(input),
             rx,
             buf: Vec::new(),
             window: 1 << 20,
             log,
-        })
+        }
     }
 
     fn pump(&mut self, timeout: Duration) -> anyhow::Result<bool> {
@@ -120,10 +163,10 @@ impl Console {
     }
 
     /// Send bytes as they are (control characters such as ^D included).
-    /// (`ChildStdin` is unbuffered: there is nothing to flush.)
     pub fn send_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        self.stdin
+        self.input
             .write_all(data)
+            .and_then(|()| self.input.flush())
             .context("writing to the guest's console")
     }
 
@@ -163,16 +206,11 @@ impl Console {
     pub fn wait_exit(&mut self, timeout: Duration) -> anyhow::Result<()> {
         let deadline = Instant::now() + timeout;
         loop {
-            // A failing try_wait is retried until the deadline.
-            if let Ok(Some(st)) = self.child.try_wait() {
-                return if st.success() {
-                    Ok(())
-                } else {
-                    bail!("qemu exited with {st}")
-                };
+            if let Some(result) = self.guest.finished() {
+                return result;
             }
             if Instant::now() >= deadline {
-                let _ = self.child.kill();
+                self.guest.kill();
                 bail!("the guest did not power off in time; killed");
             }
             let _ = self.pump(Duration::from_millis(500));
@@ -180,10 +218,10 @@ impl Console {
     }
 }
 
-impl Drop for Console {
+impl Drop for Console<'_> {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
+        if self.guest.finished().is_none() {
+            self.guest.kill();
         }
     }
 }
@@ -229,7 +267,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn shell(log: Option<std::fs::File>) -> Console {
+    fn shell(log: Option<std::fs::File>) -> Console<'static> {
         use std::process::{Command, Stdio};
         let child = Command::new("sh")
             .stdin(Stdio::piped())

@@ -7,6 +7,8 @@ use std::process::Command;
 
 use anyhow::{bail, Context};
 
+use crate::console::Console;
+
 /// Known OVMF code-file locations (Debian/Ubuntu, Fedora, Arch, FreeBSD,
 /// Homebrew).
 pub const OVMF_CANDIDATES: &[&str] = &[
@@ -518,7 +520,7 @@ pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
 
 /// The console side of [`run_auto_builder`]: log in, run [`AUTO_STEPS`],
 /// power off.
-fn drive_builder(con: &mut crate::console::Console) -> anyhow::Result<()> {
+fn drive_builder(con: &mut Console<'_>) -> anyhow::Result<()> {
     con.expect("login:", std::time::Duration::from_secs(20 * 60))?;
     root_shell(con, None)?;
     run_steps(con, "builder", AUTO_STEPS.iter().copied())?;
@@ -527,7 +529,7 @@ fn drive_builder(con: &mut crate::console::Console) -> anyhow::Result<()> {
 
 /// Start QEMU with its serial console on a pipe we drive, logged to
 /// `<out>/console.log`.
-fn spawn_console(args: &[String], out: &Path) -> anyhow::Result<crate::console::Console> {
+fn spawn_console(args: &[String], out: &Path) -> anyhow::Result<Console<'static>> {
     use std::process::Stdio;
     print!("{}", accel_note(accel()));
     let log = std::fs::File::create(out.join("console.log"))?;
@@ -538,12 +540,12 @@ fn spawn_console(args: &[String], out: &Path) -> anyhow::Result<crate::console::
         .stderr(Stdio::inherit())
         .spawn()
         .context("running qemu-system-x86_64")?;
-    crate::console::Console::attach(child, Some(log))
+    Console::attach(child, Some(log))
 }
 
 /// Log in as root at a `login:` prompt that has just been seen, and make
 /// the shell quiet and predictable.
-fn root_shell(con: &mut crate::console::Console, password: Option<&str>) -> anyhow::Result<()> {
+pub fn root_shell(con: &mut Console<'_>, password: Option<&str>) -> anyhow::Result<()> {
     use std::time::Duration;
     con.send_line("root")?;
     if let Some(pw) = password {
@@ -559,8 +561,8 @@ fn root_shell(con: &mut crate::console::Console, password: Option<&str>) -> anyh
 
 /// Run `(what, command, timeout in minutes)` steps in order; the first
 /// failure stops the run.
-fn run_steps<'s>(
-    con: &mut crate::console::Console,
+pub fn run_steps<'s>(
+    con: &mut Console<'_>,
     who: &str,
     steps: impl IntoIterator<Item = (&'s str, &'s str, u64)>,
 ) -> anyhow::Result<()> {
@@ -572,7 +574,7 @@ fn run_steps<'s>(
     Ok(())
 }
 
-fn power_off(con: &mut crate::console::Console, who: &str) -> anyhow::Result<()> {
+pub fn power_off(con: &mut Console<'_>, who: &str) -> anyhow::Result<()> {
     println!("\n==> {who}: powering off");
     con.send_line("poweroff")?;
     con.wait_exit(std::time::Duration::from_secs(10 * 60))
@@ -766,7 +768,7 @@ pub fn run_selfhost(s: &SelfHost, dry_run: bool) -> anyhow::Result<()> {
 /// `steps` in the installed dom0, power off (also after a failed step, so
 /// the disk and the results stay consistent).
 fn drive_selfhost(
-    con: &mut crate::console::Console,
+    con: &mut Console<'_>,
     install: &str,
     steps: &[(&str, String, u64)],
 ) -> anyhow::Result<()> {
@@ -797,7 +799,7 @@ fn drive_selfhost(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -986,20 +988,21 @@ mod tests {
         assert!(steps.iter().all(|s| s.2 > 0));
     }
 
-    // Pieces of a guest played by `sh` (see `guest`).
+    // Pieces of a guest played by `sh` (see `guest`), shared with the
+    // VirtualBox harness's tests.
     /// `reboot` lands on a login that asks for a password.
-    const REBOOT: &str =
+    pub(crate) const REBOOT: &str =
         "reboot() { printf 'booting\\nlogin: '; read u; printf 'Password:'; read p; printf '# '; }";
-    const POWEROFF: &str = "poweroff() { exit 0; }";
+    pub(crate) const POWEROFF: &str = "poweroff() { exit 0; }";
     /// The live installer's disk list, ended by one byte (the ^D).
     const LIVE: &str = "printf 'Disks:\\n'; dd bs=1 count=1 >/dev/null 2>&1";
     /// A password-less login.
-    const LOGIN: &str = "printf 'login: '; read u; printf '# '";
+    pub(crate) const LOGIN: &str = "printf 'login: '; read u; printf '# '";
     /// Run each line the host sends.
-    const EVAL: &str = "while read -r line; do eval \"$line\"; done";
+    pub(crate) const EVAL: &str = "while read -r line; do eval \"$line\"; done";
     /// Closing stdin before printing a prompt makes the host's next write
     /// fail, deterministically.
-    const DEAF: &str = "exec 0<&-";
+    pub(crate) const DEAF: &str = "exec 0<&-";
 
     /// Answer each line the host sends as if it succeeded, without running
     /// it (the builder's steps are real FreeBSD commands); a line
@@ -1014,7 +1017,7 @@ mod tests {
     /// A guest made of `parts`. Whatever it evaluates, `reboot` and
     /// `poweroff` are shell functions, never the host's commands.
     #[cfg(unix)]
-    fn guest(parts: &[&str]) -> crate::console::Console {
+    pub(crate) fn guest(parts: &[&str]) -> Console<'static> {
         use std::process::Stdio;
         let script = [&["reboot() { exit 9; }; poweroff() { exit 9; }"], parts].concat();
         let child = Command::new("sh")
@@ -1024,7 +1027,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        crate::console::Console::attach(child, None).unwrap()
+        Console::attach(child, None).unwrap()
     }
 
     #[cfg(unix)]

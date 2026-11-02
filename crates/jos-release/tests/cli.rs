@@ -527,6 +527,66 @@ fn selfhost_installs_rebuilds_and_compares() {
 }
 
 #[test]
+fn vbox_installs_in_a_virtualbox_vm() {
+    let w = Work::new("vbox");
+    // Defaults: the profile's ISO, <work>/vbox, the VM named jos-vbox.
+    let out = w.ok(&["vbox"]);
+    assert!(
+        out.contains(&format!(
+            "+ VBoxManage createvm --name jos-vbox --ostype FreeBSD_64 --basefolder {}",
+            w.path("vbox")
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("--medium {}", w.path("JuanitOS-"))),
+        "{out}"
+    );
+    assert!(
+        out.contains("--graphicscontroller vmsvga --vram 128"),
+        "{out}"
+    );
+    assert!(out.contains("--size 20480 --format VDI"), "{out}");
+    assert!(
+        out.contains("+ VBoxManage startvm jos-vbox --type headless"),
+        "{out}"
+    );
+    assert!(out.contains("jos-install --non-interactive"), "{out}");
+    assert!(out.contains("dom0: power-off goes through ACPI"), "{out}");
+
+    let out = w.ok(&[
+        "vbox",
+        "--iso",
+        "/x/stage1.iso",
+        "--out",
+        &w.path("elsewhere"),
+        "--name",
+        "other",
+        "--vram-mb",
+        "32",
+        "--disk-size-gb",
+        "10",
+    ]);
+    assert!(
+        out.contains(&format!(
+            "--uartmode1 server {}",
+            w.path("elsewhere/serial.sock")
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("--type dvddrive --medium /x/stage1.iso"),
+        "{out}"
+    );
+    assert!(out.contains("--vram 32"), "{out}");
+    assert!(out.contains("--size 10240"), "{out}");
+    assert!(
+        out.contains("+ VBoxManage unregistervm other --delete"),
+        "{out}"
+    );
+}
+
+#[test]
 fn selfhost_drives_a_fake_vm() {
     let w = Work::new("selfhost-host");
     let qemu = fake_path(&w.0.join("bin"), &[QEMU, QEMU_IMG], &[]);

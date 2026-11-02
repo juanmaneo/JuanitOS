@@ -12,6 +12,7 @@ mod qemu;
 #[cfg(test)]
 #[path = "../tests/common/gpt.rs"]
 mod test_gpt;
+mod vbox;
 mod ventoy;
 
 use std::path::PathBuf;
@@ -80,6 +81,36 @@ enum Cmd {
     /// Unattended bootstrap round under QEMU: install the ISO, rebuild
     /// JuanitOS on the installed dom0, compare the two dom0 tarballs.
     Selfhost(SelfhostArgs),
+    /// Unattended install test in a VirtualBox VM (EFI, VMSVGA, AHCI): the
+    /// graphical boot, the installer, the login screen and a clean
+    /// power-off, driven over the VM's serial port.
+    Vbox(VboxArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct VboxArgs {
+    /// ISO to install (default: the one this profile produces).
+    #[arg(long)]
+    iso: Option<PathBuf>,
+    /// VM folder, serial socket, console.log and screenshots (default
+    /// <work>/vbox).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// VM name (replaced if it exists).
+    #[arg(long, default_value = "jos-vbox")]
+    name: String,
+    #[arg(long, default_value_t = 20)]
+    disk_size_gb: u64,
+    #[arg(long, default_value_t = 6144)]
+    memory_mb: u64,
+    #[arg(long, default_value_t = 4)]
+    cpus: u32,
+    /// Video memory; 128 MB makes VMSVGA offer modes up to 7680x4320.
+    #[arg(long, default_value_t = 128)]
+    vram_mb: u32,
+    /// Leave the VM registered afterwards.
+    #[arg(long)]
+    keep: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -312,6 +343,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 memory_mb: a.memory_mb,
                 cpus: a.cpus,
             },
+            cli.dry_run,
+        ),
+        Cmd::Vbox(a) => vbox::run_vbox(
+            &vbox::VBox {
+                name: a.name,
+                iso: a.iso.unwrap_or_else(|| work.join(profile.iso_name())),
+                out: a.out.unwrap_or_else(|| work.join("vbox")),
+                disk_size_gb: a.disk_size_gb,
+                memory_mb: a.memory_mb,
+                cpus: a.cpus,
+                vram_mb: a.vram_mb,
+                keep: a.keep,
+            },
+            runner,
             cli.dry_run,
         ),
         Cmd::Compare(a) => {

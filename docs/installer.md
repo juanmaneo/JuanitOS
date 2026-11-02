@@ -331,6 +331,39 @@ through, for developing the passthrough path (`docs/gpu-passthrough.md`).
 VirtualBox and others work with the same ISO; enable EFI and nested VT-x in
 the VM settings. Docker cannot run FreeBSD; use it only to host QEMU.
 
+## The VirtualBox install test
+
+`jos-release vbox` is the unattended counterpart for VirtualBox, and the
+one that takes the graphical path end to end: VirtualBox's own EFI
+firmware starts `jos-boot` on a Graphics Output Protocol (VMSVGA with
+128 MB of VRAM, which offers modes up to 7680x4320, so the pre-loader's 4K
+cap is exercised), the kernel paints its splash, the graphical installer
+and later the login screen draw on the framebuffer, the disk is AHCI
+(`ada0`) and the keyboard PS/2. The VM's serial port is a local socket the
+harness drives like `selfhost` drives QEMU's: it logs in on the live
+medium's serial getty (the installer is on the screen), runs
+`jos-install --non-interactive ... --disk ada0`, reboots, logs in on the
+installed dom0 and checks that the kernel got the framebuffer
+(`VT(efifb)`), that `jos-greet` is up and that `hw.efi.poweroff` is 0,
+then powers off and waits for VirtualBox to report the VM off, which is
+where the EFI runtime power-off used to hang (`docs/boot-splash.md`).
+
+```sh
+jos-release vbox                       # <work>/vbox: VM, serial.sock, console.log, screenshots
+jos-release vbox --keep --vram-mb 32   # leave the VM registered; a smaller VRAM offers 4K at most
+jos-release vbox --dry-run             # the VBoxManage calls and the dialogue
+```
+
+The VM (`jos-vbox`, 4 CPUs, 6 GB, a 20 GB VDI) is created under `<work>/vbox`
+and unregistered with its disk afterwards unless `--keep`; `installer.png`
+and `login-screen.png` stay as evidence of the graphical path, next to the
+serial `console.log`. No nested virtualization is enabled, so the host
+checks inside report no VT-x (`--ignore-doctor`). COSMIC cannot be tried
+this way: FreeBSD has no KMS driver for any of VirtualBox's (or QEMU's)
+virtual GPUs, so `cosmic-comp` exits at once; a desktop session needs a
+real GPU, which is what the `gpu` qube and the dom0's own `i915`/`amdgpu`
+are about.
+
 ## Building on a Linux box
 
 The build steps call FreeBSD's `tar`, `pkg` and `makefs`, so they run on
