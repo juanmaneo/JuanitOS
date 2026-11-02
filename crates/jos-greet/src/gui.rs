@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn display_and_backend_failures_end_the_loop() {
-        let f1_twice: &[u8] = b"\x1b[M\x1b[M";
+        let f1_twice: &[u8] = b"\x1bOP\x1bOP";
         let gone = |n: usize| move |d: &mut NullDisplay| d.fail_after_frames = Some(n);
         // The very first frame, the confirmation of a power key, the
         // "Logging in" frame, and the refusal frame.
@@ -326,8 +326,8 @@ mod tests {
     #[test]
     fn display_is_reopened_after_a_session_then_power_off() {
         let mut opened = 0;
-        // vt(4) sends F1 as ESC [ M.
-        let mut bursts = vec![&b"right\r"[..], b"\x1b[M\x1b[M"].into_iter();
+        // vt(4) sends F1 as ESC O P (xterm).
+        let mut bursts = vec![&b"right\r"[..], b"\x1bOP\x1bOP"].into_iter();
         let mut open = || {
             opened += 1;
             let mut d = NullDisplay::new(320, 200);

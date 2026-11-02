@@ -1,12 +1,14 @@
 //! Turning the bytes a `vt(4)` terminal produces in raw mode into keys.
 //!
 //! With the keyboard in its default `K_XLATE` mode the console sends
-//! characters as UTF-8 and special keys as xterm-style escape sequences
-//! (`ESC [ A` for Up, `ESC [ 3 ~` for Delete, ...). A lone `ESC` is the
-//! Escape key itself, which can only be told apart from the start of a
-//! sequence by timing: the decoder is fed whatever bytes arrived during one
-//! poll tick and [`Decoder::flush`] at the end of the tick turns a dangling
-//! `ESC` into [`Key::Esc`].
+//! characters as UTF-8 and special keys as the escape sequences of the
+//! terminal it emulates (`teken(4)`): xterm by default (`ESC [ A` for Up,
+//! `ESC [ 3 ~` for Delete, `ESC O P` for F1, `ESC [ 15 ~` for F5), or
+//! cons25 after `vidcontrol -T cons25` (`ESC [ M` .. `ESC [ X` for
+//! F1..F12). A lone `ESC` is the Escape key itself, which can only be told
+//! apart from the start of a sequence by timing: the decoder is fed
+//! whatever bytes arrived during one poll tick and [`Decoder::flush`] at
+//! the end of the tick turns a dangling `ESC` into [`Key::Esc`].
 
 /// A decoded key press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +86,8 @@ enum Step {
 fn decode(buf: &[u8]) -> Step {
     match buf {
         [] | [0x1b] | [0x1b, b'[' | b'O'] => Step::Incomplete,
-        [0x1b, b'[' | b'O', params @ .., last] => csi(params, *last),
+        [0x1b, b'[', params @ .., last] => csi(params, *last),
+        [0x1b, b'O', last] => ss3(*last),
         // ESC followed by something else: Alt+key, treated as Esc then
         // dropped (the installer has no Alt bindings).
         [0x1b, _] => Step::Key(Key::Esc),
@@ -124,7 +127,30 @@ fn utf8(buf: &[u8], first: u8) -> Step {
     }
 }
 
-/// After `ESC [` (or `ESC O`): parameters then the byte seen last.
+/// The cursor keys, the same final byte after `ESC [` and after `ESC O`
+/// (application mode).
+fn cursor(last: u8) -> Option<Key> {
+    Some(match last {
+        b'A' => Key::Up,
+        b'B' => Key::Down,
+        b'C' => Key::Right,
+        b'D' => Key::Left,
+        b'H' => Key::Home,
+        b'F' => Key::End,
+        _ => return None,
+    })
+}
+
+/// After `ESC O` (SS3): xterm's F1..F4, which is what `vt(4)` sends by
+/// default, or a cursor key in application mode.
+fn ss3(last: u8) -> Step {
+    match last {
+        b'P'..=b'S' => Step::Key(Key::F(last - b'P' + 1)),
+        _ => cursor(last).map_or(Step::Invalid, Step::Key),
+    }
+}
+
+/// After `ESC [` (CSI): parameters then the byte seen last.
 fn csi(params: &[u8], last: u8) -> Step {
     if last.is_ascii_digit() || last == b';' {
         return if params.len() >= 8 {
@@ -134,21 +160,13 @@ fn csi(params: &[u8], last: u8) -> Step {
         };
     }
     let key = match (params, last) {
-        ([], b'A') => Key::Up,
-        ([], b'B') => Key::Down,
-        ([], b'C') => Key::Right,
-        ([], b'D') => Key::Left,
-        ([], b'H') => Key::Home,
-        ([], b'F') => Key::End,
         ([], b'Z') => Key::BackTab,
-        // vt(4) F1..F4: ESC [ M .. ESC [ P; xterm: ESC O P .. ESC O S
-        ([], b'M') => Key::F(1),
-        ([], b'N') => Key::F(2),
-        ([], b'O') => Key::F(3),
-        ([], b'P') => Key::F(4),
-        ([], b'Q') => Key::F(2),
-        ([], b'R') => Key::F(3),
-        ([], b'S') => Key::F(4),
+        // cons25 F1..F12: ESC [ M .. ESC [ X.
+        ([], b'M'..=b'X') => Key::F(last - b'M' + 1),
+        ([], _) => match cursor(last) {
+            Some(key) => key,
+            None => return Step::Invalid,
+        },
         (p, b'~') => match p {
             b"1" | b"7" => Key::Home,
             b"2" => return Step::Invalid, // Insert: unused
@@ -242,22 +260,34 @@ mod tests {
 
     #[test]
     fn function_keys() {
+        // xterm, vt(4)'s default: F1..F4 are SS3 sequences.
         assert_eq!(
-            keys(b"\x1b[M\x1b[N\x1b[O\x1b[P\x1bOQ\x1bOR\x1bOS"),
-            vec![
-                Key::F(1),
-                Key::F(2),
-                Key::F(3),
-                Key::F(4),
-                Key::F(2),
-                Key::F(3),
-                Key::F(4)
-            ]
+            keys(b"\x1bOP\x1bOQ\x1bOR\x1bOS"),
+            (1..=4).map(Key::F).collect::<Vec<_>>()
         );
         assert_eq!(
             keys(b"\x1b[15~\x1b[17~\x1b[18~\x1b[19~\x1b[20~\x1b[21~\x1b[23~\x1b[24~"),
             (5..=12).map(Key::F).collect::<Vec<_>>()
         );
+        // cons25 (`vidcontrol -T cons25`): ESC [ M .. ESC [ X.
+        assert_eq!(
+            keys(b"\x1b[M\x1b[N\x1b[O\x1b[P\x1b[Q\x1b[R\x1b[S\x1b[T\x1b[U\x1b[V\x1b[W\x1b[X"),
+            (1..=12).map(Key::F).collect::<Vec<_>>()
+        );
+        // Application-mode cursor keys share the SS3 introducer.
+        assert_eq!(
+            keys(b"\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF"),
+            vec![
+                Key::Up,
+                Key::Down,
+                Key::Right,
+                Key::Left,
+                Key::Home,
+                Key::End
+            ]
+        );
+        // Unknown finals after either introducer are dropped.
+        assert_eq!(keys(b"\x1bOz\x1b[zq"), vec![Key::Char('q')]);
     }
 
     #[test]
