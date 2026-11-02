@@ -299,10 +299,22 @@ pub fn is_display_like((w, h): (usize, usize)) -> bool {
     w * 10 >= h * 12 && w * 10 <= h * 25
 }
 
-/// Rank for choosing among display-like modes: area, with a cap so a
-/// 4K panel does not lose to a 5K oddity and the card stays readable.
-pub fn mode_score((w, h): (usize, usize)) -> usize {
-    (w * h).min(3840 * 2160)
+/// The largest framebuffer the kernel is known to map at boot: 4K UHD.
+/// FreeBSD 15.1 panics in `pmap_mapdev` on the 127 MB efifb of a
+/// 7680x4320 mode (VirtualBox's VMSVGA with 128 MB of VRAM offers one).
+pub const MAX_MODE_AREA: usize = 3840 * 2160;
+
+/// Rank for choosing among display-like modes: the largest area up to
+/// [`MAX_MODE_AREA`] wins. Bigger modes rank below every mode that fits,
+/// the smallest of them first, so one is chosen only when nothing else
+/// exists.
+pub fn mode_score((w, h): (usize, usize)) -> (bool, usize) {
+    let area = w * h;
+    if area <= MAX_MODE_AREA {
+        (true, area)
+    } else {
+        (false, usize::MAX - area)
+    }
 }
 
 /// Encode loader arguments as the NUL-terminated UCS-2 string
@@ -476,7 +488,10 @@ mod tests {
         assert!(!is_display_like((640, 480)));
         assert!(!is_display_like((1080, 1920)));
         assert!(mode_score((1920, 1080)) > mode_score((1280, 800)));
-        assert_eq!(mode_score((5120, 2880)), mode_score((3840, 2160)));
+        assert!(mode_score((3840, 2160)) > mode_score((2560, 1600)));
+        // Above 4K: below every mode that fits, the smallest of them first.
+        assert!(mode_score((1280, 800)) > mode_score((5120, 2880)));
+        assert!(mode_score((5120, 2880)) > mode_score((7680, 4320)));
     }
 
     #[test]

@@ -43,9 +43,18 @@ splash; `jos-splash render` for previews). Fully unit-tested on any host.
 
 A UEFI application (`x86_64-unknown-uefi`, `uefi` crate, 67 KB). It:
 
-1. opens the Graphics Output Protocol, switches to the largest mode (the
-   same choice `loader.efi`'s `efi-autoresizecons` makes, so there is no
-   second mode switch), fills the screen black and `Blt`s the card;
+1. opens the Graphics Output Protocol, switches to the largest
+   display-like mode up to 4K (`is_display_like` and `mode_score` in
+   `src/lib.rs`: 4:3 to 21:9 landscape, so synthetic modes such as
+   2048x2048 are skipped; FreeBSD 15.1 panics in `pmap_mapdev` on the
+   127 MB framebuffer of a 7680x4320 mode, which VirtualBox's VMSVGA with
+   128 MB of VRAM offers), fills the screen black and `Blt`s the card.
+   `loader.efi` keeps that mode: FreeBSD's default `efi_max_resolution="1x1"`
+   makes its `efi-autoresizecons` a no-op, so there is no second mode
+   switch. `efi_max_resolution="4k"` would not replace this cap: the
+   loader then calls `SetMode` even for the current mode (a black flash)
+   and ranks modes by area without an aspect filter (2048x2048 beats
+   2560x1600);
 2. polls the keyboard for 3 s. Enter boots at once; any other key opens
    a menu: *Boot JuanitOS*, *Boot verbose*, *Single user*, *FreeBSD loader
    menu*, *Reboot*;

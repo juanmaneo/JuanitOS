@@ -332,12 +332,12 @@ impl Screen {
         let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(handle)
             .map_err(|e| alloc::format!("graphics output: {e:?}"))?;
 
-        // Pick the largest mode with a monitor-like aspect ratio, which is
-        // close to what loader.efi's `efi-autoresizecons` will choose
-        // (largest mode within the EDID limits): one mode switch less.
-        // Virtual firmware lists odd modes such as 2048x2048; those are
-        // skipped, and a small current mode is left alone only if nothing
-        // better exists.
+        // Pick the largest mode with a monitor-like aspect ratio, up to 4K
+        // (`mode_score`: the kernel cannot map a bigger framebuffer).
+        // loader.efi keeps it: with the default efi_max_resolution="1x1"
+        // its `efi-autoresizecons` never switches modes. Virtual firmware
+        // lists odd modes such as 2048x2048; those are skipped, and a small
+        // current mode is left alone only if nothing better exists.
         let current = gop.current_mode_info().resolution();
         let best = gop
             .modes()
