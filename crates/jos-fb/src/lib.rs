@@ -30,8 +30,9 @@ pub trait Display {
     /// the end of the splash, or a pause until [`reclaim`](Self::reclaim).
     fn restore_console(&mut self) -> anyhow::Result<()>;
     /// Take the screen back after [`restore_console`](Self::restore_console):
-    /// the program's terminal, in graphics mode again. The caller presents
-    /// a full frame afterwards; the kernel repainted the terminal meanwhile.
+    /// the program's terminal, in graphics mode again, with the full frame
+    /// the caller presents next (the kernel repainted the terminal
+    /// meanwhile).
     fn reclaim(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -92,19 +93,14 @@ pub fn pack_row(row: &[Rgba], offs: RgbOffsets, out: &mut [u8]) {
     }
 }
 
-/// The brightest pixel of `frame` as `(x, y, pixel)`, `None` when the
-/// frame is all black. It is what [`vt`] watches to see the kernel's
-/// repaint of a terminal (black cells) land on a frame it just wrote.
-pub fn brightest(frame: &Image) -> Option<(u32, u32, Rgba)> {
-    let w = frame.width().max(1) as usize;
-    let light = |p: &Rgba| p.r as u32 + p.g as u32 + p.b as u32;
-    frame
-        .pixels()
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| light(p) > 0)
-        .max_by_key(|(_, p)| light(p))
-        .map(|(i, p)| ((i % w) as u32, (i / w) as u32, *p))
+/// Byte offset of the last pixel of row `y` in a framebuffer `width`
+/// pixels wide, `stride` bytes per row, `map_len` bytes mapped; `None`
+/// when that pixel is not a whole word inside the mapping. [`vt`] plants a
+/// marker there before switching terminals, to see the kernel's repaint
+/// of the terminal go over the row.
+pub fn last_pixel(width: u32, stride: usize, map_len: usize, y: u32) -> Option<usize> {
+    let off = y as usize * stride + width.checked_sub(1)? as usize * 4;
+    (off.is_multiple_of(4) && off + 4 <= map_len).then_some(off)
 }
 
 /// FreeBSD `ioccom.h` encoding.
@@ -297,13 +293,14 @@ mod tests {
     }
 
     #[test]
-    fn the_brightest_pixel_is_located() {
-        assert!(brightest(&Image::new(3, 2, Rgba::rgb(0, 0, 0))).is_none());
-        assert!(brightest(&Image::new(0, 0, Rgba::TRANSPARENT)).is_none());
-        let mut img = Image::new(3, 2, Rgba::rgb(0, 0, 0));
-        img.blend(1, 0, Rgba::rgb(10, 10, 10));
-        img.blend(2, 1, Rgba::rgb(200, 100, 0));
-        assert_eq!(brightest(&img), Some((2, 1, Rgba::rgb(200, 100, 0))));
+    fn the_last_pixel_of_a_row_is_located_inside_the_mapping() {
+        // 3 pixels wide, padded rows of 16 bytes, 2 rows mapped.
+        assert_eq!(last_pixel(3, 16, 32, 0), Some(8));
+        assert_eq!(last_pixel(3, 16, 32, 1), Some(24));
+        assert_eq!(last_pixel(3, 16, 32, 2), None, "beyond the mapping");
+        assert_eq!(last_pixel(3, 16, 26, 1), None, "the word does not fit");
+        assert_eq!(last_pixel(2, 6, 64, 1), None, "not word-aligned");
+        assert_eq!(last_pixel(0, 16, 32, 0), None, "no pixels");
     }
 
     #[test]

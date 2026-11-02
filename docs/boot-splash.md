@@ -255,16 +255,29 @@ the graphical installer; the state machine, protocol, pixel packing and
 keyboard decoding are tested on any host. `jos-splash run --dry-run` serves
 the socket with a fake display for testing the rc.d plumbing.
 
-The kernel repaints a freshly activated terminal (blank cells, border,
-cursor) from its 25 Hz timer *after* `VT_WAITACTIVE` returns, which wipes
-a frame drawn before it (seen on a real FreeBSD 15.1 boot under QEMU: a
-black screen until the next stage redrew). Waiting a few ticks before the
-first frame left the screen black for that long on every switch (kernel
-card → daemon, console → card after Esc). Instead `VtDisplay` writes the
-first frame after a switch at once, watches its brightest pixel for the
-repaint, and writes the frame again as soon as that lands (or after 200 ms
-if it never does, e.g. when the terminal was on screen already): black for
-a couple of milliseconds instead of a visible blink.
+The kernel repaints a freshly activated terminal (blank cells top to
+bottom, border, cursor) from its 25 Hz timer, armed inside `VT_ACTIVATE`
+and regardless of `KD_GRAPHICS`, which wipes a frame drawn before it. A
+`truss -d` of the daemon on FreeBSD 15.1 under QEMU (2560×1600) showed why
+the kernel card → daemon handover blinked black for ~200 ms: the daemon
+switched terminals as soon as it opened the display, then spent 160 ms
+opening the keyboards' evdev nodes (`psm` resets the PS/2 mouse on open),
+90 ms rendering and writing the first frame (mostly the page faults of
+the fresh mapping), while the kernel had wiped the screen 40 ms after the
+switch; `VT_ACTIVATE` itself took 30–50 ms (keyboard update). So
+`VtDisplay` switches with the first frame instead (`switch_under`): the frame is written
+before the switch, a near-black marker is planted in the last pixel of
+every row, the switch calls run on a thread of their own (the repaint is
+often over before they return), and each row is rewritten the moment the
+repaint has gone over its marker: black only in the rows the repaint is
+at. Rows it never reaches (or all of them, when it has not come 200 ms
+after the calls returned) are rewritten then. A terminal already on screen
+(the installer draws on the splash's) is not repainted, so its frame is
+simply written. The same path serves the card coming back after Esc.
+Screen dumps every 35 ms of the same VM with this in place show the card,
+the card with the kernel's cursor block in the top-left corner for one
+dump (the first cell row is repainted before its marker goes), then the
+card: no black frame at either switch.
 
 The mouse pointer is the other thing `vt(4)` draws over a graphics-mode
 terminal. `rc.d/moused` (enabled in `rc.conf`, it runs between the

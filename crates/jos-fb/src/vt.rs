@@ -2,9 +2,9 @@
 //!
 //! The daemon takes a virtual terminal nobody uses (`ttyv9` by default:
 //! `/etc/ttys` runs gettys on `ttyv0`–`ttyv7` and the greeter picks the
-//! first free one, `ttyv8`), switches to it, puts it in graphics mode so
-//! console output never dirties the shown picture, and maps the
-//! framebuffer. Keys typed on that terminal are read in raw mode so Esc can
+//! first free one, `ttyv8`), maps the framebuffer, and with the first
+//! frame switches to it in graphics mode, so console output never dirties
+//! the shown picture. Keys typed on that terminal are read in raw mode so Esc can
 //! drop the user on the text console; the keyboards' evdev nodes bring the
 //! Esc that takes the screen back ([`VtDisplay::listen_keyboards`]).
 //!
@@ -19,13 +19,14 @@ use std::ops::Range;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::thread::{self, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
-use jos_gfx::Image;
+use jos_gfx::{Image, Rgba};
 
 use crate::mouse::{self, Mouse};
-use crate::{brightest, evdev, ioc, pack_pixel, pack_row, Display, RgbOffsets};
+use crate::{evdev, ioc, last_pixel, pack_pixel, pack_row, Display, RgbOffsets};
 
 /// Where `moused` publishes every mouse and touchpad.
 pub const SYSMOUSE: &str = "/dev/sysmouse";
@@ -58,12 +59,19 @@ struct FbRgbOffs {
 }
 
 /// How long the kernel is given for its post-switch repaint of the
-/// terminal (vt(4) timer: 25 Hz, so a few ticks) before the first frame
-/// after a switch is taken as final.
+/// terminal (vt(4) timer: 25 Hz, so a few ticks, then the repaint itself)
+/// once the switch calls have returned, before the rows it has not
+/// reached are given up on.
 pub const POST_SWITCH_SETTLE: Duration = Duration::from_millis(200);
 
-/// How often the frame is checked for that repaint meanwhile.
-const REPAINT_POLL: Duration = Duration::from_millis(2);
+/// Planted in the last pixel of every row before a switch: the repaint
+/// paints black over it (rows of blank cells, then the border, top to
+/// bottom), and a row whose marker is gone is rewritten at once. Nearly
+/// black, so invisible for the moment it is there.
+const MARKER: Rgba = Rgba::rgb(1, 1, 1);
+
+/// A row waiting for the repaint, with its marker's offset.
+type Pending = Vec<(u32, usize)>;
 
 pub struct VtDisplay {
     tty: File,
@@ -80,8 +88,10 @@ pub struct VtDisplay {
     console_restored: bool,
     mouse: Option<File>,
     keyboards: Vec<File>,
-    /// When the terminal was switched to, until the first frame since.
-    switched: Option<Instant>,
+    /// The terminal is on screen with a frame of ours. Cleared by `open`,
+    /// [`Display::restore_console`] and [`Display::reclaim`]: the next
+    /// `present` switches to it, with that frame ([`VtDisplay::switch_under`]).
+    switched: bool,
 }
 
 fn ioctl_int(fd: libc::c_int, req: u32, value: libc::c_int, what: &str) -> anyhow::Result<()> {
@@ -105,16 +115,22 @@ fn ioctl_out<T: Default>(fd: libc::c_int, req: u32, what: &str) -> anyhow::Resul
 }
 
 /// Switch to terminal `vt` (the one `fd` is open on) in graphics mode.
-/// Returns when the switch happened: vt(4) then marks the screen invalid
-/// and repaints it (black cells, border, cursor) from its 25 Hz timer,
-/// after `VT_WAITACTIVE` returns and regardless of `KD_GRAPHICS`, wiping
-/// a frame drawn before; `None` when `vt` was on screen already.
-fn take_terminal(fd: libc::c_int, vt: i32) -> anyhow::Result<Option<Instant>> {
-    let active: libc::c_int = ioctl_out(fd, ioc::VT_GETACTIVE, "VT_GETACTIVE")?;
+/// vt(4) marks the screen invalid on the switch and repaints it (blank
+/// cells top to bottom, border, cursor) from its 25 Hz timer, regardless
+/// of `KD_GRAPHICS`, wiping a frame drawn before. The timer is armed
+/// inside `VT_ACTIVATE`, which goes on to update the keyboard and can
+/// take longer than that (30–50 ms under QEMU), so the repaint may well
+/// be over before this returns.
+fn take_terminal(fd: libc::c_int, vt: i32) -> anyhow::Result<()> {
     ioctl_int(fd, ioc::VT_ACTIVATE, vt, "VT_ACTIVATE")?;
     ioctl_int(fd, ioc::VT_WAITACTIVE, vt, "VT_WAITACTIVE")?;
-    ioctl_int(fd, ioc::KDSETMODE, ioc::KD_GRAPHICS, "KDSETMODE")?;
-    Ok((active != vt).then(Instant::now))
+    ioctl_int(fd, ioc::KDSETMODE, ioc::KD_GRAPHICS, "KDSETMODE")
+}
+
+fn join(switch: ScopedJoinHandle<'_, anyhow::Result<()>>) -> anyhow::Result<()> {
+    switch
+        .join()
+        .map_err(|_| anyhow::anyhow!("the terminal switch thread panicked"))?
 }
 
 /// Text mode on `fd`'s terminal, then the console on screen.
@@ -176,8 +192,6 @@ impl VtDisplay {
         // SAFETY: fcntl with F_GETFL takes no further arguments.
         let saved_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
 
-        let switched = take_terminal(fd, vt)?;
-
         // SAFETY: mapping `map_len` bytes of the device at offset 0; vt(4)
         // validates the range against the framebuffer size.
         let map = unsafe {
@@ -191,9 +205,7 @@ impl VtDisplay {
             )
         };
         if map == libc::MAP_FAILED {
-            let err = std::io::Error::last_os_error();
-            let _ = show_console(fd);
-            return Err(err).context("mmap framebuffer");
+            return Err(std::io::Error::last_os_error()).context("mmap framebuffer");
         }
 
         let mut raw = saved_termios;
@@ -217,7 +229,7 @@ impl VtDisplay {
             console_restored: false,
             mouse: None,
             keyboards: Vec::new(),
-            switched,
+            switched: false,
         })
     }
 
@@ -271,35 +283,94 @@ impl VtDisplay {
         }
     }
 
-    /// The first frame after a switch, already written: rather than a
-    /// black screen for the ticks the kernel takes to repaint the terminal
-    /// (see [`take_terminal`]), the frame is up at once, its brightest
-    /// pixel is watched for the repaint, and the frame is written again
-    /// as soon as that lands, or once the kernel had [`POST_SWITCH_SETTLE`]
-    /// to do it. Black for a [`REPAINT_POLL`] at most, instead of the
-    /// whole settle.
-    fn outlast_repaint(&mut self, frame: &Image, switched: Instant) -> anyhow::Result<()> {
-        let sentinel = brightest(frame)
-            .map(|(x, y, px)| {
-                (
-                    y as usize * self.stride + x as usize * 4,
-                    pack_pixel(px, self.offs),
-                )
-            })
-            .filter(|(off, _)| off % 4 == 0 && off + 4 <= self.map_len);
-        while switched.elapsed() < POST_SWITCH_SETTLE {
-            if let Some((off, wrote)) = sentinel {
-                // SAFETY: `off` is 4-aligned with `off + 4 <= map_len` and
-                // the mapping is live; volatile because the kernel writes
-                // there too.
-                let now = unsafe { std::ptr::read_volatile(self.map.add(off) as *const u32) };
-                if now != wrote {
-                    break;
-                }
-            }
-            std::thread::sleep(REPAINT_POLL);
+    /// Write `frame`, then switch to the terminal and rewrite each row as
+    /// the kernel's repaint goes over it (see [`take_terminal`]): the frame
+    /// is on screen before the switch, and black only in the rows the
+    /// repaint is at. The switch calls run on a thread of their own, since
+    /// the repaint often lands before they return. Nothing is repainted
+    /// when the terminal is on screen already (the installer draws on the
+    /// splash's), so the frame is simply written then.
+    fn switch_under(&mut self, frame: &Image) -> anyhow::Result<()> {
+        let fd = self.fd();
+        let active: libc::c_int = ioctl_out(fd, ioc::VT_GETACTIVE, "VT_GETACTIVE")?;
+        self.present_rows(frame, 0..self.height)?;
+        if active == self.vt {
+            return ioctl_int(fd, ioc::KDSETMODE, ioc::KD_GRAPHICS, "KDSETMODE");
         }
+        let mut pending = self.plant_markers();
+        let vt = self.vt;
+        thread::scope(|s| {
+            let switch = s.spawn(move || take_terminal(fd, vt));
+            self.chase_repaint(frame, &mut pending, switch)
+        })?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        // Rows the repaint never reached (or the whole frame once
+        // POST_SWITCH_SETTLE is over): their markers go away with this.
         self.present_rows(frame, 0..self.height)
+    }
+
+    /// [`MARKER`] in the last pixel of every row.
+    fn plant_markers(&mut self) -> Pending {
+        let marker = pack_pixel(MARKER, self.offs);
+        let rows: Pending = (0..self.height)
+            .filter_map(|y| {
+                last_pixel(self.width, self.stride, self.map_len, y).map(|off| (y, off))
+            })
+            .collect();
+        for &(_, off) in &rows {
+            // SAFETY: `last_pixel` keeps `off` word-aligned with
+            // `off + 4 <= map_len`, and the mapping lives as long as `self`.
+            unsafe { std::ptr::write_volatile(self.map.add(off) as *mut u32, marker) };
+        }
+        rows
+    }
+
+    /// Rewrite the rows whose marker the repaint has painted over, as it
+    /// goes, until none is left in `pending` or the kernel has had
+    /// [`POST_SWITCH_SETTLE`] since `switch` returned. Checked from the
+    /// top on every pass, since the border rows (top one included) come
+    /// after the cells.
+    fn chase_repaint(
+        &mut self,
+        frame: &Image,
+        pending: &mut Pending,
+        switch: ScopedJoinHandle<'_, anyhow::Result<()>>,
+    ) -> anyhow::Result<()> {
+        let marker = pack_pixel(MARKER, self.offs);
+        let mut switch = Some(switch);
+        let mut deadline = None;
+        let mut wiped = Vec::new();
+        while !pending.is_empty() {
+            if deadline.is_none() && switch.as_ref().is_some_and(|s| s.is_finished()) {
+                if let Some(s) = switch.take() {
+                    join(s)?;
+                }
+                deadline = Some(Instant::now() + POST_SWITCH_SETTLE);
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
+            pending.retain(|&(y, off)| {
+                // SAFETY: as in `plant_markers`; volatile because the
+                // kernel writes there.
+                let now = unsafe { std::ptr::read_volatile(self.map.add(off) as *const u32) };
+                if now == marker {
+                    return true;
+                }
+                wiped.push(y);
+                false
+            });
+            for y in wiped.drain(..) {
+                self.present_rows(frame, y..y + 1)?;
+            }
+            thread::yield_now();
+        }
+        match switch.take() {
+            Some(s) => join(s),
+            None => Ok(()),
+        }
     }
 }
 
@@ -309,11 +380,12 @@ impl Display for VtDisplay {
     }
 
     fn present(&mut self, frame: &Image) -> anyhow::Result<()> {
-        self.present_rows(frame, 0..self.height)?;
-        match self.switched.take() {
-            Some(switched) => self.outlast_repaint(frame, switched),
-            None => Ok(()),
+        if self.switched {
+            return self.present_rows(frame, 0..self.height);
         }
+        self.switch_under(frame)?;
+        self.switched = true;
+        Ok(())
     }
 
     fn present_rows(&mut self, frame: &Image, rows: Range<u32>) -> anyhow::Result<()> {
@@ -348,12 +420,13 @@ impl Display for VtDisplay {
     fn restore_console(&mut self) -> anyhow::Result<()> {
         show_console(self.fd())?;
         self.console_restored = true;
+        self.switched = false;
         Ok(())
     }
 
     fn reclaim(&mut self) -> anyhow::Result<()> {
-        self.switched = take_terminal(self.fd(), self.vt)?;
         self.console_restored = false;
+        self.switched = false;
         Ok(())
     }
 
