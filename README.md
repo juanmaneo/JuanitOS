@@ -60,7 +60,8 @@ coverage.toml          per-file uncovered-line/function/region allowances (ratch
 deny.toml              cargo-deny policy: advisories, licenses, sources
 templates/             cloud-init user-data of the guest template recipes; agent/ the guest agents (share, jos-agentd) and jos-copy
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
-freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet
+freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet, the C modules
+freebsd/grub           jos_efi.mod: GRUB module that boots the kernel on UEFI (Ventoy's direct kernel boot)
 docs/                  design notes (docs/images: rendered previews)
 ```
 
@@ -80,6 +81,11 @@ cargo build --release
 `bins` also builds the two UEFI applications and wraps the firewall into
 `release/out/jos-firewall.img`; both are optional (without them the ESP
 boots `loader.efi` directly and `sys-firewall` has to be a FreeBSD qube).
+`iso` builds the two C modules of `freebsd/` as well, `geom_ventoy.ko`
+against the release's kernel sources and `jos_efi.mod` against the GRUB
+headers named in `release/juanitos.toml` (`[grub]`, fetched and
+sha256-checked); both are best effort too (without them the ISO needs a
+dd-written stick, or Ventoy's normal mode on firmware where it works).
 
 The ISO boots the same dom0 it installs. `jos-install` runs the `jos doctor`
 host checks (bhyve, IOMMU, kernel modules) on the live medium first, so you
@@ -260,17 +266,19 @@ BSD-3-Clause, and on a dependency from anywhere but crates.io; the
 policy is `deny.toml`, where an advisory that does not apply is ignored
 with its reason.
 
-The C sources (the `jos_bootwatch` kernel module; `freebsd/geom_ventoy`
-is vendored and left as upstream has it) follow LLVM style, with braces
-around every `if`/`else`/`for`/`while` body (a statement added to an
-unbraced body is a classic bug; `--fix` inserts them): `.clang-format` is
-checked by `cargo xtask fmt` and `.clang-tidy` by `cargo xtask lint`,
-every finding being an error. clang-tidy compiles the
-module the way `bsd.kmod.mk` does, so `lint` fetches the kernel headers
-of the FreeBSD release in `release/juanitos.toml` once (`src.txz`,
-verified against its MANIFEST) into `~/.cache/juanitos`. Both tools must
-be the LLVM major version in `.clang-version` (what CI installs): another
-version formats differently and has other checks.
+The C sources (the `jos_bootwatch` kernel module and the `jos_efi` GRUB
+module; `freebsd/geom_ventoy` is vendored and left as upstream has it)
+follow LLVM style, with braces around every `if`/`else`/`for`/`while`
+body (a statement added to an unbraced body is a classic bug; `--fix`
+inserts them): `.clang-format` is checked by `cargo xtask fmt` and
+`.clang-tidy` by `cargo xtask lint`, every finding being an error.
+clang-tidy compiles the kernel module the way `bsd.kmod.mk` does and the
+GRUB module with its `compile_flags.txt`, so `lint` fetches the kernel
+headers of the FreeBSD release in `release/juanitos.toml` (`src.txz`,
+verified against its MANIFEST) and GRUB's (`[grub]`, sha256-checked)
+once, into `~/.cache/juanitos`. Both tools must be the LLVM major
+version in `.clang-version` (what CI installs): another version formats
+differently and has other checks.
 
 How the code stays testable on a Linux or macOS laptop:
 
@@ -437,8 +445,10 @@ real hardware (the nested run above covers it without a GPU).
 JuanitOS is under the BSD 3-Clause license (`LICENSE`), like much of
 FreeBSD's ecosystem and compatible with every project it draws on.
 `THIRD_PARTY.md` lists the vendored code (`freebsd/geom_ventoy`,
-BSD-2-Clause), the Rust dependencies' licenses, the projects that
-inspired the design (ideas only, no code taken), and what publishing a
-built ISO requires (sources for the GPL-3.0 COSMIC packages it ships).
+BSD-2-Clause), the one directory under another license (`freebsd/grub`,
+a GRUB module and so GPL-3.0-or-later; nothing else links against it),
+the Rust dependencies' licenses, the projects that inspired the design
+(ideas only, no code taken), and what publishing a built ISO requires
+(sources for the GPL-3.0 COSMIC packages it ships).
 `AUTHORS` names the copyright holders: Juanito (Juan Manuel CABA
 GONZALEZ-NICOLAS) and the contributors.

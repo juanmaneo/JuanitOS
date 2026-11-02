@@ -150,6 +150,15 @@ pub fn bootwatch_loader_conf() -> (String, String) {
     )
 }
 
+/// Built from `freebsd/grub` by `jos-release` and shipped on the live ISO
+/// at [`GRUB_MODULE_PATH`]: the GRUB module that lets Ventoy's GRUB boot
+/// the FreeBSD kernel directly on UEFI (firmware whose chain-load of
+/// `loader.efi` fails, Intel Macs in particular).
+pub const GRUB_MODULE: &str = "jos_efi";
+
+/// GRUB's module directory for `x86_64-efi` on the ISO.
+pub const GRUB_MODULE_PATH: &str = "/boot/grub/x86_64-efi/jos_efi.mod";
+
 /// The `rc.d` script that autostarts qubes, installed as
 /// `/usr/local/etc/rc.d/jos`.
 pub const RC_D_JOS: &str = include_str!("../../../freebsd/rc.d/jos");

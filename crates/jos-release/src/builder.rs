@@ -22,6 +22,8 @@ use crate::ventoy;
 pub const SRC_SET: &str = "src.txz";
 /// Ventoy's GEOM class, shipped on the live ISO.
 pub const VENTOY_MODULE: &str = "geom_ventoy";
+/// `freebsd/grub`: the GRUB module for Ventoy's direct kernel boot.
+pub const GRUB_DIR: &str = "grub";
 /// Where the dom0 keeps its own sources (stage 2 builds from here).
 pub const INSTALLED_SOURCE: &str = "/usr/local/src/juanitos";
 
@@ -653,6 +655,13 @@ impl<'a> Builder<'a> {
         }
         self.fs
             .write(&root.join("boot/loader.conf"), &loader_conf)?;
+        if let Err(e) = self.grub_module() {
+            println!(
+                "   warning: {}.mod not built ({e:#}); \
+                 Ventoy's direct kernel boot (Intel Macs) is unavailable",
+                dom0::GRUB_MODULE
+            );
+        }
         self.fs
             .write_executable(&root.join("etc/rc.local"), &dom0::live_rc_local())?;
 
@@ -762,28 +771,80 @@ impl Builder<'_> {
         Ok(sys)
     }
 
-    /// Build the kernel module `freebsd/<name>` (a `bsd.kmod.mk` Makefile)
-    /// against the release's kernel sources, in a copy under the work
-    /// directory. `None` when the source is not in the tree; the module's
-    /// bytes otherwise (empty with `--dry-run`).
-    fn build_kmod(&self, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        let vendored = self.repo.join("freebsd").join(name);
-        if !vendored.join("Makefile").is_file() {
-            return Ok(None);
+    /// GRUB's headers for building its module: the release's tarball
+    /// (`[grub]` in the profile), fetched and sha256-checked, with its
+    /// `include/` extracted under the work directory.
+    fn grub_sources(&self) -> anyhow::Result<PathBuf> {
+        let grub = &self.profile.grub;
+        let dir = self.dist_dir();
+        let tarball = dir.join(grub.tarball());
+        if !tarball.is_file() {
+            self.fs.mkdir_p(&dir)?;
+            self.download(&grub.url, &tarball)?;
         }
-        self.step(&format!("Building {name}.ko"));
-        let sys = self.kernel_sources()?;
+        if !self.fs.dry_run {
+            DistManifest::verify_sha256(&tarball, &grub.sha256)?;
+        }
+        let src = self.work.join(grub.source_dir());
+        if !src.join("include/grub/dl.h").is_file() {
+            let include = format!("{}/include", grub.source_dir());
+            self.runner.run_checked(
+                "tar",
+                &[
+                    "-xf",
+                    &Self::s(&tarball),
+                    "-C",
+                    &Self::s(&self.work),
+                    &include,
+                ],
+            )?;
+        }
+        Ok(src)
+    }
+
+    /// The source directory `freebsd/<name>` when it is in the tree (a
+    /// release tarball may leave it out).
+    fn vendored(&self, name: &str) -> Option<PathBuf> {
+        let dir = self.repo.join("freebsd").join(name);
+        dir.join("Makefile").is_file().then_some(dir)
+    }
+
+    /// `make -C <work>/<name> <var>` in a fresh copy of `src`, returning
+    /// the bytes of `<output>` it built (empty with `--dry-run`).
+    fn make_copy(
+        &self,
+        src: &Path,
+        name: &str,
+        var: &str,
+        output: &str,
+    ) -> anyhow::Result<Vec<u8>> {
         let build = self.work.join(name);
         self.fs.remove_tree(&build)?;
-        self.fs.copy_tree(&vendored, &build, &[])?;
-        self.runner.run_checked(
-            "make",
-            &["-C", &Self::s(&build), &format!("SYSDIR={}", Self::s(&sys))],
-        )?;
+        self.fs.copy_tree(src, &build, &[])?;
+        self.runner
+            .run_checked("make", &["-C", &Self::s(&build), var])?;
         if self.fs.dry_run {
-            return Ok(Some(Vec::new()));
+            return Ok(Vec::new());
         }
-        Ok(Some(std::fs::read(build.join(format!("{name}.ko")))?))
+        Ok(std::fs::read(build.join(output))?)
+    }
+
+    /// Build the kernel module `freebsd/<name>` (a `bsd.kmod.mk` Makefile)
+    /// against the release's kernel sources. `None` when the source is
+    /// not in the tree; the module's bytes otherwise.
+    fn build_kmod(&self, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let Some(src) = self.vendored(name) else {
+            return Ok(None);
+        };
+        self.step(&format!("Building {name}.ko"));
+        let sys = self.kernel_sources()?;
+        let var = format!("SYSDIR={}", Self::s(&sys));
+        Ok(Some(self.make_copy(
+            &src,
+            name,
+            &var,
+            &format!("{name}.ko"),
+        )?))
     }
 
     /// Install a module into the root's `dir` and refresh its
@@ -808,6 +869,25 @@ impl Builder<'_> {
             println!("   Ventoy disk map at file offset {at:#x}");
         }
         self.install_kmod("boot/kernel", VENTOY_MODULE, &bytes)?;
+        Ok(true)
+    }
+
+    /// `jos_efi.mod` on the live ISO (see `freebsd/grub`): built with
+    /// GRUB's headers, installed where Ventoy's GRUB loads it from.
+    /// `Ok(false)` when there is nothing to build.
+    fn grub_module(&self) -> anyhow::Result<bool> {
+        let Some(src) = self.vendored(GRUB_DIR) else {
+            return Ok(false);
+        };
+        self.step(&format!("Building {}.mod", dom0::GRUB_MODULE));
+        let grub = self.grub_sources()?;
+        let var = format!("GRUB={}", Self::s(&grub));
+        let output = format!("{}.mod", dom0::GRUB_MODULE);
+        let bytes = self.make_copy(&src, GRUB_DIR, &var, &output)?;
+        let dst = self
+            .rootfs()
+            .join(dom0::GRUB_MODULE_PATH.trim_start_matches('/'));
+        self.fs.write_bytes(&dst, &bytes)?;
         Ok(true)
     }
 
@@ -1845,6 +1925,89 @@ mod tests {
         assert!(!conf.contains("geom_ventoy"), "{conf}");
     }
 
+    /// GRUB's tarball under `work/dist`, with the profile naming its
+    /// checksum.
+    fn grub_tarball(s: &Scratch, profile: &mut Profile) -> PathBuf {
+        let tarball = s.put(
+            &format!("work/dist/{}", profile.grub.tarball()),
+            b"grub sources",
+        );
+        profile.grub.sha256 = sha256_file(&tarball).unwrap();
+        tarball
+    }
+
+    #[test]
+    fn the_live_iso_ships_the_grub_module_when_it_builds() {
+        let s = Scratch::new("grub");
+        let mut profile = Profile::default();
+        s.put("work/juanitos-dom0.txz", b"tarball");
+        s.put("work/MANIFEST", b"manifest");
+        s.put(&format!("work/{}", profile.iso_name()), b"iso9660");
+        s.put(&format!("work/rootfs{}", dom0::LOADER_EFI), b"loader");
+        s.put("repo/freebsd/grub/Makefile", b"MOD=jos_efi\n");
+        // `make` is mocked: the module it would build.
+        s.put("repo/freebsd/grub/jos_efi.mod", b"\x7fELF module");
+        let tarball = grub_tarball(&s, &mut profile);
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        b.iso_build().unwrap();
+
+        let root = s.0.join("work/rootfs");
+        let shipped = root.join(dom0::GRUB_MODULE_PATH.trim_start_matches('/'));
+        assert_eq!(std::fs::read(&shipped).unwrap(), b"\x7fELF module");
+        let calls = m.calls();
+        let work = s.0.join("work");
+        assert!(calls.contains(&format!(
+            "tar -xf {} -C {} grub-2.04/include",
+            unix(&tarball),
+            unix(&work)
+        )));
+        assert!(calls.contains(&format!(
+            "make -C {} GRUB={}",
+            unix(&work.join("grub")),
+            unix(&work.join("grub-2.04"))
+        )));
+        assert!(!calls.iter().any(|c| c.starts_with("fetch ")), "{calls:?}");
+
+        // Headers extracted already: no second tar.
+        s.put("work/grub-2.04/include/grub/dl.h", b"");
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        b.iso_build().unwrap();
+        assert!(!m.calls().iter().any(|c| c.starts_with("tar ")));
+
+        // A failed build, or no module out of it, does not stop the ISO.
+        let without_module = |m: &MockRunner| {
+            FsOps::new(false).remove_file(&shipped).unwrap();
+            real_builder(m, &profile, &s.0).iso_build().unwrap();
+            assert!(!shipped.exists());
+        };
+        without_module(&MockRunner::new().respond("make", &[], CmdOutput::failed(2, "cc: error")));
+        std::fs::remove_file(s.0.join("repo/freebsd/grub/jos_efi.mod")).unwrap();
+        without_module(&MockRunner::new());
+
+        // A tarball that is not the profile's is refused.
+        std::fs::write(&tarball, b"tampered").unwrap();
+        let m = MockRunner::new();
+        without_module(&m);
+        assert!(!m.calls().iter().any(|c| c.starts_with("make ")));
+
+        // A missing tarball is fetched (here nothing really is).
+        std::fs::remove_file(&tarball).unwrap();
+        let m = MockRunner::new();
+        without_module(&m);
+        assert!(m
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("fetch ") && c.ends_with(&profile.grub.url)));
+
+        // No source in the tree: nothing to build, nothing fetched.
+        std::fs::remove_dir_all(s.0.join("repo/freebsd/grub")).unwrap();
+        let m = MockRunner::new();
+        without_module(&m);
+        assert!(!m.calls().iter().any(|c| c.starts_with("fetch ")));
+    }
+
     #[test]
     fn kernel_sources_come_from_the_verified_src_set() {
         let s = Scratch::new("ksrc");
@@ -2001,7 +2164,7 @@ mod tests {
     #[test]
     fn every_failing_command_stops_the_build_or_is_best_effort() {
         let s = Scratch::new("walk");
-        for name in [VENTOY_MODULE, dom0::BOOTWATCH_MODULE] {
+        for name in [VENTOY_MODULE, dom0::BOOTWATCH_MODULE, GRUB_DIR] {
             s.put(&format!("repo/freebsd/{name}/Makefile"), b"");
         }
         let profile = Profile::default();
@@ -2151,13 +2314,17 @@ mod tests {
     #[test]
     fn building_the_iso_stops_at_anything_in_its_way() {
         let s = Scratch::new("iso-in-the-way");
-        let profile = Profile::default();
+        let mut profile = Profile::default();
         s.put("repo/freebsd/geom_ventoy/Makefile", b"");
         s.put(
             "repo/freebsd/geom_ventoy/geom_ventoy.ko",
             &crate::ventoy::tests::fake_module(0x10000, 65536, true),
         );
         s.put("root/usr/src/sys/conf/kmod.mk", b"");
+        s.put("repo/freebsd/grub/Makefile", b"");
+        s.put("repo/freebsd/grub/jos_efi.mod", b"\x7fELF");
+        let tarball = grub_tarball(&s, &mut profile);
+        let grub = std::fs::read(&tarball).unwrap();
         let m = MockRunner::new();
         let b = real_builder(&m, &profile, &s.0);
         let setup = || {
@@ -2165,10 +2332,12 @@ mod tests {
             s.put("work/MANIFEST", b"manifest");
             s.put(&format!("work/rootfs{}", dom0::LOADER_EFI), b"loader");
             s.put(&format!("work/{}", profile.iso_name()), b"iso9660");
+            std::fs::create_dir_all(tarball.parent().unwrap()).unwrap();
+            std::fs::write(&tarball, &grub).unwrap();
         };
         let passed = obstacles(&b.work, &setup, &|| b.iso_build());
-        // The ESP and the module build start from an empty directory, and
-        // Geom Ventoy is best effort.
+        // The ESP and the module builds start from an empty directory, and
+        // geom_ventoy and the GRUB module are best effort.
         let passed: Vec<String> = passed.iter().map(|p| unix(p)).collect();
         assert_eq!(
             passed,
@@ -2177,6 +2346,9 @@ mod tests {
                 "efiboot/EFI/FREEBSD/LOADER.EFI",
                 "geom_ventoy/Makefile",
                 "geom_ventoy/geom_ventoy.ko",
+                "grub/Makefile",
+                "grub/jos_efi.mod",
+                "rootfs/boot/grub/x86_64-efi/jos_efi.mod",
                 "rootfs/boot/kernel/geom_ventoy.ko",
             ]
         );
@@ -2304,6 +2476,28 @@ mod tests {
         std::fs::remove_file(&b.work).unwrap();
         let err = b.build_kmod(name).unwrap_err();
         assert!(format!("{err:#}").contains("No such file"), "{err:#}");
+    }
+
+    #[test]
+    fn the_grub_module_reports_what_blocks_it() {
+        let s = Scratch::new("grub-blocked");
+        let mut profile = Profile::default();
+        s.put("repo/freebsd/grub/Makefile", b"");
+        let m = MockRunner::new();
+
+        // Nowhere for the tarball, nowhere to extract the headers.
+        s.put("work/dist", b"");
+        let b = real_builder(&m, &profile, &s.0);
+        assert!(b.grub_module().is_err());
+        std::fs::remove_dir_all(&b.work).unwrap();
+        grub_tarball(&s, &mut profile);
+        let b = real_builder(&m, &profile, &s.0);
+        s.put("work/grub", b"");
+        assert!(b.grub_module().is_err());
+        std::fs::remove_dir_all(&b.work).unwrap();
+        s.put("work", b"");
+        assert!(b.grub_module().is_err());
+        std::fs::remove_file(&b.work).unwrap();
     }
 
     #[test]

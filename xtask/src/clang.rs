@@ -18,12 +18,18 @@
 //! includes from under `~/.cache/juanitos/freebsd-<version>/` and runs
 //! clang-tidy with the flags `sys/conf/kmod.mk` and `kern.mk` give an
 //! amd64 module.
+//!
+//! `freebsd/grub` is a GRUB module, not a kernel one: its flags are in its
+//! own `compile_flags.txt`, which clang-tidy reads by itself, and [`tidy`]
+//! adds GRUB's headers (the `[grub]` tarball of the profile, sha256-checked,
+//! `include/` kept under `~/.cache/juanitos/grub-<version>/`).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context};
+use juanitos_core::fsops::FsOps;
 use juanitos_core::release::{parse_freebsd_manifest, DistManifest};
 use serde::Deserialize;
 
@@ -33,6 +39,8 @@ const VERSION_FILE: &str = ".clang-version";
 const PROFILE: &str = "release/juanitos.toml";
 /// FreeBSD distribution set with the kernel sources.
 const SRC_SET: &str = "src.txz";
+/// The GRUB module's sources, compiled with its `compile_flags.txt`.
+const GRUB_DIR: &str = "freebsd/grub";
 /// Directories of `usr/src/sys` an amd64 kernel module build includes
 /// from (the kernel's own headers, the ck concurrency kit and the
 /// `machine`/`x86` directories `bsd.kmod.mk` links into the build).
@@ -54,7 +62,8 @@ pub fn fmt(root: &Path, fix: bool) -> anyhow::Result<()> {
     run(root, "clang-format", &args)
 }
 
-/// clang-tidy every C file we maintain, as a FreeBSD kernel module.
+/// clang-tidy every C file we maintain: the GRUB module with its own
+/// flags and GRUB's headers, the rest as FreeBSD kernel modules.
 pub fn tidy(root: &Path) -> anyhow::Result<()> {
     let files: Vec<PathBuf> = sources(root)?
         .into_iter()
@@ -65,19 +74,41 @@ pub fn tidy(root: &Path) -> anyhow::Result<()> {
     }
     check_version(root, "clang-tidy")?;
     let profile = Profile::load(root)?;
-    if profile.arch != "amd64" {
-        bail!(
-            "clang-tidy runs with amd64 kernel flags; {PROFILE} says {}",
-            profile.arch
-        );
+    let (grub, kmod): (Vec<PathBuf>, Vec<PathBuf>) =
+        files.into_iter().partition(|f| f.starts_with(GRUB_DIR));
+    if !kmod.is_empty() {
+        if profile.arch != "amd64" {
+            bail!(
+                "clang-tidy runs with amd64 kernel flags; {PROFILE} says {}",
+                profile.arch
+            );
+        }
+        let headers = kernel_headers(&profile)?;
+        let mut args = tidy_args(&kmod);
+        args.push("--".into());
+        args.extend(kmod_flags(&profile, &headers));
+        run(root, "clang-tidy", &args)?;
     }
-    let headers = kernel_headers(&profile)?;
-    // --quiet: no statistics about the kernel headers' suppressed findings.
+    if !grub.is_empty() {
+        let include = grub_headers(&profile)?;
+        let mut args = tidy_args(&grub);
+        args.push(grub_flag(&include));
+        run(root, "clang-tidy", &args)?;
+    }
+    Ok(())
+}
+
+/// `--quiet` (no statistics about the system headers' suppressed
+/// findings) and the files.
+fn tidy_args(files: &[PathBuf]) -> Vec<String> {
     let mut args: Vec<String> = vec!["--quiet".into()];
     args.extend(files.iter().map(|f| f.display().to_string()));
-    args.push("--".into());
-    args.extend(kmod_flags(&profile, &headers));
-    run(root, "clang-tidy", &args)
+    args
+}
+
+/// GRUB's headers as system headers, on top of `compile_flags.txt`.
+fn grub_flag(include: &Path) -> String {
+    format!("--extra-arg=-isystem{}", include.display())
 }
 
 /// Our `.c` and `.h` files, relative to `root`, sorted. Skips `target`
@@ -146,12 +177,21 @@ fn version_matches(reported: &str, want: &str) -> bool {
     reported.contains(&format!("version {want}."))
 }
 
-/// The fields of `release/juanitos.toml` the header fetch needs.
+/// The fields of `release/juanitos.toml` the header fetches need.
 #[derive(Debug, Deserialize)]
 struct Profile {
     freebsd_version: String,
     arch: String,
     mirror: String,
+    grub: Grub,
+}
+
+/// `[grub]`: the release whose headers build `freebsd/grub`.
+#[derive(Debug, Deserialize)]
+struct Grub {
+    version: String,
+    url: String,
+    sha256: String,
 }
 
 impl Profile {
@@ -245,6 +285,53 @@ fn kernel_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
     std::fs::rename(sys.join("x86/include"), kmod.join("x86"))?;
     std::fs::write(&stamp, want)?;
     Ok(dir)
+}
+
+/// GRUB's `include/` directory, fetched on first use into
+/// `<cache>/grub-<version>/`, with `grub/cpu` and `grub/machine` copied
+/// from the x86_64 EFI headers as GRUB's `configure` would link them (and
+/// as `freebsd/grub/Makefile` does). `HEADERS` records the tarball's
+/// checksum; another tarball fetches again.
+fn grub_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
+    let cache = cache_dir(
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
+    )?;
+    let grub = &profile.grub;
+    let name = format!("grub-{}", grub.version);
+    let dir = cache.join(&name);
+    let include = dir.join("include");
+    let stamp = dir.join("HEADERS");
+    if std::fs::read_to_string(&stamp).is_ok_and(|have| have == grub.sha256) {
+        return Ok(include);
+    }
+    println!(
+        "Fetching the GRUB {} headers for clang-tidy into {} (first use only)",
+        grub.version,
+        dir.display()
+    );
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    let tarball = dir.join("grub.tar");
+    download(&grub.url, &tarball)?;
+    DistManifest::verify_sha256(&tarball, &grub.sha256)?;
+    let args = [
+        "-xf".to_string(),
+        tarball.display().to_string(),
+        "-C".to_string(),
+        cache.display().to_string(),
+        format!("{name}/include"),
+    ];
+    run(&dir, "tar", &args)?;
+    std::fs::remove_file(&tarball)?;
+    let fs = FsOps::new(false);
+    let x86_64 = include.join("grub/x86_64");
+    fs.copy_tree(&x86_64, &include.join("grub/cpu"), &[])?;
+    fs.copy_tree(&x86_64.join("efi"), &include.join("grub/machine"), &[])?;
+    std::fs::write(&stamp, &grub.sha256)?;
+    Ok(include)
 }
 
 /// `fetch(1)` where there is one (FreeBSD), else `curl`.
@@ -388,14 +475,38 @@ mod tests {
     }
 
     #[test]
-    fn the_repository_has_our_module_and_skips_the_vendored_one() {
+    fn the_repository_has_our_modules_and_skips_the_vendored_one() {
         let found = sources(&repo()).unwrap();
         assert!(found.contains(&PathBuf::from("freebsd/jos_bootwatch/jos_bootwatch.c")));
+        assert!(found.contains(&PathBuf::from("freebsd/grub/jos_efi.c")));
         assert!(found
             .iter()
             .all(|p| !p.to_string_lossy().contains("geom_ventoy")));
         assert!(vendored(&repo().join("freebsd/geom_ventoy")));
         assert!(!vendored(&repo()));
+        // The GRUB module carries its own flags for clang-tidy.
+        assert!(repo().join(GRUB_DIR).join("compile_flags.txt").is_file());
+    }
+
+    #[test]
+    fn the_grub_module_is_linted_with_its_own_flags_and_headers() {
+        let files = [
+            PathBuf::from("freebsd/grub/jos_efi.c"),
+            PathBuf::from("freebsd/jos_bootwatch/jos_bootwatch.c"),
+            PathBuf::from("freebsd/grubby/alice.c"),
+        ];
+        let (grub, kmod): (Vec<PathBuf>, Vec<PathBuf>) =
+            files.into_iter().partition(|f| f.starts_with(GRUB_DIR));
+        assert_eq!(grub, [PathBuf::from("freebsd/grub/jos_efi.c")]);
+        assert_eq!(kmod.len(), 2);
+        assert_eq!(
+            tidy_args(&grub),
+            ["--quiet".to_string(), "freebsd/grub/jos_efi.c".into()]
+        );
+        assert_eq!(
+            grub_flag(Path::new("/c/grub-2.04/include")),
+            "--extra-arg=-isystem/c/grub-2.04/include"
+        );
     }
 
     #[test]
@@ -426,16 +537,28 @@ mod tests {
                 p.freebsd_version
             )
         );
-        let p = Profile {
-            freebsd_version: "15.1-RELEASE".into(),
-            arch: "amd64".into(),
-            mirror: "https://m/".into(),
-        };
+        assert_eq!(p.grub.version, "2.04");
+        assert!(p.grub.url.ends_with(".tar.xz"), "{}", p.grub.url);
+        assert_eq!(p.grub.sha256.len(), 64);
+        let p = profile("https://m/");
         assert_eq!(
             p.dist_url("src.txz"),
             "https://m/amd64/15.1-RELEASE/src.txz"
         );
         assert_eq!(p.target(), "x86_64-unknown-freebsd15.1");
+    }
+
+    fn profile(mirror: &str) -> Profile {
+        Profile {
+            freebsd_version: "15.1-RELEASE".into(),
+            arch: "amd64".into(),
+            mirror: mirror.into(),
+            grub: Grub {
+                version: "2.04".into(),
+                url: "https://g/grub-2.04.tar.xz".into(),
+                sha256: "0".repeat(64),
+            },
+        }
     }
 
     #[test]
@@ -459,11 +582,7 @@ mod tests {
 
     #[test]
     fn kmod_flags_compile_as_the_kernel_does_against_the_cached_headers() {
-        let p = Profile {
-            freebsd_version: "15.1-RELEASE".into(),
-            arch: "amd64".into(),
-            mirror: "https://m".into(),
-        };
+        let p = profile("https://m");
         let flags = kmod_flags(&p, Path::new("/c/freebsd-15.1-RELEASE"));
         let text = flags.join(" ");
         assert!(text.starts_with("-std=gnu17 -D_KERNEL -DKLD_MODULE -nostdinc "));

@@ -44,3 +44,11 @@ local_repo = "target/work/cosmic/repo"
 # stage 2 can build offline.
 include = true
 vendor = true
+
+[grub]
+# GRUB release whose headers build freebsd/grub/jos_efi.mod, the module
+# Ventoy's GRUB (based on this release) loads for the stick's direct kernel
+# boot. Only the tarball's include/ directory is used.
+version = "2.04"
+url = "https://ftp.gnu.org/gnu/grub/grub-2.04.tar.xz"
+sha256 = "e5292496995ad42dabe843a0192cf2a2c502e7ffcc7479398232b10a472df77d"

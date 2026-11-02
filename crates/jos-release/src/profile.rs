@@ -17,6 +17,7 @@ pub struct Profile {
     pub bios: bool,
     pub packages: Packages,
     pub source: Source,
+    pub grub: Grub,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +43,17 @@ pub struct Source {
     pub vendor: bool,
 }
 
+/// The GRUB release whose headers build `freebsd/grub/jos_efi.mod` (the
+/// module Ventoy's GRUB loads for its direct kernel boot).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Grub {
+    pub version: String,
+    /// The source tarball; only its `include/` directory is used.
+    pub url: String,
+    pub sha256: String,
+}
+
 impl Default for Profile {
     fn default() -> Self {
         Profile {
@@ -54,6 +66,7 @@ impl Default for Profile {
             bios: true,
             packages: Packages::default(),
             source: Source::default(),
+            grub: Grub::default(),
         }
     }
 }
@@ -76,6 +89,28 @@ impl Default for Source {
             include: true,
             vendor: true,
         }
+    }
+}
+
+impl Default for Grub {
+    fn default() -> Self {
+        Grub {
+            version: "2.04".into(),
+            url: "https://ftp.gnu.org/gnu/grub/grub-2.04.tar.xz".into(),
+            sha256: "e5292496995ad42dabe843a0192cf2a2c502e7ffcc7479398232b10a472df77d".into(),
+        }
+    }
+}
+
+impl Grub {
+    /// The tarball's file name (`grub-2.04.tar.xz`).
+    pub fn tarball(&self) -> &str {
+        self.url.rsplit('/').next().unwrap_or(&self.url)
+    }
+
+    /// The directory the tarball unpacks to (`grub-2.04`).
+    pub fn source_dir(&self) -> String {
+        format!("grub-{}", self.version)
     }
 }
 
@@ -151,6 +186,21 @@ mod tests {
             p.packages.local_repo.as_deref(),
             Some("target/work/cosmic/repo")
         );
+        assert_eq!(p.grub, Grub::default());
+    }
+
+    #[test]
+    fn grub_names_follow_the_url_and_version() {
+        let g = Grub::default();
+        assert_eq!(g.tarball(), "grub-2.04.tar.xz");
+        assert_eq!(g.source_dir(), "grub-2.04");
+        let g = Grub {
+            version: "2.12".into(),
+            url: "grub-2.12.tar.gz".into(),
+            sha256: String::new(),
+        };
+        assert_eq!(g.tarball(), "grub-2.12.tar.gz");
+        assert_eq!(g.source_dir(), "grub-2.12");
     }
 
     #[test]
@@ -196,5 +246,6 @@ mod tests {
         assert!(p.source.vendor);
         assert_eq!(p.packages.repo, "quarterly");
         assert!(p.packages.local_repo.is_none());
+        assert_eq!(p.grub.version, "2.04");
     }
 }

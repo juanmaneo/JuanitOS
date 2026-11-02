@@ -11,6 +11,7 @@ from somewhere else, and under which terms.
 | `freebsd/geom_ventoy/` | [Ventoy](https://github.com/ventoy/Ventoy) `Unix/ventoy_unix_src/FreeBSD/geom_ventoy_src/15.x`, commit 5fae0ca (local changes listed in its README) | BSD-2-Clause, © longpanda, © Pawel Jakub Dawidek. File headers kept. |
 | `crates/jos-gfx/fonts/OpenSans-Regular.ttf` | [Open Sans](https://github.com/googlefonts/opensans) `fonts/ttf/OpenSans-Regular.ttf`, commit bd7e376, unmodified; embedded in every binary that draws text | SIL Open Font License 1.1 (`crates/jos-gfx/fonts/OFL.txt`, shipped next to it). © The Open Sans Project Authors. |
 | `tools/dev/cosmic-patches/*.patch` | Patches to COSMIC components (pop-launcher) | Same license as the patched project (GPL-3.0); applied at build time, not linked into JuanitOS code |
+| `freebsd/grub/` | Original code (`jos_efi`, a [GRUB](https://www.gnu.org/software/grub/) module: boots the FreeBSD kernel on UEFI for Ventoy's GRUB) written to GRUB's module interface and linked into GRUB when loaded; built against GRUB 2.04's headers, which are fetched, not vendored | GPL-3.0-or-later, © Juanito and the JuanitOS contributors. Only this directory; nothing of JuanitOS links against it. |
 
 Everything else (Rust crates, kernel module `jos_bootwatch`, rc.d scripts,
 templates, boot artwork, the icons) is original work under
@@ -73,6 +74,9 @@ The images contain third-party binaries under their own licenses:
   `tools/dev/cosmic-build.sh` and shipped as a local pkg repository.
 - **Ventoy module** (`geom_ventoy.ko`, BSD-2-Clause), built from
   `freebsd/geom_ventoy`.
+- **GRUB module** (`/boot/grub/x86_64-efi/jos_efi.mod`, GPL-3.0-or-later),
+  built from `freebsd/grub`; its source is in the repository, which the
+  dom0 ships under `/usr/local/src/juanitos`.
 
 Before publishing an image, meet the GPL source obligations for the GPL
 binaries it ships: publish, next to the ISO, the exact sources of the
