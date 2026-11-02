@@ -14,6 +14,13 @@
 //! section alignment would place the section past the allocation (a page
 //! fault in `link_elf_load_file`); [`patch_module`] lowers the recorded
 //! alignment to a page once the file layout is fixed.
+//!
+//! Ventoy's direct kernel boot (GRUB, `freebsd/grub`) cannot fill the
+//! module; the module reads the chain blob GRUB preloads instead, through
+//! the `jos-ventoy-chain` crate linked in as one object. [`check_object`]
+//! makes sure that object needs nothing the kernel does not have: an
+//! undefined symbol would make the module unloadable, and the normal
+//! Ventoy boot would break along with it.
 
 use anyhow::{anyhow, bail};
 
@@ -25,6 +32,29 @@ pub const FILLMAP_STEP: u64 = 65536;
 pub const MAP_MAGIC: [u32; 4] = [0x1122_3344, 0x5566_7788, 0x99aa_bbcc, 0xddee_ff00];
 /// Alignment the kernel linker honours.
 pub const PAGE: u64 = 4096;
+/// The entry point `g_ventoy.c` calls in the chain blob reader.
+pub const CHAIN_ENTRY: &str = "jos_ventoy_fill_map";
+/// What the kernel provides to the chain blob reader: the `preload_*`
+/// functions and `panic` it declares, and the memory routines rustc may
+/// call for copies and comparisons.
+pub const KERNEL_SYMBOLS: &[&str] = &[
+    "preload_search_by_type",
+    "preload_fetch_addr",
+    "preload_fetch_size",
+    "panic",
+    "memcpy",
+    "memmove",
+    "memset",
+    "memcmp",
+    "bcmp",
+];
+
+/// `SHT_SYMTAB`.
+const SYMTAB: u64 = 2;
+/// `STB_GLOBAL` and `STB_WEAK`: the bindings the kernel linker resolves
+/// against other files (locals never leave the object).
+const GLOBAL: u64 = 1;
+const WEAK: u64 = 2;
 
 /// A file offset as an index (past any slice when it does not fit).
 fn idx(at: u64) -> usize {
@@ -41,12 +71,26 @@ fn le(b: &[u8], at: u64, n: usize) -> u64 {
         .fold(0, |v, &c| v << 8 | u64::from(c))
 }
 
+/// The NUL-terminated string at `at`.
+fn name(b: &[u8], at: u64) -> anyhow::Result<String> {
+    let tail = b.get(idx(at)..).unwrap_or_default();
+    let len = tail
+        .iter()
+        .position(|&c| c == 0)
+        .ok_or_else(|| anyhow!("name not terminated in the file"))?;
+    Ok(String::from_utf8_lossy(tail.get(..len).unwrap_or_default()).into_owned())
+}
+
 /// A section header of interest: where its fields live in the file.
 #[derive(Debug, PartialEq, Eq)]
 struct Section {
     name: String,
+    kind: u64,
     offset: u64,
     size: u64,
+    /// `sh_link`: for a symbol table, its string table.
+    link: u64,
+    entsize: u64,
     /// File offset of `sh_addralign`.
     align_field: u64,
     align: u64,
@@ -77,22 +121,73 @@ fn sections(b: &[u8]) -> anyhow::Result<Vec<Section>> {
     let mut out = Vec::new();
     for i in 0..shnum {
         let h = header(i);
-        let tail = b
-            .get(idx(strtab.saturating_add(le(b, h, 4)))..)
-            .unwrap_or_default();
-        let len = tail
-            .iter()
-            .position(|&c| c == 0)
-            .ok_or_else(|| anyhow!("section name not terminated in the file"))?;
         out.push(Section {
-            name: String::from_utf8_lossy(tail.get(..len).unwrap_or_default()).into_owned(),
+            name: name(b, strtab.saturating_add(le(b, h, 4)))?,
+            kind: le(b, h + 4, 4),
             offset: le(b, h + 0x18, 8),
             size: le(b, h + 0x20, 8),
+            link: le(b, h + 0x28, 4),
+            entsize: le(b, h + 0x38, 8),
             align_field: h + 0x30,
             align: le(b, h + 0x30, 8),
         });
     }
     Ok(out)
+}
+
+/// The names of the object's global (or weak) symbols: the defined ones
+/// and the undefined ones.
+fn global_symbols(b: &[u8]) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    let sections = sections(b)?;
+    let symtab = sections
+        .iter()
+        .find(|s| s.kind == SYMTAB)
+        .ok_or_else(|| anyhow!("no symbol table"))?;
+    let strtab = sections
+        .get(idx(symtab.link))
+        .ok_or_else(|| anyhow!("the symbol table names no string table"))?;
+    if symtab.entsize < 24 {
+        bail!("bad symbol entry size {}", symtab.entsize);
+    }
+    if symtab.offset.saturating_add(symtab.size) > b.len() as u64 {
+        bail!("truncated symbol table");
+    }
+    let mut defined = Vec::new();
+    let mut undefined = Vec::new();
+    // Entry 0 is the null symbol.
+    for i in 1..symtab.size / symtab.entsize {
+        let at = symtab.offset + i * symtab.entsize;
+        if !matches!(le(b, at + 4, 1) >> 4, GLOBAL | WEAK) {
+            continue;
+        }
+        let name = name(b, strtab.offset.saturating_add(le(b, at, 4)))?;
+        // `st_shndx` 0 is SHN_UNDEF.
+        if le(b, at + 6, 2) == 0 {
+            undefined.push(name);
+        } else {
+            defined.push(name);
+        }
+    }
+    Ok((defined, undefined))
+}
+
+/// Check that the chain blob reader (the `jos-ventoy-chain` crate emitted
+/// as one object) defines [`CHAIN_ENTRY`] and needs nothing beyond
+/// [`KERNEL_SYMBOLS`], so `geom_ventoy.ko` stays loadable with it.
+pub fn check_object(b: &[u8]) -> anyhow::Result<()> {
+    let (defined, undefined) = global_symbols(b)?;
+    if !defined.iter().any(|s| s == CHAIN_ENTRY) {
+        bail!("{CHAIN_ENTRY} is not defined");
+    }
+    let unknown: Vec<&str> = undefined
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !KERNEL_SYMBOLS.contains(s))
+        .collect();
+    if !unknown.is_empty() {
+        bail!("the kernel has no {}", unknown.join(", "));
+    }
+    Ok(())
 }
 
 /// Check that Ventoy will find the disk map in this module and make the
@@ -239,6 +334,112 @@ pub mod tests {
             .copy_from_slice(&((len - 1 - (0x10000 + 0x50)) as u32).to_le_bytes());
         unterminated[len - 1] = b'x';
         assert!(patch_module(&mut unterminated).is_err());
+    }
+
+    /// A minimal ELF64 object with a symbol table: a local symbol, then
+    /// the `defined` globals (in section 1) and the `undefined` ones.
+    pub fn fake_object(defined: &[&str], undefined: &[&str]) -> Vec<u8> {
+        let shnames = b"\0.symtab\0.strtab\0.shstrtab\0";
+        let mut names = b"\0local\0".to_vec();
+        let mut syms = vec![0u8; 24];
+        let mut sym = |name: &str, info: u8, shndx: u16| {
+            let at = names.len() as u32;
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+            let mut s = vec![0u8; 24];
+            s[..4].copy_from_slice(&at.to_le_bytes());
+            s[4] = info;
+            s[6..8].copy_from_slice(&shndx.to_le_bytes());
+            syms.extend_from_slice(&s);
+        };
+        sym("local", 0x02, 1);
+        for d in defined {
+            sym(d, 0x12, 1);
+        }
+        for (i, u) in undefined.iter().enumerate() {
+            // Weak and global references alike.
+            sym(u, if i % 2 == 0 { 0x10 } else { 0x20 }, 0);
+        }
+        let syms_at = 0x40u64;
+        let names_at = syms_at + syms.len() as u64;
+        let shnames_at = names_at + names.len() as u64;
+        let shoff = (shnames_at + shnames.len() as u64 + 7) & !7;
+        let mut b = vec![0u8; (shoff + 4 * 64) as usize];
+        b[..4].copy_from_slice(b"\x7fELF");
+        b[4] = 2;
+        b[5] = 1;
+        b[0x28..0x30].copy_from_slice(&shoff.to_le_bytes());
+        b[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
+        b[0x3c..0x3e].copy_from_slice(&4u16.to_le_bytes());
+        b[0x3e..0x40].copy_from_slice(&3u16.to_le_bytes());
+        let mut sh = |i: u64, name: u32, kind: u32, off: u64, size: u64, link: u32, ent: u64| {
+            let h = (shoff + i * 64) as usize;
+            b[h..h + 4].copy_from_slice(&name.to_le_bytes());
+            b[h + 4..h + 8].copy_from_slice(&kind.to_le_bytes());
+            b[h + 0x18..h + 0x20].copy_from_slice(&off.to_le_bytes());
+            b[h + 0x20..h + 0x28].copy_from_slice(&size.to_le_bytes());
+            b[h + 0x28..h + 0x2c].copy_from_slice(&link.to_le_bytes());
+            b[h + 0x38..h + 0x40].copy_from_slice(&ent.to_le_bytes());
+        };
+        sh(1, 1, 2, syms_at, syms.len() as u64, 2, 24);
+        sh(2, 9, 3, names_at, names.len() as u64, 0, 0);
+        sh(3, 17, 3, shnames_at, shnames.len() as u64, 0, 0);
+        let (s, n, h) = (syms_at as usize, names_at as usize, shnames_at as usize);
+        b[s..s + syms.len()].copy_from_slice(&syms);
+        b[n..n + names.len()].copy_from_slice(&names);
+        b[h..h + shnames.len()].copy_from_slice(shnames);
+        b
+    }
+
+    #[test]
+    fn the_chain_object_only_needs_what_the_kernel_has() {
+        let (defined, undefined) =
+            global_symbols(&fake_object(&[CHAIN_ENTRY], &["memcpy", "panic"])).unwrap();
+        assert_eq!(defined, [CHAIN_ENTRY]);
+        assert_eq!(undefined, ["memcpy", "panic"]);
+        check_object(&fake_object(&[CHAIN_ENTRY, "alice"], KERNEL_SYMBOLS)).unwrap();
+
+        let err = check_object(&fake_object(&["alice"], &[])).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("jos_ventoy_fill_map is not defined"));
+        let err = check_object(&fake_object(
+            &[CHAIN_ENTRY],
+            &["memcpy", "rust_eh_personality", "chuck"],
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the kernel has no rust_eh_personality, chuck"
+        );
+    }
+
+    #[test]
+    fn malformed_objects_are_errors_not_panics() {
+        let good = fake_object(&[CHAIN_ENTRY], &["panic"]);
+        let symtab = u64::from_le_bytes(good[0x28..0x30].try_into().unwrap()) as usize + 64;
+        let patched = |at: usize, bytes: &[u8]| {
+            let mut b = good.clone();
+            b[at..at + bytes.len()].copy_from_slice(bytes);
+            b
+        };
+        let cases = [
+            (b"MZ".to_vec(), "not an ELF file"),
+            // Not a symbol table any more.
+            (patched(symtab + 4, &[1]), "no symbol table"),
+            (patched(symtab + 0x28, &[9]), "names no string table"),
+            (patched(symtab + 0x38, &[8]), "bad symbol entry size 8"),
+            (
+                patched(symtab + 0x20, &[0xff, 0xff]),
+                "truncated symbol table",
+            ),
+            // A symbol name pointing past every NUL.
+            (patched(0x40 + 48, &[0xff, 0xff, 0, 0]), "not terminated"),
+        ];
+        for (b, want) in cases {
+            let err = check_object(&b).unwrap_err();
+            assert!(err.to_string().contains(want), "{err} / {want}");
+        }
     }
 
     #[test]

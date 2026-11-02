@@ -120,6 +120,10 @@ struct BuildArgs {
     /// `bins` built in <repo>/target/uefi, if any).
     #[arg(long)]
     boot_efi: Option<PathBuf>,
+    /// Link this jos_ventoy_chain.o into geom_ventoy.ko (default: the one
+    /// `bins` built in <repo>/target/kernel, if any).
+    #[arg(long)]
+    chain_object: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -221,12 +225,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             .unwrap_or_else(|| repo.join("target/release")),
         firewall_image: args.firewall_image.clone(),
         boot_efi: args.boot_efi.clone(),
+        chain_object: args.chain_object.clone(),
         installed_root: PathBuf::from("/"),
     };
     let plain = BuildArgs {
         bins: None,
         firewall_image: None,
         boot_efi: None,
+        chain_object: None,
     };
 
     match cli.cmd {

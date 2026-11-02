@@ -376,6 +376,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jos-ventoy-chain"
+version = "0.1.0"
+
+[[package]]
 name = "juanitos-core"
 version = "0.1.0"
 dependencies = [

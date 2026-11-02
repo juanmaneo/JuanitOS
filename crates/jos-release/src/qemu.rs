@@ -360,15 +360,17 @@ pub const AUTO_STEPS: &[(&str, &str, u64)] = &[
         "cd /root/juanitos && cargo build --release -p jos-release",
         120,
     ),
-    // FreeBSD's rust package has no x86_64-unknown-uefi std, so the UEFI
-    // applications come from the host (built on Linux, see
-    // tools/docker-build.sh); `jos-release` itself warns and goes on when
-    // they are absent.
+    // FreeBSD's rust package has no x86_64-unknown-uefi or
+    // x86_64-unknown-none std, so the UEFI applications and geom_ventoy's
+    // chain reader come from the host (built on Linux, see
+    // tools/docker-build.sh and `jos-release bins`); `jos-release` itself
+    // warns and goes on when they are absent.
     (
         "jos-release all (fetch, bins, rootfs, pack, iso)",
         "cd /root/juanitos && extra=''; \
          [ -f /mnt/out/jos-boot.efi ] && extra=\"$extra --boot-efi /mnt/out/jos-boot.efi\"; \
          [ -f /mnt/out/jos-firewall.img ] && extra=\"$extra --firewall-image /mnt/out/jos-firewall.img\"; \
+         [ -f /mnt/out/jos_ventoy_chain.o ] && extra=\"$extra --chain-object /mnt/out/jos_ventoy_chain.o\"; \
          ./target/release/jos-release --repo /root/juanitos all $extra",
         300,
     ),
@@ -463,11 +465,11 @@ pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
         )
         .context("enabling the serial console in the VM image")?;
     }
-    // Host-built UEFI artifacts for the guest to ship (see AUTO_STEPS).
+    // Host-built artifacts for the guest to ship (see AUTO_STEPS).
     for (name, candidates) in [
         (
             "jos-boot.efi",
-            [
+            vec![
                 b.repo
                     .join("target/uefi/x86_64-unknown-uefi/release/jos-boot.efi"),
                 b.repo
@@ -476,10 +478,14 @@ pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
         ),
         (
             "jos-firewall.img",
-            [
+            vec![
                 b.repo.join("release/out/jos-firewall.img"),
                 b.repo.join("target/docker/jos-firewall.img"),
             ],
+        ),
+        (
+            "jos_ventoy_chain.o",
+            vec![crate::builder::chain_object_in(&b.repo)],
         ),
     ] {
         if let Some(src) = candidates.iter().find(|p| p.is_file()) {

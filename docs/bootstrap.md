@@ -34,9 +34,10 @@ jos-install --dry-run --non-interactive --ignore-doctor --disk vtbd0 \
 ```
 
 `rust-toolchain.toml` pins the channel and adds the `x86_64-unknown-uefi`
-(for `jos-boot`, `jos-firewall`) and `x86_64-unknown-freebsd` (for
-cross-checking with clippy) targets, so `rustup` installs them on first
-use.
+(for `jos-boot`, `jos-firewall`), `x86_64-unknown-freebsd` (for
+cross-checking with clippy) and `x86_64-unknown-none` (for
+`jos-ventoy-chain`, linked into `geom_ventoy.ko`) targets, so `rustup`
+installs them on first use.
 
 ### Stage 0 in a container
 
@@ -178,7 +179,9 @@ The unattended builder found three things the dry runs could not:
   so `jos-boot.efi` and `jos-firewall.efi` are built on the Linux side
   (`tools/docker-build.sh` or plain cargo with the target installed) and
   handed to the guest through the results share; `jos-release all` picks
-  them up with `--boot-efi` / `--firewall-image`.
+  them up with `--boot-efi` / `--firewall-image`. The same goes for
+  `x86_64-unknown-none` and `geom_ventoy`'s chain reader
+  (`--chain-object`, from the host's `jos-release bins`).
 
 ## Install — validation on real hardware
 
@@ -220,8 +223,9 @@ What the first stage-2 run showed (JuanitOS 0.1.0 under QEMU, 2026-10):
 - FreeBSD's `rust` cannot build the two UEFI applications, so a dom0
   rebuilding itself ships the `jos-boot.efi` and `jos-firewall.img` it was
   installed with (`/boot/jos-boot.efi`, `/usr/local/share/juanitos/
-  jos-firewall.img`) when it has no newer ones; `--boot-efi` and
-  `--firewall-image` still override. Before this fallback a stage-2 image
+  jos-firewall.img`, and `/usr/local/share/juanitos/jos_ventoy_chain.o`)
+  when it has no newer ones; `--boot-efi`, `--firewall-image` and
+  `--chain-object` still override. Before this fallback a stage-2 image
   silently lost the graphical boot and the unikernel.
 - The live medium works headless: without a Graphics Output Protocol
   `jos-boot` chain-loads the loader straight onto the serial console and

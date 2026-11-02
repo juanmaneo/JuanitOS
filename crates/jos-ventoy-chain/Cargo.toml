@@ -1,0 +1,12 @@
+[package]
+name = "jos-ventoy-chain"
+description = "Fills geom_ventoy's disk map from the chain blob Ventoy's GRUB preloads (no_std; linked into the kernel module)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

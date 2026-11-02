@@ -43,6 +43,9 @@ pub struct Builder<'a> {
     /// `jos-boot.efi` graphical pre-loader to ship; taken from the UEFI
     /// build output when not given.
     pub boot_efi: Option<PathBuf>,
+    /// `jos_ventoy_chain.o` to link into `geom_ventoy.ko`; taken from the
+    /// kernel-target build output when not given.
+    pub chain_object: Option<PathBuf>,
     /// Root of the running system, where a dom0 rebuilding itself finds
     /// the UEFI artifacts it was installed with and its own `release.toml`
     /// (`/`; tests use a scratch directory).
@@ -55,6 +58,23 @@ pub const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 /// The UEFI crates live outside the host workspace (they only build for
 /// [`UEFI_TARGET`]).
 pub const UEFI_CRATES: &[&str] = &["jos-boot", "jos-firewall"];
+
+/// Rust target of code linked into a kernel module: no SSE, no red zone,
+/// the kernel code model.
+pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
+
+/// The chain blob reader `geom_ventoy.ko` links in (see [`ventoy`]).
+pub const CHAIN_CRATE: &str = "jos-ventoy-chain";
+
+/// rustc flags for [`CHAIN_CRATE`]'s object: absolute relocations as
+/// kernel C has them ([`KERNEL_TARGET`] defaults to position-independent
+/// code, whose GOT the kernel linker does not build) and no unwind tables.
+pub const CHAIN_RUSTFLAGS: &[&str] = &[
+    "-C",
+    "relocation-model=static",
+    "-C",
+    "force-unwind-tables=no",
+];
 
 impl<'a> Builder<'a> {
     pub fn dist_dir(&self) -> PathBuf {
@@ -70,12 +90,15 @@ impl<'a> Builder<'a> {
     pub fn firewall_image_path(&self) -> PathBuf {
         self.work.join("jos-firewall.img")
     }
-    /// A UEFI artifact to ship: the explicit flag, else the one this build
-    /// produced, else the one the running system was installed with. The
-    /// last case is stage 2: FreeBSD's `rust` has no `x86_64-unknown-uefi`
-    /// target, so a dom0 rebuilding itself inherits the pre-loader and the
-    /// firewall it boots with rather than dropping them.
-    fn uefi_artifact(
+    pub fn chain_object_path(&self) -> PathBuf {
+        chain_object_in(&self.repo)
+    }
+    /// An artifact of a target FreeBSD's `rust` lacks (UEFI, kernel) to
+    /// ship: the explicit flag, else the one this build produced, else the
+    /// one the running system was installed with. The last case is stage
+    /// 2: a dom0 rebuilding itself inherits the pre-loader, the firewall
+    /// and the chain reader it was installed with rather than dropping them.
+    fn stage1_artifact(
         &self,
         explicit: &Option<PathBuf>,
         built: PathBuf,
@@ -91,18 +114,44 @@ impl<'a> Builder<'a> {
         })
     }
     fn boot_efi(&self) -> Option<PathBuf> {
-        self.uefi_artifact(
+        self.stage1_artifact(
             &self.boot_efi,
             self.uefi_release_dir().join("jos-boot.efi"),
             dom0::JOS_BOOT_EFI,
         )
     }
     fn firewall_image(&self) -> Option<PathBuf> {
-        self.uefi_artifact(
+        self.stage1_artifact(
             &self.firewall_image,
             self.firewall_image_path(),
             dom0::FIREWALL_IMAGE,
         )
+    }
+    fn chain_object(&self) -> Option<PathBuf> {
+        self.stage1_artifact(
+            &self.chain_object,
+            self.chain_object_path(),
+            dom0::VENTOY_CHAIN_OBJ,
+        )
+    }
+    /// [`Self::chain_object`] if the kernel can load `geom_ventoy.ko` with
+    /// it linked in (see [`ventoy::check_object`]): a module with an
+    /// unresolved symbol would break Ventoy's normal boot as well.
+    fn usable_chain_object(&self) -> Option<PathBuf> {
+        let obj = self.chain_object()?;
+        let checked = std::fs::read(&obj)
+            .map_err(anyhow::Error::from)
+            .and_then(|b| ventoy::check_object(&b));
+        match checked {
+            Ok(()) => Some(obj),
+            Err(e) => {
+                println!(
+                    "   warning: {} not usable ({e:#}); geom_ventoy.ko is built without it",
+                    obj.display()
+                );
+                None
+            }
+        }
     }
     pub fn rootfs(&self) -> PathBuf {
         self.work.join("rootfs")
@@ -235,15 +284,44 @@ impl<'a> Builder<'a> {
                 ],
             );
             if let Err(e) = built {
-                let e = e.to_string();
-                let last = e.lines().last().unwrap_or("").trim();
-                println!(
-                    "   warning: {name} not built ({last}); \
-                     `rustup target add {UEFI_TARGET}` enables it"
-                );
+                not_built(name, &e, UEFI_TARGET);
             }
         }
         self.firewall_image_build()?;
+        self.chain_object_build(&rustflags)
+    }
+
+    /// [`CHAIN_CRATE`] as the one object `geom_ventoy.ko` links in. Best
+    /// effort like the UEFI applications: without it the module serves
+    /// Ventoy's normal boot only. The object of an earlier build goes
+    /// first, so a failed build never ships a stale one.
+    fn chain_object_build(&self, rustflags: &str) -> anyhow::Result<()> {
+        self.step(&format!("Building {CHAIN_CRATE} for geom_ventoy.ko"));
+        let obj = self.chain_object_path();
+        self.fs.remove_file(&obj)?;
+        let manifest = Self::s(&self.repo.join("Cargo.toml"));
+        let target_dir = Self::s(&self.repo.join(KERNEL_TARGET_DIR));
+        let emit = format!("obj={}", Self::s(&obj));
+        let mut args = vec![
+            "rustc",
+            "--release",
+            "--manifest-path",
+            &manifest,
+            "--package",
+            CHAIN_CRATE,
+            "--target",
+            KERNEL_TARGET,
+            "--target-dir",
+            &target_dir,
+            "--config",
+            rustflags,
+            "--",
+        ];
+        args.extend(CHAIN_RUSTFLAGS);
+        args.extend(["--emit", &emit]);
+        if let Err(e) = self.runner.run_checked("cargo", &args) {
+            not_built(CHAIN_CRATE, &e, KERNEL_TARGET);
+        }
         Ok(())
     }
 
@@ -451,6 +529,12 @@ impl<'a> Builder<'a> {
             None => {
                 println!("   no jos-boot.efi: the ESP will boot loader.efi directly (text boot)")
             }
+        }
+        if let Some(obj) = self.chain_object() {
+            self.fs.copy(
+                &obj,
+                &root.join(dom0::VENTOY_CHAIN_OBJ.trim_start_matches('/')),
+            )?;
         }
         self.install_splash()?;
         if let Err(e) = self.bootwatch_module() {
@@ -809,20 +893,22 @@ impl Builder<'_> {
         dir.join("Makefile").is_file().then_some(dir)
     }
 
-    /// `make -C <work>/<name> <var>` in a fresh copy of `src`, returning
+    /// `make -C <work>/<name> <vars>` in a fresh copy of `src`, returning
     /// the bytes of `<output>` it built (empty with `--dry-run`).
     fn make_copy(
         &self,
         src: &Path,
         name: &str,
-        var: &str,
+        vars: &[&str],
         output: &str,
     ) -> anyhow::Result<Vec<u8>> {
         let build = self.work.join(name);
         self.fs.remove_tree(&build)?;
         self.fs.copy_tree(src, &build, &[])?;
-        self.runner
-            .run_checked("make", &["-C", &Self::s(&build), var])?;
+        let build_s = Self::s(&build);
+        let mut args = vec!["-C", build_s.as_str()];
+        args.extend(vars);
+        self.runner.run_checked("make", &args)?;
         if self.fs.dry_run {
             return Ok(Vec::new());
         }
@@ -830,19 +916,21 @@ impl Builder<'_> {
     }
 
     /// Build the kernel module `freebsd/<name>` (a `bsd.kmod.mk` Makefile)
-    /// against the release's kernel sources. `None` when the source is
-    /// not in the tree; the module's bytes otherwise.
-    fn build_kmod(&self, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    /// against the release's kernel sources, with the `make` variables
+    /// `vars` on top. `None` when the source is not in the tree; the
+    /// module's bytes otherwise.
+    fn build_kmod(&self, name: &str, vars: &[&str]) -> anyhow::Result<Option<Vec<u8>>> {
         let Some(src) = self.vendored(name) else {
             return Ok(None);
         };
         self.step(&format!("Building {name}.ko"));
-        let sys = self.kernel_sources()?;
-        let var = format!("SYSDIR={}", Self::s(&sys));
+        let sys = format!("SYSDIR={}", Self::s(&self.kernel_sources()?));
+        let mut all = vec![sys.as_str()];
+        all.extend(vars);
         Ok(Some(self.make_copy(
             &src,
             name,
-            &var,
+            &all,
             &format!("{name}.ko"),
         )?))
     }
@@ -858,10 +946,14 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// `geom_ventoy.ko` in the live root (see [`ventoy`]). `Ok(false)` when
-    /// there is nothing to build (no vendored source).
+    /// `geom_ventoy.ko` in the live root (see [`ventoy`]), with the chain
+    /// blob reader when there is one. `Ok(false)` when there is nothing to
+    /// build (no vendored source).
     fn ventoy_module(&self) -> anyhow::Result<bool> {
-        let Some(mut bytes) = self.build_kmod(VENTOY_MODULE)? else {
+        let chain = self
+            .usable_chain_object()
+            .map(|obj| format!("CHAIN_OBJ={}", Self::s(&obj)));
+        let Some(mut bytes) = self.build_kmod(VENTOY_MODULE, chain.as_deref().as_slice())? else {
             return Ok(false);
         };
         if !self.fs.dry_run {
@@ -883,7 +975,7 @@ impl Builder<'_> {
         let grub = self.grub_sources()?;
         let var = format!("GRUB={}", Self::s(&grub));
         let output = format!("{}.mod", dom0::GRUB_MODULE);
-        let bytes = self.make_copy(&src, GRUB_DIR, &var, &output)?;
+        let bytes = self.make_copy(&src, GRUB_DIR, &[&var], &output)?;
         let dst = self
             .rootfs()
             .join(dom0::GRUB_MODULE_PATH.trim_start_matches('/'));
@@ -897,7 +989,7 @@ impl Builder<'_> {
     /// own `loader.conf.d` file, so the loader never names a module that
     /// was not built.
     fn bootwatch_module(&self) -> anyhow::Result<()> {
-        let Some(bytes) = self.build_kmod(dom0::BOOTWATCH_MODULE)? else {
+        let Some(bytes) = self.build_kmod(dom0::BOOTWATCH_MODULE, &[])? else {
             return Ok(());
         };
         self.install_kmod("boot/modules", dom0::BOOTWATCH_MODULE, &bytes)?;
@@ -953,6 +1045,24 @@ impl Builder<'_> {
         self.fs.remove_file(&img)?;
         Ok(())
     }
+}
+
+/// Cargo's target directory for [`KERNEL_TARGET`], in the repository.
+const KERNEL_TARGET_DIR: &str = "target/kernel";
+
+/// Where `bins` leaves [`CHAIN_CRATE`]'s object in `repo`: inside the
+/// target directory cargo creates, so nothing else has to.
+pub fn chain_object_in(repo: &Path) -> PathBuf {
+    repo.join(KERNEL_TARGET_DIR)
+        .join(KERNEL_TARGET)
+        .join("release/jos_ventoy_chain.o")
+}
+
+/// A best-effort build that failed: what it was and how to enable it.
+fn not_built(name: &str, e: &dyn std::fmt::Display, target: &str) {
+    let e = e.to_string();
+    let last = e.lines().last().unwrap_or("").trim();
+    println!("   warning: {name} not built ({last}); `rustup target add {target}` enables it");
 }
 
 /// `(lba, sectors)` of the EFI boot image from `etdump --format shell`:
@@ -1313,6 +1423,7 @@ mod tests {
             bins: PathBuf::from("/repo/target/release"),
             firewall_image: None,
             boot_efi: Some(PathBuf::from("/repo/target/uefi/jos-boot.efi")),
+            chain_object: None,
             installed_root: PathBuf::from("/nonexistent"),
         };
         b.bins().unwrap();
@@ -1376,6 +1487,7 @@ mod tests {
             bins: PathBuf::from("/bins"),
             firewall_image: None,
             boot_efi: None,
+            chain_object: None,
             installed_root: PathBuf::from("/nonexistent"),
         };
         let info = b.release_info();
@@ -1386,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_two_inherits_installed_uefi_artifacts() {
+    fn stage_two_inherits_installed_stage1_artifacts() {
         let tmp = std::env::temp_dir().join(format!("jos-stage2-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let root = tmp.join("root");
@@ -1401,21 +1513,25 @@ mod tests {
             bins: tmp.join("bins"),
             firewall_image: None,
             boot_efi: None,
+            chain_object: None,
             installed_root: root.clone(),
         };
         // Nothing built, nothing installed: ship without them.
         assert_eq!(b.boot_efi(), None);
         assert_eq!(b.firewall_image(), None);
+        assert_eq!(b.chain_object(), None);
 
         // The running dom0's copies are the fallback ...
         let efi = root.join(dom0::JOS_BOOT_EFI.trim_start_matches('/'));
         let img = root.join(dom0::FIREWALL_IMAGE.trim_start_matches('/'));
-        for p in [&efi, &img] {
+        let obj = root.join(dom0::VENTOY_CHAIN_OBJ.trim_start_matches('/'));
+        for p in [&efi, &img, &obj] {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, b"x").unwrap();
         }
         assert_eq!(b.boot_efi(), Some(efi));
         assert_eq!(b.firewall_image(), Some(img));
+        assert_eq!(b.chain_object(), Some(obj));
 
         // ... behind what this build produced ...
         let built = b.uefi_release_dir().join("jos-boot.efi");
@@ -1426,6 +1542,11 @@ mod tests {
         // ... and an explicit flag wins over both.
         b.boot_efi = Some(PathBuf::from("/flag/jos-boot.efi"));
         assert_eq!(b.boot_efi(), Some(PathBuf::from("/flag/jos-boot.efi")));
+        b.chain_object = Some(PathBuf::from("/flag/jos_ventoy_chain.o"));
+        assert_eq!(
+            b.chain_object(),
+            Some(PathBuf::from("/flag/jos_ventoy_chain.o"))
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1470,6 +1591,7 @@ mod tests {
             bins: dir.join("bins"),
             firewall_image: None,
             boot_efi: None,
+            chain_object: None,
             installed_root: dir.join("root"),
         }
     }
@@ -1568,6 +1690,51 @@ mod tests {
         let b = real_builder(&m, &profile, &s.0);
         assert!(b.bins().is_err());
         assert_eq!(m.calls().len(), 1);
+    }
+
+    #[test]
+    fn the_chain_reader_is_built_for_the_kernel_target() {
+        let s = Scratch::new("chain");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        let obj = b.chain_object_path();
+        s.put(
+            obj.strip_prefix(&s.0).unwrap().to_str().unwrap(),
+            b"from an earlier build",
+        );
+        b.bins().unwrap();
+        // `cargo` is mocked: the earlier object is gone, nothing replaced it.
+        assert!(!obj.exists());
+        let calls = m.calls();
+        let rustc = calls.last().unwrap();
+        assert_eq!(
+            rustc,
+            &format!(
+                "cargo rustc --release --manifest-path {} --package jos-ventoy-chain \
+                 --target x86_64-unknown-none --target-dir {} --config {} -- \
+                 -C relocation-model=static -C force-unwind-tables=no --emit obj={}",
+                unix(&s.0.join("repo/Cargo.toml")),
+                unix(&s.0.join("repo/target/kernel")),
+                juanitos_core::sys::shell_quote(&rustflags_config(&path_remaps(
+                    &b.repo,
+                    cargo_home(std::env::var_os("CARGO_HOME"), std::env::var_os("HOME")).as_deref()
+                ))),
+                unix(&obj)
+            )
+        );
+
+        // Without the target the build goes on.
+        let m = MockRunner::new().respond(
+            "cargo",
+            &["rustc"],
+            CmdOutput::failed(101, "error[E0463]: can't find crate for `core`"),
+        );
+        real_builder(&m, &profile, &s.0).bins().unwrap();
+
+        // A stale object that cannot be removed.
+        std::fs::create_dir_all(&obj).unwrap();
+        assert!(b.bins().is_err());
     }
 
     #[test]
@@ -1906,6 +2073,30 @@ mod tests {
         // The installed system does not need it: the tarball was packed before.
         assert!(!calls.iter().any(|c| c.starts_with("tar ")));
 
+        // With the chain reader built, the module links it in ...
+        let obj = b.chain_object_path();
+        let obj_rel = obj.strip_prefix(&s.0).unwrap().to_str().unwrap();
+        let chain = crate::ventoy::tests::fake_object(&[crate::ventoy::CHAIN_ENTRY], &["panic"]);
+        s.put(obj_rel, &chain);
+        let m = MockRunner::new();
+        real_builder(&m, &profile, &s.0).iso_build().unwrap();
+        assert!(m.calls().contains(&format!(
+            "make -C {} SYSDIR={} CHAIN_OBJ={}",
+            unix(&s.0.join("work/geom_ventoy")),
+            unix(&s.0.join("root/usr/src/sys")),
+            unix(&obj)
+        )));
+        // ... unless the kernel could not load the module with it.
+        s.put(
+            obj_rel,
+            &crate::ventoy::tests::fake_object(&[crate::ventoy::CHAIN_ENTRY], &["bob"]),
+        );
+        let m = MockRunner::new();
+        real_builder(&m, &profile, &s.0).iso_build().unwrap();
+        assert!(!m.calls().iter().any(|c| c.contains("CHAIN_OBJ")));
+        assert!(conf.contains("geom_ventoy_load=\"YES\""), "{conf}");
+        std::fs::remove_file(&obj).unwrap();
+
         // A module Ventoy could not fill is not shipped.
         s.put(
             "repo/freebsd/geom_ventoy/geom_ventoy.ko",
@@ -2159,8 +2350,8 @@ mod tests {
 
     /// Every host command of a whole dry-run build fails once, in turn: a
     /// required one stops the build with its error, a best-effort one
-    /// (UEFI builds, optional packages, kernel modules, the release
-    /// stamp's `git` and `rustc`, cleanup) does not.
+    /// (UEFI builds, the kernel-target object, optional packages, kernel
+    /// modules, the release stamp's `git` and `rustc`, cleanup) does not.
     #[test]
     fn every_failing_command_stops_the_build_or_is_best_effort() {
         let s = Scratch::new("walk");
@@ -2178,6 +2369,7 @@ mod tests {
         };
         let best_effort = |call: &str| {
             call.contains(UEFI_TARGET)
+                || call.contains(KERNEL_TARGET)
                 || [
                     "umount ", "kldxref ", "git ", "rustc ", "make ", "fetch ", "tar -xf ",
                 ]
@@ -2283,6 +2475,14 @@ mod tests {
             boot_efi: Some(s.put("boot.efi", b"efi")),
             ..real_builder(&m, &profile, &s.0)
         };
+        let obj = b.chain_object_path();
+        s.put(obj.strip_prefix(&s.0).unwrap().to_str().unwrap(), b"obj");
+        b.install_juanitos().unwrap();
+        // Kept for stage 2.
+        let kept = b
+            .rootfs()
+            .join(dom0::VENTOY_CHAIN_OBJ.trim_start_matches('/'));
+        assert_eq!(std::fs::read(kept).unwrap(), b"obj");
         let passed = obstacles(&b.rootfs(), &|| {}, &|| b.install_juanitos());
         // Only the boot watch is best effort.
         assert_eq!(
@@ -2465,16 +2665,16 @@ mod tests {
         let name = dom0::BOOTWATCH_MODULE;
         s.put(&format!("repo/freebsd/{name}/Makefile"), b"");
         s.put("work/dist", b"");
-        assert!(b.build_kmod(name).is_err());
+        assert!(b.build_kmod(name, &[]).is_err());
         std::fs::remove_dir_all(&b.work).unwrap();
         s.put("root/usr/src/sys/conf/kmod.mk", b"");
         s.put(&format!("work/{name}"), b"");
-        assert!(b.build_kmod(name).is_err());
+        assert!(b.build_kmod(name, &[]).is_err());
         std::fs::remove_dir_all(&b.work).unwrap();
         s.put("work", b"");
-        assert!(b.build_kmod(name).is_err());
+        assert!(b.build_kmod(name, &[]).is_err());
         std::fs::remove_file(&b.work).unwrap();
-        let err = b.build_kmod(name).unwrap_err();
+        let err = b.build_kmod(name, &[]).unwrap_err();
         assert!(format!("{err:#}").contains("No such file"), "{err:#}");
     }
 

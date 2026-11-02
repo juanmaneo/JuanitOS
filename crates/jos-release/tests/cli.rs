@@ -330,10 +330,20 @@ fn builder_vm_commands() {
 /// A repository with a host-built `jos-boot.efi` but no firewall image,
 /// and the arguments that point `jos-release` at it.
 fn uefi_repo(w: &Work) -> Vec<String> {
-    let efi =
-        w.0.join("repo/target/uefi/x86_64-unknown-uefi/release/jos-boot.efi");
-    std::fs::create_dir_all(efi.parent().unwrap()).unwrap();
-    std::fs::write(&efi, b"efi").unwrap();
+    for (rel, content) in [
+        (
+            "target/uefi/x86_64-unknown-uefi/release/jos-boot.efi",
+            "efi",
+        ),
+        (
+            "target/kernel/x86_64-unknown-none/release/jos_ventoy_chain.o",
+            "obj",
+        ),
+    ] {
+        let p = w.0.join("repo").join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, content).unwrap();
+    }
     let profile = repo_root().join("release/juanitos.toml");
     vec![
         "--repo".into(),
@@ -439,6 +449,10 @@ fn the_auto_builder_drives_a_fake_vm() {
         "{out}"
     );
     assert_eq!(std::fs::read(w.0.join("ok/jos-boot.efi")).unwrap(), b"efi");
+    assert_eq!(
+        std::fs::read(w.0.join("ok/jos_ventoy_chain.o")).unwrap(),
+        b"obj"
+    );
     assert_eq!(
         std::fs::read(w.0.join("ok/OVMF_VARS.fd")).unwrap(),
         b"template"

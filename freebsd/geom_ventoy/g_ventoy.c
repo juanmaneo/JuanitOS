@@ -90,6 +90,16 @@ struct g_ventoy_map g_ventoy_map_data
     { VENTOY_UNIX_SEG_MAGIC0, VENTOY_UNIX_SEG_MAGIC1, VENTOY_UNIX_SEG_MAGIC2, VENTOY_UNIX_SEG_MAGIC3 }
 };
 
+#ifdef JOS_VENTOY_CHAIN
+/*
+ * JuanitOS: crates/jos-ventoy-chain, linked in by jos-release. Fills the
+ * map from the chain blob Ventoy's GRUB preloads for its direct kernel
+ * boot; returns the segment count, 0 without a blob, < 0 on a bad one.
+ */
+int jos_ventoy_fill_map(struct g_ventoy_map *map);
+const char *jos_ventoy_chain_error(int code);
+#endif
+
 struct g_class g_ventoy_class = {
 	.name = G_VENTOY_CLASS_NAME,
 	.version = G_VERSION,
@@ -794,6 +804,25 @@ static bool g_vtoy_check_disk(struct g_class *mp, struct g_provider *pp)
     
     if (g_ventoy_disk_size == 0)
     {
+#ifdef JOS_VENTOY_CHAIN
+        static bool jos_chain_read = false;
+
+        if (!jos_chain_read && !VENTOY_MAP_VALID(g_ventoy_map_data.magic2))
+        {
+            int n;
+
+            jos_chain_read = true;
+            n = jos_ventoy_fill_map(&g_ventoy_map_data);
+            if (n < 0)
+            {
+                printf("ventoy: %s\n", jos_ventoy_chain_error(n));
+            }
+            else if (n > 0)
+            {
+                G_DEBUG("ventoy chain blob: %d segments\n", n);
+            }
+        }
+#endif
         if (VENTOY_MAP_VALID(g_ventoy_map_data.magic2))
         {
             G_DEBUG("ventoy map data is valid. [OK]\n");

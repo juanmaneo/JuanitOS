@@ -55,6 +55,7 @@ crates/jos-boot        graphical UEFI pre-loader that chain-loads loader.efi
 crates/jos-splash      boot splash daemon on the vt(4) framebuffer + rc.d clients
 crates/jos-fb          vt(4) framebuffer display, keyboard and mouse decoders (splash, installer, greeter)
 crates/jos-greet       login screen: PAM, then the COSMIC session on the same VT
+crates/jos-ventoy-chain no_std reader of Ventoy's chain blob, linked into geom_ventoy.ko
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
 coverage.toml          per-file uncovered-line/function/region allowances (ratcheted down to 0)
 deny.toml              cargo-deny policy: advisories, licenses, sources
@@ -73,6 +74,7 @@ in `docs/bootstrap.md`), as root:
 
 ```sh
 rustup target add x86_64-unknown-uefi  # for jos-boot.efi and the firewall unikernel
+rustup target add x86_64-unknown-none  # for geom_ventoy's chain reader (Ventoy direct kernel boot)
 cargo build --release
 ./target/release/jos-release all      # fetch → bins → rootfs → pack → iso
 ./target/release/jos-release qemu     # boot release/out/JuanitOS-0.1.0-amd64.iso
@@ -81,6 +83,9 @@ cargo build --release
 `bins` also builds the two UEFI applications and wraps the firewall into
 `release/out/jos-firewall.img`; both are optional (without them the ESP
 boots `loader.efi` directly and `sys-firewall` has to be a FreeBSD qube).
+It builds `crates/jos-ventoy-chain` for `x86_64-unknown-none` too, as the
+one object `geom_ventoy.ko` links in to find the ISO on a Ventoy stick
+when Ventoy's GRUB boots the kernel directly; optional as well.
 `iso` builds the two C modules of `freebsd/` as well, `geom_ventoy.ko`
 against the release's kernel sources and `jos_efi.mod` against the GRUB
 headers named in `release/juanitos.toml` (`[grub]`, fetched and

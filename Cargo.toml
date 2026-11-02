@@ -11,6 +11,7 @@ members = [
     "crates/jos",
     "crates/jos-install",
     "crates/jos-release",
+    "crates/jos-ventoy-chain",
     "xtask",
 ]
 # UEFI applications are their own workspaces: they only build for
@@ -40,6 +41,11 @@ ab_glyph_rasterizer = { version = "0.1", default-features = false, features = ["
 
 # An OS cannot afford a panic in critical code: every crate opts in with
 # `[lints] workspace = true`. Tests are exempt via clippy.toml.
+# jos-ventoy-chain is linked into geom_ventoy.ko as one object (see its
+# docs): a single codegen unit keeps `--emit=obj` to one file.
+[profile.release.package.jos-ventoy-chain]
+codegen-units = 1
+
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"

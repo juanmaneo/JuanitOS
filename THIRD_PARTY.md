@@ -73,7 +73,8 @@ The images contain third-party binaries under their own licenses:
 - **COSMIC desktop** (GPL-3.0), built from source by
   `tools/dev/cosmic-build.sh` and shipped as a local pkg repository.
 - **Ventoy module** (`geom_ventoy.ko`, BSD-2-Clause), built from
-  `freebsd/geom_ventoy`.
+  `freebsd/geom_ventoy`, with `crates/jos-ventoy-chain` (BSD-3-Clause,
+  `LICENSE`) linked in when it builds.
 - **GRUB module** (`/boot/grub/x86_64-efi/jos_efi.mod`, GPL-3.0-or-later),
   built from `freebsd/grub`; its source is in the repository, which the
   dom0 ships under `/usr/local/src/juanitos`.

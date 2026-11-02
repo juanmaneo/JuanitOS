@@ -5,7 +5,7 @@
 //! cargo xtask ci                  everything CI runs, in order
 //! cargo xtask security-audit      cargo-audit + cargo-deny (deny.toml), all workspaces
 //! cargo xtask fmt [--fix]         rustfmt, all three workspaces; clang-format on the C sources
-//! cargo xtask lint                clippy -D warnings: host, FreeBSD, UEFI; clang-tidy on the C sources
+//! cargo xtask lint                clippy -D warnings: host, FreeBSD, UEFI, kernel; clang-tidy on the C sources
 //! cargo xtask test                tests: workspace + jos-boot lib on the host
 //! cargo xtask coverage [--ratchet] [--html]
 //!                                 line coverage per crate, gated by coverage.toml
@@ -37,6 +37,8 @@ const DOM0_CRATES: &[&str] = &[
 ];
 const FREEBSD: &str = "x86_64-unknown-freebsd";
 const UEFI: &str = "x86_64-unknown-uefi";
+/// Target of the code linked into a kernel module (jos-ventoy-chain).
+const KERNEL: &str = "x86_64-unknown-none";
 
 fn main() {
     if let Err(e) = run() {
@@ -89,7 +91,7 @@ cargo xtask <task> [options] [-- <cargo args>]
                          (cargo-deny: advisories, licenses, sources) on every lockfile
   fmt [--fix]            check (or apply) rustfmt in all workspaces and clang-format
                          (LLVM style) on the C sources
-  lint                   clippy -D warnings for host, FreeBSD and UEFI targets, then
+  lint                   clippy -D warnings for host, FreeBSD, UEFI and kernel targets, then
                          clang-tidy on the C sources with the FreeBSD kernel headers
   test                   workspace tests + jos-boot's library tests on the host
   coverage [--ratchet] [--html]
@@ -303,6 +305,16 @@ fn lint(ctx: &Ctx) -> anyhow::Result<()> {
         }
     } else {
         println!("note: `rustup target add {UEFI}` to lint jos-boot and jos-firewall");
+    }
+    if has_target(KERNEL) {
+        let args = ["clippy", "-p", "jos-ventoy-chain", "--target", KERNEL];
+        cargo(
+            ctx,
+            &ctx.root,
+            &[&args[..], &["--", "-D", "warnings"]].concat(),
+        )?;
+    } else {
+        println!("note: `rustup target add {KERNEL}` to lint jos-ventoy-chain's kernel side");
     }
     clang::tidy(&ctx.root)
 }

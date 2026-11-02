@@ -17,9 +17,15 @@ Local changes:
   offset and lowers the recorded alignment to a page afterwards: the
   kernel's object linker does not honour more than a page and would
   otherwise fault while loading the module.
+- with `CHAIN_OBJ=<object>` (Makefile), the module links in the chain
+  blob reader of `crates/jos-ventoy-chain` (`no_std` Rust) and, while
+  the map is still empty, `g_vtoy_check_disk` asks it to fill the map
+  from the blob Ventoy's GRUB preloads for its direct kernel boot
+  (`freebsd/grub`), where nothing patches the module file. Without the
+  object the module is upstream's.
 
 Build (done by `jos-release` for the live ISO):
 
 ```sh
-make SYSDIR=/usr/src/sys
+make SYSDIR=/usr/src/sys [CHAIN_OBJ=/path/to/jos_ventoy_chain.o]
 ```

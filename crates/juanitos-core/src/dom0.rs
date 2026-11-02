@@ -159,6 +159,11 @@ pub const GRUB_MODULE: &str = "jos_efi";
 /// GRUB's module directory for `x86_64-efi` on the ISO.
 pub const GRUB_MODULE_PATH: &str = "/boot/grub/x86_64-efi/jos_efi.mod";
 
+/// The chain blob reader (`crates/jos-ventoy-chain`) as the object
+/// `geom_ventoy.ko` links in, when the release ships it. Kept in the dom0
+/// for stage 2: FreeBSD's `rust` has no `x86_64-unknown-none` target.
+pub const VENTOY_CHAIN_OBJ: &str = "/usr/local/share/juanitos/jos_ventoy_chain.o";
+
 /// The `rc.d` script that autostarts qubes, installed as
 /// `/usr/local/etc/rc.d/jos`.
 pub const RC_D_JOS: &str = include_str!("../../../freebsd/rc.d/jos");
