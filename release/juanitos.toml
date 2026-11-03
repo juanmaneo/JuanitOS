@@ -52,3 +52,10 @@ vendor = true
 version = "2.04"
 url = "https://ftp.gnu.org/gnu/grub/grub-2.04.tar.xz"
 sha256 = "e5292496995ad42dabe843a0192cf2a2c502e7ffcc7479398232b10a472df77d"
+
+[drm_kmod]
+# drm-kmod tag the dom0's drm-kmod package (drm-612-kmod) is built from;
+# freebsd/jos_vmsvga is built against the same LinuxKPI/DRM headers.
+version = "drm_v6.12.110_1"
+url = "https://github.com/freebsd/drm-kmod/archive/refs/tags/drm_v6.12.110_1.tar.gz"
+sha256 = "9c99c05c3269271ca6ea19ccdca53b27517b1d6b679065fc5c3dfc2682ddfaef"

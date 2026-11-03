@@ -23,6 +23,11 @@
 //! own `compile_flags.txt`, which clang-tidy reads by itself, and [`tidy`]
 //! adds GRUB's headers (the `[grub]` tarball of the profile, sha256-checked,
 //! `include/` kept under `~/.cache/juanitos/grub-<version>/`).
+//!
+//! `freebsd/jos_vmsvga` is a DRM driver built against drm-kmod: on top of
+//! the kernel flags it gets the LinuxKPI and drm-kmod headers (the
+//! `[drm_kmod]` tarball, kept under `~/.cache/juanitos/drm-kmod-<tag>/`)
+//! and the `-DCONFIG_*` set drm-kmod's `kconfig.mk` gives amd64.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -41,10 +46,49 @@ const PROFILE: &str = "release/juanitos.toml";
 const SRC_SET: &str = "src.txz";
 /// The GRUB module's sources, compiled with its `compile_flags.txt`.
 const GRUB_DIR: &str = "freebsd/grub";
-/// Directories of `usr/src/sys` an amd64 kernel module build includes
-/// from (the kernel's own headers, the ck concurrency kit and the
-/// `machine`/`x86` directories `bsd.kmod.mk` links into the build).
-const KERNEL_HEADER_DIRS: &[&str] = &["sys", "amd64/include", "x86/include", "contrib/ck/include"];
+/// The DRM driver's sources, compiled against drm-kmod.
+const DRM_DIR: &str = "freebsd/jos_vmsvga";
+/// Directories of `usr/src/sys` a kernel module build includes from: the
+/// kernel's own headers, the ck concurrency kit, the `machine`/`x86`
+/// directories `bsd.kmod.mk` links into the build, and what LinuxKPI's
+/// headers pull in.
+const KERNEL_HEADER_DIRS: &[&str] = &[
+    "sys",
+    "amd64/include",
+    "x86/include",
+    "contrib/ck/include",
+    "compat/linuxkpi/common/include",
+    "compat/linuxkpi/dummy/include",
+    "vm",
+    "net",
+    "net80211",
+    "netinet",
+    "netinet6",
+    "fs/pseudofs",
+    "bsm",
+    "dev/pci",
+];
+/// kobj interfaces whose headers (`X_if.h`) modules include, generated as
+/// `bsd.kmod.mk` does with `makeobjops.awk -h`.
+const KOBJ_INTERFACES: &[&str] = &[
+    "kern/device_if.m",
+    "kern/bus_if.m",
+    "dev/pci/pci_if.m",
+    "dev/pci/pci_iov_if.m",
+    "dev/iicbus/iicbus_if.m",
+];
+const MAKEOBJOPS: &str = "tools/makeobjops.awk";
+/// `vnode_if.h` and its two companions come from this pair.
+const VNODE_IF: &str = "kern/vnode_if.src";
+const VNODE_IF_AWK: &str = "tools/vnode_if.awk";
+/// What [`kernel_headers`] extracts from drm-kmod's tarball.
+const DRM_KMOD_MEMBERS: &[&str] = &[
+    "include",
+    "linuxkpi",
+    "drivers/gpu/drm/drm_os_freebsd.h",
+    "kconfig.mk",
+    "linuxkpi_version.mk",
+];
 
 /// clang-format every C file we maintain: check (the default) or apply.
 pub fn fmt(root: &Path, fix: bool) -> anyhow::Result<()> {
@@ -63,7 +107,8 @@ pub fn fmt(root: &Path, fix: bool) -> anyhow::Result<()> {
 }
 
 /// clang-tidy every C file we maintain: the GRUB module with its own
-/// flags and GRUB's headers, the rest as FreeBSD kernel modules.
+/// flags and GRUB's headers, the DRM driver against drm-kmod, the rest as
+/// plain FreeBSD kernel modules.
 pub fn tidy(root: &Path) -> anyhow::Result<()> {
     let files: Vec<PathBuf> = sources(root)?
         .into_iter()
@@ -74,9 +119,8 @@ pub fn tidy(root: &Path) -> anyhow::Result<()> {
     }
     check_version(root, "clang-tidy")?;
     let profile = Profile::load(root)?;
-    let (grub, kmod): (Vec<PathBuf>, Vec<PathBuf>) =
-        files.into_iter().partition(|f| f.starts_with(GRUB_DIR));
-    if !kmod.is_empty() {
+    let groups = Groups::of(files);
+    if !groups.kmod.is_empty() || !groups.drm.is_empty() {
         if profile.arch != "amd64" {
             bail!(
                 "clang-tidy runs with amd64 kernel flags; {PROFILE} says {}",
@@ -84,18 +128,63 @@ pub fn tidy(root: &Path) -> anyhow::Result<()> {
             );
         }
         let headers = kernel_headers(&profile)?;
-        let mut args = tidy_args(&kmod);
-        args.push("--".into());
-        args.extend(kmod_flags(&profile, &headers));
-        run(root, "clang-tidy", &args)?;
+        let flags = kmod_flags(&profile, &headers);
+        if !groups.kmod.is_empty() {
+            let mut args = tidy_args(&groups.kmod);
+            args.push("--".into());
+            args.extend(flags.iter().cloned());
+            run(root, "clang-tidy", &args)?;
+        }
+        if !groups.drm.is_empty() {
+            let drm = drm_headers(&profile)?;
+            for file in &groups.drm {
+                let mut args = tidy_args(std::slice::from_ref(file));
+                args.push("--".into());
+                args.extend(flags.iter().cloned());
+                args.extend(drm_flags(&drm, &headers, &module_name(file))?);
+                run(root, "clang-tidy", &args)?;
+            }
+        }
     }
-    if !grub.is_empty() {
+    if !groups.grub.is_empty() {
         let include = grub_headers(&profile)?;
-        let mut args = tidy_args(&grub);
+        let mut args = tidy_args(&groups.grub);
         args.push(grub_flag(&include));
         run(root, "clang-tidy", &args)?;
     }
     Ok(())
+}
+
+/// The `.c` files by how clang-tidy compiles them.
+#[derive(Debug, Default, PartialEq)]
+struct Groups {
+    grub: Vec<PathBuf>,
+    drm: Vec<PathBuf>,
+    kmod: Vec<PathBuf>,
+}
+
+impl Groups {
+    fn of(files: Vec<PathBuf>) -> Self {
+        let mut g = Groups::default();
+        for f in files {
+            if f.starts_with(GRUB_DIR) {
+                g.grub.push(f);
+            } else if f.starts_with(DRM_DIR) {
+                g.drm.push(f);
+            } else {
+                g.kmod.push(f);
+            }
+        }
+        g
+    }
+}
+
+/// A module is named after its directory (`KMOD` in its Makefile).
+fn module_name(file: &Path) -> String {
+    file.parent()
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// `--quiet` (no statistics about the system headers' suppressed
@@ -183,12 +272,15 @@ struct Profile {
     freebsd_version: String,
     arch: String,
     mirror: String,
-    grub: Grub,
+    /// The release whose headers build `freebsd/grub`.
+    grub: Tarball,
+    /// The drm-kmod tag `freebsd/jos_vmsvga` builds against.
+    drm_kmod: Tarball,
 }
 
-/// `[grub]`: the release whose headers build `freebsd/grub`.
+/// A pinned source tarball of the profile.
 #[derive(Debug, Deserialize)]
-struct Grub {
+struct Tarball {
     version: String,
     url: String,
     sha256: String,
@@ -228,20 +320,45 @@ fn cache_dir(xdg: Option<OsString>, home: Option<OsString>) -> anyhow::Result<Pa
     Ok(PathBuf::from(home).join(".cache").join("juanitos"))
 }
 
-/// The release's kernel headers, fetched on first use:
-/// `<cache>/freebsd-<version>/usr/src/sys/{sys,contrib/ck/include}` and
-/// `kmod/` with what `bsd.kmod.mk` puts in a module's build directory
-/// (an empty `opt_global.h`, `machine` and `x86` holding amd64's
-/// headers). `HEADERS` records what was extracted; a different list
-/// fetches again.
-fn kernel_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
-    let cache = cache_dir(
+/// [`cache_dir`] of this process's environment.
+fn cache() -> anyhow::Result<PathBuf> {
+    cache_dir(
         std::env::var_os("XDG_CACHE_HOME"),
         std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
-    )?;
-    let dir = cache.join(format!("freebsd-{}", profile.freebsd_version));
+    )
+}
+
+/// The members of `usr/src/sys` [`kernel_headers`] extracts: the header
+/// directories, the interface sources they do not already hold, and the
+/// awk scripts. None lies inside another (tar fails on that).
+fn kernel_members() -> Vec<String> {
+    let inside_a_dir = |f: &str| {
+        KERNEL_HEADER_DIRS
+            .iter()
+            .any(|d| f.starts_with(&format!("{d}/")))
+    };
+    let mut members: Vec<String> = KERNEL_HEADER_DIRS.iter().map(|d| d.to_string()).collect();
+    members.extend(
+        KOBJ_INTERFACES
+            .iter()
+            .chain(&[VNODE_IF, MAKEOBJOPS, VNODE_IF_AWK])
+            .filter(|f| !inside_a_dir(f))
+            .map(|f| f.to_string()),
+    );
+    members
+}
+
+/// The release's kernel headers, fetched on first use:
+/// `<cache>/freebsd-<version>/usr/src/sys/` with [`kernel_members`], and
+/// `kmod/` with what `bsd.kmod.mk` puts in a module's build directory
+/// (an empty `opt_global.h`, `machine` and `x86` holding amd64's headers,
+/// the generated interface headers). `HEADERS` records what was
+/// extracted; a different list fetches again.
+fn kernel_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
+    let dir = cache()?.join(format!("freebsd-{}", profile.freebsd_version));
     let stamp = dir.join("HEADERS");
-    let want = KERNEL_HEADER_DIRS.join("\n");
+    let members = kernel_members();
+    let want = members.join("\n");
     if std::fs::read_to_string(&stamp).is_ok_and(|have| have == want) {
         return Ok(dir);
     }
@@ -270,11 +387,7 @@ fn kernel_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
         "-C".to_string(),
         dir.display().to_string(),
     ];
-    args.extend(
-        KERNEL_HEADER_DIRS
-            .iter()
-            .map(|d| format!("usr/src/sys/{d}")),
-    );
+    args.extend(members.iter().map(|m| format!("usr/src/sys/{m}")));
     run(&dir, "tar", &args)?;
     std::fs::remove_file(&src)?;
     let sys = dir.join("usr/src/sys");
@@ -283,55 +396,233 @@ fn kernel_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
     std::fs::write(kmod.join("opt_global.h"), "")?;
     std::fs::rename(sys.join("amd64/include"), kmod.join("machine"))?;
     std::fs::rename(sys.join("x86/include"), kmod.join("x86"))?;
+    for (program, args) in interface_commands(&sys) {
+        run(&kmod, program, &args)?;
+    }
     std::fs::write(&stamp, want)?;
     Ok(dir)
 }
 
-/// GRUB's `include/` directory, fetched on first use into
-/// `<cache>/grub-<version>/`, with `grub/cpu` and `grub/machine` copied
-/// from the x86_64 EFI headers as GRUB's `configure` would link them (and
-/// as `freebsd/grub/Makefile` does). `HEADERS` records the tarball's
-/// checksum; another tarball fetches again.
-fn grub_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
-    let cache = cache_dir(
-        std::env::var_os("XDG_CACHE_HOME"),
-        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
-    )?;
-    let grub = &profile.grub;
-    let name = format!("grub-{}", grub.version);
-    let dir = cache.join(&name);
-    let include = dir.join("include");
+/// The awk runs that write the interface headers into the current
+/// directory, as `sys/conf/kmod.mk` makes them.
+fn interface_commands(sys: &Path) -> Vec<(&'static str, Vec<String>)> {
+    let path = |rel: &str| sys.join(rel).display().to_string();
+    let mut commands: Vec<(&str, Vec<String>)> = KOBJ_INTERFACES
+        .iter()
+        .map(|m| {
+            let args = vec!["-f".into(), path(MAKEOBJOPS), path(m), "-h".into()];
+            ("awk", args)
+        })
+        .collect();
+    for opt in ["-h", "-p", "-q"] {
+        let args = vec!["-f".into(), path(VNODE_IF_AWK), path(VNODE_IF), opt.into()];
+        commands.push(("awk", args));
+    }
+    commands
+}
+
+/// `<cache>/<name>/` with `members` of a pinned tarball whose top
+/// directory is `name`, fetched and sha256-checked on first use, then
+/// `finish`ed. `HEADERS` records the tarball's checksum; another tarball
+/// fetches again.
+fn cached_tarball(
+    tarball: &Tarball,
+    name: &str,
+    members: &[&str],
+    finish: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<PathBuf> {
+    let cache = cache()?;
+    let dir = cache.join(name);
     let stamp = dir.join("HEADERS");
-    if std::fs::read_to_string(&stamp).is_ok_and(|have| have == grub.sha256) {
-        return Ok(include);
+    if std::fs::read_to_string(&stamp).is_ok_and(|have| have == tarball.sha256) {
+        return Ok(dir);
     }
     println!(
-        "Fetching the GRUB {} headers for clang-tidy into {} (first use only)",
-        grub.version,
+        "Fetching the {name} headers for clang-tidy into {} (first use only)",
         dir.display()
     );
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
     std::fs::create_dir_all(&dir)?;
-    let tarball = dir.join("grub.tar");
-    download(&grub.url, &tarball)?;
-    DistManifest::verify_sha256(&tarball, &grub.sha256)?;
-    let args = [
+    let file = dir.join("source.tar");
+    download(&tarball.url, &file)?;
+    DistManifest::verify_sha256(&file, &tarball.sha256)?;
+    let mut args = vec![
         "-xf".to_string(),
-        tarball.display().to_string(),
+        file.display().to_string(),
         "-C".to_string(),
         cache.display().to_string(),
-        format!("{name}/include"),
     ];
+    args.extend(members.iter().map(|m| format!("{name}/{m}")));
     run(&dir, "tar", &args)?;
-    std::fs::remove_file(&tarball)?;
-    let fs = FsOps::new(false);
-    let x86_64 = include.join("grub/x86_64");
-    fs.copy_tree(&x86_64, &include.join("grub/cpu"), &[])?;
-    fs.copy_tree(&x86_64.join("efi"), &include.join("grub/machine"), &[])?;
-    std::fs::write(&stamp, &grub.sha256)?;
-    Ok(include)
+    std::fs::remove_file(&file)?;
+    finish(&dir)?;
+    std::fs::write(&stamp, &tarball.sha256)?;
+    Ok(dir)
+}
+
+/// GRUB's `include/` directory, under `<cache>/grub-<version>/`, with
+/// `grub/cpu` and `grub/machine` copied from the x86_64 EFI headers as
+/// GRUB's `configure` would link them (and as `freebsd/grub/Makefile`
+/// does).
+fn grub_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
+    let grub = &profile.grub;
+    let name = format!("grub-{}", grub.version);
+    let dir = cached_tarball(grub, &name, &["include"], |dir| {
+        let include = dir.join("include");
+        let fs = FsOps::new(false);
+        let x86_64 = include.join("grub/x86_64");
+        fs.copy_tree(&x86_64, &include.join("grub/cpu"), &[])?;
+        fs.copy_tree(&x86_64.join("efi"), &include.join("grub/machine"), &[])?;
+        Ok(())
+    })?;
+    Ok(dir.join("include"))
+}
+
+/// drm-kmod's headers and build settings, under
+/// `<cache>/drm-kmod-<tag>/` (the tarball's top directory).
+fn drm_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
+    let drm = &profile.drm_kmod;
+    let name = format!("drm-kmod-{}", drm.version);
+    cached_tarball(drm, &name, DRM_KMOD_MEMBERS, |_| Ok(()))
+}
+
+/// What drm-kmod's module Makefiles add to the kernel flags for
+/// `module` (as `freebsd/jos_vmsvga/Makefile` does): the LinuxKPI and drm
+/// headers, as system headers, the module's names and drm-kmod's
+/// `CONFIG_*` set. `compiler_flags.mk`'s `-include compiler_types.h` is
+/// left out: clang-tidy would take that kernel header for our code.
+fn drm_flags(drm: &Path, headers: &Path, module: &str) -> anyhow::Result<Vec<String>> {
+    let read = |file: &str| {
+        std::fs::read_to_string(drm.join(file))
+            .with_context(|| format!("reading drm-kmod's {file}"))
+    };
+    let linuxkpi = read("linuxkpi_version.mk")?;
+    let version = make_var(&linuxkpi, "LINUXKPI_VERSION_NUMBER")
+        .context("drm-kmod's linuxkpi_version.mk has no LINUXKPI_VERSION_NUMBER")?;
+    let sys = headers.join("usr/src/sys");
+    let mut flags = Vec::new();
+    for dir in [
+        drm.join("linuxkpi/gplv2/include"),
+        drm.join("linuxkpi/bsd/include"),
+        sys.join("compat/linuxkpi/common/include"),
+        sys.join("compat/linuxkpi/dummy/include"),
+        drm.join("include"),
+        drm.join("include/drm"),
+        drm.join("include/uapi"),
+        drm.join("drivers/gpu"),
+    ] {
+        flags.push("-isystem".into());
+        flags.push(dir.display().to_string());
+    }
+    flags.push(format!("-DKBUILD_MODNAME=\"{module}\""));
+    flags.push(format!("-DLINUXKPI_PARAM_PREFIX={module}_"));
+    flags.push(format!("-DDRM_SYSCTL_PARAM_PREFIX=_{module}"));
+    flags.push(format!("-DLINUXKPI_VERSION={version}"));
+    flags.extend(kconfig_defines(&read("kconfig.mk")?)?);
+    Ok(flags)
+}
+
+/// The value of a plain `NAME=value` line of a make file.
+fn make_var<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.lines().find_map(|l| {
+        let (lhs, rhs) = l.split_once('=')?;
+        (lhs.trim() == name).then(|| rhs.trim())
+    })
+}
+
+/// `-DCONFIG_*` for every `KCONFIG` entry of drm-kmod's `kconfig.mk` that
+/// applies to amd64 (`${KCONFIG:C/(.*)/-DCONFIG_\1/}` in its Makefiles).
+/// Conditions are read the simple way the file needs: a test true for
+/// `amd64` or an `empty(...)` of a variable nobody sets holds, any other
+/// test is another architecture's.
+fn kconfig_defines(text: &str) -> anyhow::Result<Vec<String>> {
+    let mut active: Vec<bool> = Vec::new();
+    let mut defines = Vec::new();
+    for line in logical_lines(text) {
+        let line = line.trim();
+        let on = active.iter().all(|a| *a);
+        if let Some(cond) = line.strip_prefix(".if ") {
+            active.push(cond.split("||").any(|t| {
+                let t = t.trim();
+                t.starts_with("empty(") || t.ends_with("== \"amd64\"")
+            }));
+        } else if line == ".else" {
+            let last = active.pop().context("kconfig.mk: .else without .if")?;
+            active.push(!last);
+        } else if line == ".endif" {
+            active.pop().context("kconfig.mk: .endif without .if")?;
+        } else if line.starts_with('.') {
+            bail!("kconfig.mk: unexpected directive {line:?}");
+        } else if let Some(rest) = line.strip_prefix("KCONFIG") {
+            let rest = rest.trim_start();
+            let (append, values) = match rest.strip_prefix("+=") {
+                Some(v) => (true, v),
+                None => match rest.strip_prefix('=') {
+                    Some(v) => (false, v),
+                    None => continue,
+                },
+            };
+            if on {
+                if !append {
+                    defines.clear();
+                }
+                defines.extend(
+                    values
+                        .split_whitespace()
+                        .map(|v| format!("-DCONFIG_{}", shell_unquote(v))),
+                );
+            }
+        }
+    }
+    if !active.is_empty() {
+        bail!("kconfig.mk: .if without .endif");
+    }
+    Ok(defines)
+}
+
+/// Lines with their `\` continuations joined; comment lines dropped.
+fn logical_lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        if current.is_empty() && line.trim_start().starts_with('#') {
+            continue;
+        }
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                current.push_str(head);
+                current.push(' ');
+            }
+            None => {
+                current.push_str(line);
+                out.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// A word as the shell that runs make's compiler command passes it on:
+/// `X="0x1"` is `X=0x1`, `X="\"user\""` and `X='"*"'` keep their inner
+/// double quotes.
+fn shell_unquote(word: &str) -> String {
+    let mut out = String::new();
+    let mut chars = word.chars();
+    let (mut single, mut double) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '\\' if !single => out.extend(chars.next()),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `fetch(1)` where there is one (FreeBSD), else `curl`.
@@ -490,18 +781,22 @@ mod tests {
     }
 
     #[test]
-    fn the_grub_module_is_linted_with_its_own_flags_and_headers() {
+    fn files_are_linted_by_kind_with_their_own_flags_and_headers() {
         let files = [
-            PathBuf::from("freebsd/grub/jos_efi.c"),
-            PathBuf::from("freebsd/jos_bootwatch/jos_bootwatch.c"),
-            PathBuf::from("freebsd/grubby/alice.c"),
-        ];
-        let (grub, kmod): (Vec<PathBuf>, Vec<PathBuf>) =
-            files.into_iter().partition(|f| f.starts_with(GRUB_DIR));
-        assert_eq!(grub, [PathBuf::from("freebsd/grub/jos_efi.c")]);
-        assert_eq!(kmod.len(), 2);
+            "freebsd/grub/jos_efi.c",
+            "freebsd/jos_bootwatch/jos_bootwatch.c",
+            "freebsd/grubby/alice.c",
+            "freebsd/jos_vmsvga/jos_vmsvga.c",
+        ]
+        .map(PathBuf::from);
+        let g = Groups::of(files.to_vec());
+        assert_eq!(g.grub, [files[0].clone()]);
+        assert_eq!(g.kmod, [files[1].clone(), files[2].clone()]);
+        assert_eq!(g.drm, [files[3].clone()]);
+        assert_eq!(module_name(&files[3]), "jos_vmsvga");
+        assert_eq!(module_name(Path::new("alice.c")), "");
         assert_eq!(
-            tidy_args(&grub),
+            tidy_args(&g.grub),
             ["--quiet".to_string(), "freebsd/grub/jos_efi.c".into()]
         );
         assert_eq!(
@@ -541,6 +836,10 @@ mod tests {
         assert_eq!(p.grub.version, "2.04");
         assert!(p.grub.url.ends_with(".tar.xz"), "{}", p.grub.url);
         assert_eq!(p.grub.sha256.len(), 64);
+        // GitHub names the tarball's top directory drm-kmod-<tag>.
+        let drm = &p.drm_kmod;
+        assert!(drm.url.ends_with(&format!("/{}.tar.gz", drm.version)));
+        assert_eq!(drm.sha256.len(), 64);
         let p = profile("https://m/");
         assert_eq!(
             p.dist_url("src.txz"),
@@ -554,12 +853,148 @@ mod tests {
             freebsd_version: "15.1-RELEASE".into(),
             arch: "amd64".into(),
             mirror: mirror.into(),
-            grub: Grub {
+            grub: Tarball {
                 version: "2.04".into(),
                 url: "https://g/grub-2.04.tar.xz".into(),
                 sha256: "0".repeat(64),
             },
+            drm_kmod: Tarball {
+                version: "drm_v6.12.110_1".into(),
+                url: "https://d/drm_v6.12.110_1.tar.gz".into(),
+                sha256: "1".repeat(64),
+            },
         }
+    }
+
+    #[test]
+    fn kernel_members_hold_every_interface_once() {
+        let members = kernel_members();
+        assert!(members.contains(&"dev/pci".to_string()));
+        assert!(members.contains(&"compat/linuxkpi/common/include".to_string()));
+        // pci_if.m comes with dev/pci; naming it again makes tar fail.
+        assert!(!members.contains(&"dev/pci/pci_if.m".to_string()));
+        for m in [
+            "kern/device_if.m",
+            "dev/iicbus/iicbus_if.m",
+            VNODE_IF,
+            MAKEOBJOPS,
+        ] {
+            assert!(members.contains(&m.to_string()), "{m}");
+        }
+    }
+
+    #[test]
+    fn interface_headers_are_generated_as_kmod_mk_does() {
+        let commands = interface_commands(Path::new("/s"));
+        assert_eq!(commands.len(), KOBJ_INTERFACES.len() + 3);
+        assert_eq!(
+            commands[0],
+            (
+                "awk",
+                ["-f", "/s/tools/makeobjops.awk", "/s/kern/device_if.m", "-h"]
+                    .map(String::from)
+                    .to_vec()
+            )
+        );
+        let last = &commands[commands.len() - 1].1;
+        assert_eq!(
+            last,
+            &["-f", "/s/tools/vnode_if.awk", "/s/kern/vnode_if.src", "-q"].map(String::from)
+        );
+    }
+
+    const KCONFIG: &str = "\
+# CONFIG_DRM*
+KCONFIG=\tDRM_A \\
+\t\tDRM_COLOR=\"0xffffff\" \\
+\t\tDRM_SCREEN=\"\\\"user\\\"\" \\
+\t\tDRM_PROBE='\"*\"'
+
+.if empty(NO_FBDEV)
+KCONFIG+=\tFBDEV
+.endif
+
+.if ${MACHINE_CPUARCH} == \"aarch64\"
+KCONFIG+=\tARM64
+.endif
+
+.if ${MACHINE_CPUARCH} == \"i386\" || ${MACHINE_CPUARCH} == \"amd64\"
+KCONFIG+=\tX86
+.if ${MACHINE_CPUARCH} == \"i386\"
+KCONFIG+=\tAGP
+.else
+KCONFIG+=\tX86_64
+.endif
+.endif
+
+.if ${MACHINE_ARCH:Mpowerpc64*} != \"\"
+KCONFIG+=\tPPC64
+\t\t
+# comment
+.endif
+";
+
+    #[test]
+    fn kconfig_keeps_amd64_entries_and_unquotes_as_the_shell_does() {
+        assert_eq!(
+            kconfig_defines(KCONFIG).unwrap(),
+            [
+                "-DCONFIG_DRM_A",
+                "-DCONFIG_DRM_COLOR=0xffffff",
+                "-DCONFIG_DRM_SCREEN=\"user\"",
+                "-DCONFIG_DRM_PROBE=\"*\"",
+                "-DCONFIG_FBDEV",
+                "-DCONFIG_X86",
+                "-DCONFIG_X86_64",
+            ]
+        );
+        // A plain assignment starts over; other variables are not KCONFIG.
+        let text = "KCONFIG= A\nKCONFIGS= B\nKCONFIG= C \\\n";
+        assert_eq!(kconfig_defines(text).unwrap(), ["-DCONFIG_C"]);
+    }
+
+    #[test]
+    fn kconfig_structure_errors_are_named() {
+        for (text, want) in [
+            (".if empty(X)\n", ".if without .endif"),
+            (".endif\n", ".endif without .if"),
+            (".else\n", ".else without .if"),
+            (".elif empty(X)\n.endif\n", "unexpected directive"),
+        ] {
+            let err = kconfig_defines(text).unwrap_err().to_string();
+            assert!(err.contains(want), "{err}");
+        }
+    }
+
+    #[test]
+    fn drm_flags_follow_the_module_makefile() {
+        let s = Scratch::new("drm");
+        let err = drm_flags(&s.0, Path::new("/c/fbsd"), "alice").unwrap_err();
+        assert!(err.to_string().contains("linuxkpi_version.mk"), "{err}");
+        s.put("linuxkpi_version.mk", "# none\n");
+        let err = drm_flags(&s.0, Path::new("/c/fbsd"), "alice").unwrap_err();
+        assert!(err.to_string().contains("LINUXKPI_VERSION_NUMBER"), "{err}");
+        s.put(
+            "linuxkpi_version.mk",
+            "LINUXKPI_VERSION_NUMBER=\t61200\n\nCFLAGS+= -DX=${Y}\n",
+        );
+        let err = drm_flags(&s.0, Path::new("/c/fbsd"), "alice").unwrap_err();
+        assert!(err.to_string().contains("kconfig.mk"), "{err}");
+        s.put("kconfig.mk", "KCONFIG= PCI\n");
+        let flags = drm_flags(&s.0, Path::new("/c/fbsd"), "alice").unwrap();
+        let text = flags.join(" ");
+        let drm = s.0.display();
+        assert!(text.starts_with(&format!("-isystem {drm}/linuxkpi/gplv2/include ")));
+        assert!(text.contains("-isystem /c/fbsd/usr/src/sys/compat/linuxkpi/common/include "));
+        assert!(text.contains(&format!("-isystem {drm}/drivers/gpu ")));
+        assert!(text.ends_with(
+            "-DKBUILD_MODNAME=\"alice\" -DLINUXKPI_PARAM_PREFIX=alice_ \
+             -DDRM_SYSCTL_PARAM_PREFIX=_alice -DLINUXKPI_VERSION=61200 -DCONFIG_PCI"
+        ));
+        let s = Scratch::new("drm-kconfig");
+        s.put("linuxkpi_version.mk", "LINUXKPI_VERSION_NUMBER=1\n");
+        s.put("kconfig.mk", ".endif\n");
+        assert!(drm_flags(&s.0, Path::new("/c"), "bob").is_err());
     }
 
     #[test]

@@ -63,6 +63,7 @@ templates/             cloud-init user-data of the guest template recipes; agent
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
 freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet, the C modules
 freebsd/grub           jos_efi.mod: GRUB module that boots the kernel on UEFI (Ventoy's direct kernel boot)
+freebsd/jos_vmsvga     KMS driver for the VMware SVGA II device (VirtualBox VMSVGA, QEMU -vga vmware)
 docs/                  design notes (docs/images: rendered previews)
 ```
 
@@ -273,18 +274,20 @@ BSD-3-Clause, and on a dependency from anywhere but crates.io; the
 policy is `deny.toml`, where an advisory that does not apply is ignored
 with its reason.
 
-The C sources (the `jos_bootwatch` kernel module and the `jos_efi` GRUB
-module; `freebsd/geom_ventoy` is vendored and left as upstream has it)
+The C sources (the `jos_bootwatch` and `jos_vmsvga` kernel modules and
+the `jos_efi` GRUB module; `freebsd/geom_ventoy` is vendored and left as
+upstream has it)
 are C23 (`-std=gnu23`) in LLVM style, with braces around every
 `if`/`else`/`for`/`while` body (a statement added to an unbraced body is
 a classic bug; `--fix` inserts them) and `f()` rather than `f(void)`
 (the same prototype since C23): `.clang-format` is checked by `cargo xtask fmt` and
 `.clang-tidy` by `cargo xtask lint`, every finding being an error.
-clang-tidy compiles the kernel module the way `bsd.kmod.mk` does and the
-GRUB module with its `compile_flags.txt`, so `lint` fetches the kernel
-headers of the FreeBSD release in `release/juanitos.toml` (`src.txz`,
-verified against its MANIFEST) and GRUB's (`[grub]`, sha256-checked)
-once, into `~/.cache/juanitos`. Both tools must be the LLVM major
+clang-tidy compiles the kernel modules the way `bsd.kmod.mk` does (the
+DRM driver with drm-kmod's flags on top) and the GRUB module with its
+`compile_flags.txt`, so `lint` fetches the kernel headers of the FreeBSD
+release in `release/juanitos.toml` (`src.txz`, verified against its
+MANIFEST), drm-kmod's (`[drm_kmod]`) and GRUB's (`[grub]`), both
+sha256-checked, once, into `~/.cache/juanitos`. Both tools must be the LLVM major
 version in `.clang-version` (what CI installs): another version formats
 differently and has other checks.
 
