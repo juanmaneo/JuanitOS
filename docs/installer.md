@@ -343,11 +343,15 @@ and later the login screen draw on the framebuffer, the disk is AHCI
 (`ada0`) and the keyboard PS/2. The VM's serial port is a local socket the
 harness drives like `selfhost` drives QEMU's: it logs in on the live
 medium's serial getty (the installer is on the screen), runs
-`jos-install --non-interactive ... --disk ada0`, reboots, logs in on the
-installed dom0 and checks that the kernel got the framebuffer
-(`VT(efifb)`), that `jos-greet` is up and that `hw.efi.poweroff` is 0,
-then powers off and waits for VirtualBox to report the VM off, which is
-where the EFI runtime power-off used to hang (`docs/boot-splash.md`).
+`jos-install --non-interactive ... --disk ada0 --user alice`, reboots,
+logs in on the installed dom0 and checks that the kernel got the
+framebuffer (`VT(efifb)`), that `jos_vmsvga` drives the display
+(`/dev/dri/card0`), that `jos-greet` is up and that `hw.efi.poweroff`
+is 0. It then types alice's password on the login screen and waits up to
+five minutes for `cosmic-panel`, which only starts once the compositor
+runs (the session log is printed if it does not). Finally it powers off
+and waits for VirtualBox to report the VM off, which is where the EFI
+runtime power-off used to hang (`docs/boot-splash.md`).
 
 ```sh
 jos-release vbox                       # <work>/vbox: VM, serial.sock, console.log, screenshots
@@ -356,15 +360,14 @@ jos-release vbox --dry-run             # the VBoxManage calls and the dialogue
 ```
 
 The VM (`jos-vbox`, 4 CPUs, 6 GB, a 20 GB VDI) is created under `<work>/vbox`
-and unregistered with its disk afterwards unless `--keep`; `installer.png`
-and `login-screen.png` stay as evidence of the graphical path, next to the
-serial `console.log`. No nested virtualization is enabled, so the host
+and unregistered with its disk afterwards unless `--keep`; `installer.png`,
+`login-screen.png` and `desktop.png` stay as evidence of the graphical
+path, next to the serial `console.log`. No nested virtualization is enabled, so the host
 checks inside report no VT-x (`--ignore-doctor`). drm-kmod has no driver
 for VirtualBox's (or QEMU's) virtual GPUs; JuanitOS ships its own for
 VMSVGA, `freebsd/jos_vmsvga`, which the installer selects
 (`jos_kms_module="jos_vmsvga"`) so that `cosmic-comp` finds a KMS device
-and renders with Mesa's software rasteriser. It drives the device in a
-FreeBSD VM; a COSMIC session on it has not been tried yet.
+and renders with Mesa's software rasteriser.
 
 ## Building on a Linux box
 

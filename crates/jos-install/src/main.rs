@@ -292,8 +292,9 @@ fn passthrough_from(cli: &Cli, devices: &[PciDevice]) -> Vec<PciAddr> {
 }
 
 /// The KMS driver for the dom0's display: the first GPU `pciconf` lists
-/// that `drm-kmod` has a driver for. A GPU meant for passthrough (the
-/// NVIDIA card of the `gpu` qube) has none, so it is skipped.
+/// that has one (`drm-kmod`'s, or `jos_vmsvga` in VirtualBox and QEMU). A
+/// GPU meant for passthrough (the NVIDIA card of the `gpu` qube) has none,
+/// so it is skipped.
 fn gpu_module_from(devices: &[PciDevice]) -> Option<String> {
     devices
         .iter()

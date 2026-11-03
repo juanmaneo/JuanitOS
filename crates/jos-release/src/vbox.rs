@@ -4,13 +4,16 @@
 //! harness (`selfhost`, no display) never takes: VirtualBox's own EFI
 //! firmware, a Graphics Output Protocol for `jos-boot` (VMSVGA with 128 MB
 //! of VRAM, which offers modes up to 7680x4320), the kernel splash, the
+//! the kernel splash, the
 //! graphical installer and the login screen on the framebuffer, the disk
 //! on AHCI (`ada0`), PS/2 input. The graphical installer owns the console
 //! until it exits (`rc.local` runs it before the gettys start), so the
 //! harness screenshots it, quits it through the keyboard, logs in on the
 //! serial getty that then appears, runs the unattended install and the
-//! checks in the installed dom0; screenshots of the installer and of the
-//! login screen land in the output directory.
+//! checks in the installed dom0, then logs in to COSMIC on the login
+//! screen (on `jos_vmsvga`) and waits for its panel; screenshots of the
+//! installer, the login screen and the desktop land in the output
+//! directory.
 //!
 //! Everything goes through `VBoxManage` via the [`Runner`], so the whole
 //! sequence can be dry-run and unit-tested.
@@ -73,6 +76,14 @@ const QUIT_ROUND: Duration = Duration::from_secs(15);
 /// *Quit* and Enter presses it. With the focus on *Quit* already, the
 /// first Enter quits and the rest lands on the console's login.
 pub const QUIT_INSTALLER_KEYS: &[&str] = &["1c 9c", "01 81", "2a 0f 8f aa", "1c 9c"];
+
+/// The account the install creates for the desktop session (the login
+/// screen refuses root); its password is [`SELFHOST_PASSWORD`].
+pub const DESKTOP_USER: &str = "alice";
+
+/// The login screen pre-fills the only account and focuses the password:
+/// [`SELFHOST_PASSWORD`] (`j`, `o`, `s`) and Enter, as PS/2 scancodes.
+pub const LOGIN_KEYS: &[&str] = &["24 a4", "18 98", "1f 9f", "1c 9c"];
 
 /// The `VBoxManage` invocations that create the VM, in order: EFI, the
 /// serial port as a socket server, VMSVGA, a NAT virtio NIC, the disk on
@@ -184,11 +195,12 @@ pub fn create_commands(v: &VBox) -> Vec<Vec<String>> {
 
 /// The unattended install from the live medium's serial login. The VM has
 /// no IOMMU, hence `--ignore-doctor`; the desktop services stay on so the
-/// reboot shows the login screen.
+/// reboot shows the login screen, with [`DESKTOP_USER`] to log in.
 pub fn install_command() -> String {
     format!(
         "jos-install --non-interactive --ignore-doctor --disk ada0 --no-pci \
-         --root-password {SELFHOST_PASSWORD}"
+         --root-password {SELFHOST_PASSWORD} \
+         --user {DESKTOP_USER} --user-password {SELFHOST_PASSWORD}"
     )
 }
 
@@ -202,6 +214,11 @@ pub fn checks() -> Vec<(&'static str, String, u64)> {
             1,
         ),
         (
+            "the VMSVGA device has its KMS driver",
+            "kldstat -q -n jos_vmsvga && test -c /dev/dri/card0".to_string(),
+            1,
+        ),
+        (
             "the login screen is up",
             "pgrep -x jos-greet".to_string(),
             1,
@@ -212,6 +229,20 @@ pub fn checks() -> Vec<(&'static str, String, u64)> {
             1,
         ),
     ]
+}
+
+/// What is checked once the password is typed on the login screen: the
+/// panel only starts once the compositor runs. The session log tells why
+/// it did not.
+pub fn desktop_checks() -> Vec<(&'static str, String, u64)> {
+    vec![(
+        "COSMIC is up (its panel runs)",
+        "i=0; until pgrep -x cosmic-panel; do i=$((i+1)); [ $i -lt 60 ] || break; \
+         sleep 5; done; pgrep -x cosmic-panel || \
+         { tail -n 40 /var/run/user/*/jos-session.log; false; }"
+            .to_string(),
+        6,
+    )]
 }
 
 /// The VM as a [`Guest`]: gone once VirtualBox reports it powered off.
@@ -345,8 +376,13 @@ pub fn run_vbox(v: &VBox, runner: &dyn Runner, dry_run: bool) -> anyhow::Result<
         install_command()
     );
     let checks = checks();
+    let desktop = desktop_checks();
     for (what, cmd, minutes) in &checks {
         println!("   dom0: {what} (timeout {minutes} min)\n      {cmd}");
+    }
+    println!("   login screen: type the password of {DESKTOP_USER}");
+    for (what, cmd, minutes) in &desktop {
+        println!("   desktop: {what} (timeout {minutes} min)\n      {cmd}");
     }
     if dry_run {
         return Ok(());
@@ -356,7 +392,7 @@ pub fn run_vbox(v: &VBox, runner: &dyn Runner, dry_run: bool) -> anyhow::Result<
         drive_vbox(
             &mut con,
             &install_command(),
-            &checks,
+            [&checks, &desktop],
             &screen,
             BOOT_PATIENCE,
         )
@@ -368,7 +404,7 @@ pub fn run_vbox(v: &VBox, runner: &dyn Runner, dry_run: bool) -> anyhow::Result<
     }
     result?;
     println!(
-        "\nVirtualBox: installed, booted to the login screen and powered off ({})",
+        "\nVirtualBox: installed, logged in to COSMIC and powered off ({})",
         v.out.display()
     );
     Ok(())
@@ -413,15 +449,19 @@ impl Display for Screen<'_> {
     }
 }
 
+/// Steps for [`run_steps`]: what, command, minutes.
+type Steps<'a> = &'a [(&'a str, String, u64)];
+
 /// The console side of [`run_vbox`]: wait for the live medium (the
 /// installer on the screen, nothing on the serial port yet), quit the
 /// installer, log in on the serial getty that follows, install, reboot,
-/// `checks` in the installed dom0, power off (also after a failed check,
-/// so the VM's state stays consistent). `patience` bounds each boot.
+/// the dom0 checks, log in on the login screen, the desktop checks, power
+/// off (also after a failed check, so the VM's state stays consistent).
+/// `patience` bounds each boot.
 fn drive_vbox(
     con: &mut Console<'_>,
     install: &str,
-    checks: &[(&str, String, u64)],
+    [checks, desktop]: [Steps<'_>; 2],
     screen: &dyn Display,
     patience: Duration,
 ) -> anyhow::Result<()> {
@@ -452,12 +492,22 @@ fn drive_vbox(
     con.send_line("reboot")?;
     con.expect("login:", patience)?;
     root_shell(con, Some(SELFHOST_PASSWORD))?;
-    let result = run_steps(
-        con,
-        "vbox",
-        checks.iter().map(|(w, c, m)| (*w, c.as_str(), *m)),
-    );
+    let steps = |con: &mut Console<'_>, steps: Steps<'_>| {
+        run_steps(
+            con,
+            "vbox",
+            steps.iter().map(|(w, c, m)| (*w, c.as_str(), *m)),
+        )
+    };
+    let result = steps(con, checks);
     screen.screenshot("login-screen.png");
+    let result = result.and_then(|()| {
+        println!("\n==> vbox: logging in to COSMIC as {DESKTOP_USER}");
+        screen.press(LOGIN_KEYS)?;
+        let result = steps(con, desktop);
+        screen.screenshot("desktop.png");
+        result
+    });
     power_off(con, "vbox")?;
     result
 }
@@ -503,7 +553,11 @@ mod tests {
         assert!(flat[5].contains("--port 1 --device 0 --type dvddrive --medium /w/x.iso"));
         assert!(install_command().contains("--disk ada0"));
         assert!(!install_command().contains("--no-gui"));
-        assert!(checks().iter().all(|c| c.2 > 0));
+        assert!(install_command().ends_with("--user alice --user-password jos"));
+        assert!(checks().iter().chain(&desktop_checks()).all(|c| c.2 > 0));
+        // LOGIN_KEYS spells the password.
+        assert_eq!(SELFHOST_PASSWORD, "jos");
+        assert_eq!(LOGIN_KEYS.last(), Some(&"1c 9c"));
     }
 
     #[test]
@@ -550,12 +604,21 @@ mod tests {
     /// installer takes the screen.
     const BANNER: &str = "printf 'Consoles: EFI console\\n'";
 
-    /// A screen that remembers what was done to it; `deaf` makes its
-    /// keyboard fail.
+    /// A screen that remembers what was done to it; its keyboard fails
+    /// after `presses` presses (never when `None`).
     #[derive(Default)]
     struct FakeScreen {
         log: std::cell::RefCell<Vec<String>>,
-        deaf: bool,
+        presses: Option<usize>,
+    }
+
+    impl FakeScreen {
+        fn deaf_after(presses: usize) -> Self {
+            FakeScreen {
+                presses: Some(presses),
+                ..FakeScreen::default()
+            }
+        }
     }
 
     impl Display for FakeScreen {
@@ -563,10 +626,11 @@ mod tests {
             self.log.borrow_mut().push(file.to_string());
         }
         fn press(&self, keys: &[&str]) -> anyhow::Result<()> {
-            if self.deaf {
+            let mut log = self.log.borrow_mut();
+            if Some(log.iter().filter(|l| l.starts_with("press")).count()) == self.presses {
                 bail!("no keyboard");
             }
-            self.log.borrow_mut().push(format!("press {}", keys.len()));
+            log.push(format!("press {}", keys.len()));
             Ok(())
         }
     }
@@ -576,20 +640,54 @@ mod tests {
     fn dialogue_with_a_guest() {
         use crate::qemu::tests::{guest, DEAF, EVAL, LOGIN, POWEROFF, REBOOT};
         let checks = vec![("first", "true".to_string(), 1)];
+        let desktop = vec![("panel", "true".to_string(), 1)];
         let patience = Duration::from_secs(5);
+        let full = [REBOOT, POWEROFF, BANNER, LOGIN, EVAL];
         let screen = FakeScreen::default();
         drive_vbox(
-            &mut guest(&[REBOOT, POWEROFF, BANNER, LOGIN, EVAL]),
+            &mut guest(&full),
             "true",
-            &checks,
+            [&checks, &desktop],
             &screen,
             patience,
         )
         .unwrap();
         assert_eq!(
             *screen.log.borrow(),
-            ["installer.png", "press 4", "login-screen.png"]
+            [
+                "installer.png",
+                "press 4",
+                "login-screen.png",
+                "press 4",
+                "desktop.png"
+            ]
         );
+
+        // The desktop: a keyboard that stops working on the login screen,
+        // a session that does not come up. The VM is powered off anyway.
+        let screen = FakeScreen::deaf_after(1);
+        let err = drive_vbox(
+            &mut guest(&full),
+            "true",
+            [&checks, &desktop],
+            &screen,
+            patience,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "no keyboard");
+        assert_eq!(screen.log.borrow().last().unwrap(), "login-screen.png");
+        let screen = FakeScreen::default();
+        let no_panel = [("panel", "false".to_string(), 1)];
+        let err = drive_vbox(
+            &mut guest(&full),
+            "true",
+            [&checks, &no_panel],
+            &screen,
+            patience,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "vbox step failed: panel");
+        assert_eq!(screen.log.borrow().last().unwrap(), "desktop.png");
 
         // The installer not reacting to the keys in time (they are pressed
         // again every round), and a keyboard that does not work at all.
@@ -598,7 +696,7 @@ mod tests {
         let err = drive_vbox(
             &mut guest(&silent),
             "true",
-            &checks,
+            [&checks, &desktop],
             &screen,
             Duration::from_millis(500),
         )
@@ -614,12 +712,14 @@ mod tests {
             .filter(|l| *l == "press 4")
             .count();
         assert!(presses >= 2);
-        let deaf_screen = FakeScreen {
-            deaf: true,
-            ..FakeScreen::default()
-        };
-        let err =
-            drive_vbox(&mut guest(&silent), "true", &checks, &deaf_screen, patience).unwrap_err();
+        let err = drive_vbox(
+            &mut guest(&silent),
+            "true",
+            [&checks, &desktop],
+            &FakeScreen::deaf_after(0),
+            patience,
+        )
+        .unwrap_err();
         assert_eq!(err.to_string(), "no keyboard");
 
         let failing = [("second", "false".to_string(), 1)];
@@ -705,8 +805,14 @@ mod tests {
         ];
         for (name, parts, install, checks, want) in cases {
             let screen = FakeScreen::default();
-            let err =
-                drive_vbox(&mut guest(parts), install, checks, &screen, patience).unwrap_err();
+            let err = drive_vbox(
+                &mut guest(parts),
+                install,
+                [checks, &desktop],
+                &screen,
+                patience,
+            )
+            .unwrap_err();
             assert_eq!((name, err.to_string()), (name, want.to_string()));
         }
     }
@@ -859,6 +965,10 @@ mod tests {
             .iter()
             .any(|c| c.ends_with("keyboardputscancode 2a 0f 8f aa")));
         assert!(calls.iter().any(|c| c.ends_with("login-screen.png")));
+        assert!(calls
+            .iter()
+            .any(|c| c.ends_with("keyboardputscancode 24 a4")));
+        assert!(calls.iter().any(|c| c.ends_with("desktop.png")));
         assert!(
             calls
                 .iter()
