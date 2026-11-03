@@ -30,15 +30,18 @@ CSTD=	gnu23
 .include "${DRMKMOD}/linuxkpi_version.mk"
 .include "${DRMKMOD}/compiler_flags.mk"
 
-CFLAGS+= -I${DRMKMOD}/linuxkpi/gplv2/include
-CFLAGS+= -I${DRMKMOD}/linuxkpi/bsd/include
-CFLAGS+= -I${SYSDIR}/compat/linuxkpi/common/include
-CFLAGS+= -I${SYSDIR}/compat/linuxkpi/dummy/include
-CFLAGS+= -I${DRMKMOD}/include
-CFLAGS+= -I${DRMKMOD}/include/drm
-CFLAGS+= -I${DRMKMOD}/include/uapi
+# System headers (-isystem), as `cargo xtask lint` sees them: their own
+# warnings (linuxkpi's iosys-map.h does arithmetic on void pointers) are
+# not ours, while every warning in jos_vmsvga.c stays an error.
+CFLAGS+= -isystem ${DRMKMOD}/linuxkpi/gplv2/include
+CFLAGS+= -isystem ${DRMKMOD}/linuxkpi/bsd/include
+CFLAGS+= -isystem ${SYSDIR}/compat/linuxkpi/common/include
+CFLAGS+= -isystem ${SYSDIR}/compat/linuxkpi/dummy/include
+CFLAGS+= -isystem ${DRMKMOD}/include
+CFLAGS+= -isystem ${DRMKMOD}/include/drm
+CFLAGS+= -isystem ${DRMKMOD}/include/uapi
 # <drm/drm_os_freebsd.h> lives with the drm sources.
-CFLAGS+= -I${DRMKMOD}/drivers/gpu
+CFLAGS+= -isystem ${DRMKMOD}/drivers/gpu
 
 CFLAGS+= '-DKBUILD_MODNAME="${KMOD}"'
 CFLAGS+= '-DLINUXKPI_PARAM_PREFIX=jos_vmsvga_' -DDRM_SYSCTL_PARAM_PREFIX=_${KMOD}

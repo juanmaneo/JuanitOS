@@ -159,14 +159,18 @@ static struct jos_vmsvga_bo* to_jos_vmsvga_bo(struct drm_gem_object* obj) {
  * Registers and FIFO.
  */
 
+/*
+ * linuxkpi's <asm-generic/io.h> turns outl() into Linux's: value first, then
+ * port (FreeBSD's <machine/cpufunc.h> has the port first).
+ */
 static u32 jos_vmsvga_rd(const struct jos_vmsvga* sc, u32 reg) {
-  outl(sc->io + SVGA_INDEX_PORT, reg);
+  outl(reg, sc->io + SVGA_INDEX_PORT);
   return inl(sc->io + SVGA_VALUE_PORT);
 }
 
 static void jos_vmsvga_wr(const struct jos_vmsvga* sc, u32 reg, u32 value) {
-  outl(sc->io + SVGA_INDEX_PORT, reg);
-  outl(sc->io + SVGA_VALUE_PORT, value);
+  outl(reg, sc->io + SVGA_INDEX_PORT);
+  outl(value, sc->io + SVGA_VALUE_PORT);
 }
 
 static u32 jos_vmsvga_fifo_rd(const struct jos_vmsvga* sc, u32 index) {
@@ -731,8 +735,47 @@ static const struct drm_encoder_funcs jos_vmsvga_encoder_funcs = {
     .destroy = drm_encoder_cleanup,
 };
 
+static const struct drm_framebuffer_funcs jos_vmsvga_fb_funcs = {
+    .destroy = drm_gem_fb_destroy,
+    .create_handle = drm_gem_fb_create_handle,
+    .dirty = drm_atomic_helper_dirtyfb,
+};
+
+/*
+ * Linux's drm_gem_fb_create_with_dirty(), which drm-kmod declares but its
+ * drm.ko does not have (its GEM framebuffer helper only brings
+ * drm_gem_fb_init_with_funcs()). That helper also skips Linux's check that
+ * the buffer object holds the framebuffer, which jos_vmsvga_blit() relies
+ * on: done here. drm_internal_framebuffer_create() has already checked the
+ * format (XRGB8888, one plane) and the pitch.
+ */
+static struct drm_framebuffer*
+jos_vmsvga_fb_create(struct drm_device* dev, struct drm_file* file,
+                     const struct drm_mode_fb_cmd2* mode_cmd) {
+  struct drm_framebuffer* fb;
+  int ret;
+
+  fb = kzalloc(sizeof(*fb), GFP_KERNEL);
+  if (NULL == fb) {
+    return ERR_PTR(-ENOMEM);
+  }
+  ret =
+      drm_gem_fb_init_with_funcs(dev, fb, file, mode_cmd, &jos_vmsvga_fb_funcs);
+  if (0 != ret) {
+    kfree(fb);
+    return ERR_PTR(ret);
+  }
+  if ((u64)mode_cmd->offsets[0] +
+          ((u64)mode_cmd->pitches[0] * mode_cmd->height) >
+      fb->obj[0]->size) {
+    drm_framebuffer_put(fb);
+    return ERR_PTR(-EINVAL);
+  }
+  return fb;
+}
+
 static const struct drm_mode_config_funcs jos_vmsvga_mode_config_funcs = {
-    .fb_create = drm_gem_fb_create_with_dirty,
+    .fb_create = jos_vmsvga_fb_create,
     .atomic_check = drm_atomic_helper_check,
     .atomic_commit = drm_atomic_helper_commit,
 };

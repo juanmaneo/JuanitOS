@@ -13,9 +13,11 @@ Original code (BSD-3-Clause), not a port of Linux's vmwgfx; the register
 and FIFO constants in `svga_reg.h` follow VMware's MIT-licensed
 `svga_reg.h` (THIRD_PARTY.md).
 
-Status: compiles against drm-kmod `drm_v6.12.110_1` and passes
-`cargo xtask lint`; not yet loaded in a VM, not yet built or shipped by
-`jos-release`.
+Status: builds against drm-kmod `drm_v6.12.110_1` with the base system's
+clang and passes `cargo xtask lint`. Loaded in a FreeBSD 15.1 VM under
+QEMU (`-vga vmware`), it attaches as `drmn0` and takes over the console
+from efifb (1920x1080, 32 bpp), and it unloads cleanly. It is not yet
+built or shipped by `jos-release`.
 
 By hand, on FreeBSD, against the drm-kmod tag in `[drm_kmod]` of
 `release/juanitos.toml` (the one the dom0's drm-kmod package is built
