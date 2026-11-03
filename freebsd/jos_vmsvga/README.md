@@ -16,15 +16,16 @@ and FIFO constants in `svga_reg.h` follow VMware's MIT-licensed
 Status: builds against drm-kmod `drm_v6.12.110_1` with the base system's
 clang and passes `cargo xtask lint`. Loaded in a FreeBSD 15.1 VM under
 QEMU (`-vga vmware`), it attaches as `drmn0` and takes over the console
-from efifb (1920x1080, 32 bpp), and it unloads cleanly. A COSMIC session
-on it has not been tried yet.
+from efifb (1920x1080, 32 bpp), and it unloads cleanly.
 
 `jos-release` builds it against the drm-kmod tag in `[drm_kmod]` of
 `release/juanitos.toml` (the one the dom0's drm-kmod package is built
 from) and ships it as `/boot/modules/jos_vmsvga.ko`; the installer sets
 `jos_kms_module="jos_vmsvga"` when it finds the device (PCI
-`15ad:0405`), and `jos-session` then tells Mesa to use `kms_swrast`.
-By hand, on FreeBSD:
+`15ad:0405`), and `jos-session` then sets `GBM_ALWAYS_SOFTWARE=1`: the
+device has no render node, so Mesa's GBM would otherwise refuse it.
+With that, a full COSMIC session (compositor, panel, dock, launcher)
+runs on it in VirtualBox. By hand, on FreeBSD:
 
 ```sh
 make SYSDIR=/usr/src/sys DRMKMOD=/path/to/drm-kmod-drm_v6.12.110_1

@@ -187,7 +187,7 @@ to hang: the greeter shows "COSMIC exited with status 1 (log: …)" a few
 seconds after the password (checked in QEMU with the stage-1 ISO); after a session the greeter redraws and says the user logged out; root
 and unknown users are refused (`jos-greet try-login --user NAME --
 COMMAND` exercises PAM and the session setup without the screen). The
-COSMIC session itself still needs a KMS device, see below.
+The COSMIC session itself needs a KMS device, see below.
 
 `jos-greet screenshots DIR` renders the screen on any host;
 `jos-greet run --dry-run` on a FreeBSD console accepts any non-empty
@@ -203,10 +203,14 @@ acquire session". Running the compositor needs a seat and a KMS device.
 `drm-kmod` has no driver for any virtual GPU (virtio-gpu included), so
 JuanitOS has its own for the VMware SVGA II device that VirtualBox
 (VMSVGA) and QEMU (`-vga vmware`) emulate, `freebsd/jos_vmsvga`: a plain
-frame buffer KMS driver, with Mesa rendering through `kms_swrast`. It
-attaches and drives the console in a FreeBSD VM; the first COSMIC
-session, on it or on real hardware (amd64 with an Intel or AMD GPU that
-`drm-kmod` drives), is the next thing to try.
+frame buffer KMS driver without a render node, so `jos-session` sets
+`GBM_ALWAYS_SOFTWARE=1` and Mesa renders in software. In VirtualBox
+(VMSVGA, `jos-release vbox`) logging in on `jos-greet` brings up the whole
+COSMIC session: `cosmic-comp`, the panel and dock, the launcher, the app
+library, the workspaces view, notifications and the settings daemon.
+PipeWire is not running (the settings daemon retries it), and neither is
+a COSMIC session on real hardware yet (amd64 with an Intel or AMD GPU that
+`drm-kmod` drives).
 
 On the host COSMIC is the *management* UI only: the long-term plan is a
 `jos`-backed applet (qube list, start/stop, colour labels) and

@@ -434,11 +434,12 @@ session, panel, applets, launcher, settings, terminal, files, editor and
 the rest install into the dom0 root from that repository, which the
 installed system keeps; `jos-greet`, a Rust login screen on the same
 framebuffer stack as the splash and the installer, authenticates with
-PAM on `ttyv8` and starts the session there, and the installer picks the `drm-kmod` driver for the GPU it finds
-(`docs/relibc-cosmic.md`). The compositor starts on FreeBSD up to the
-point where it needs a seat and a KMS device; neither QEMU nor bhyve
-gives a FreeBSD guest one, so the first COSMIC session has to be on real
-hardware.
+PAM on `ttyv8` and starts the session there, and the installer picks the KMS driver for the GPU it finds
+(`docs/relibc-cosmic.md`). `drm-kmod` has none for virtual GPUs, so
+`freebsd/jos_vmsvga` drives the VMware SVGA II device of VirtualBox
+(VMSVGA) and QEMU: `jos-release vbox` installs the ISO, logs in on the
+login screen and checks that the COSMIC panel comes up, rendered in
+software.
 
 The Redox display problem was traced with an instrumented bhyve: Redox's
 `pcid` sizes PCI BARs through `pci_types` without disabling memory
@@ -453,9 +454,8 @@ hardware runs): passthrough on real hardware (the nested run above proves
 the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
 Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
 but has not been booted), a display for Redox qubes (until `pci_types`
-is fixed upstream), a COSMIC session (the packages install, and
-`freebsd/jos_vmsvga` gives VirtualBox and QEMU a KMS device; the desktop
-has not been seen running yet), and `jos setup` on
+is fixed upstream), a COSMIC session on real hardware (it runs in
+VirtualBox on `freebsd/jos_vmsvga`, rendered in software), and `jos setup` on
 real hardware (the nested run above covers it without a GPU).
 
 ## License

@@ -597,9 +597,7 @@ mod tests {
         assert!(session
             .1
             .contains(&format!("kldstat -q -n {VMSVGA_MODULE}; then\n")));
-        assert!(session
-            .1
-            .contains("MESA_LOADER_DRIVER_OVERRIDE:=kms_swrast"));
+        assert!(session.1.contains("GBM_ALWAYS_SOFTWARE:=1"));
         assert!(
             session.1.trim_end().ends_with("exec \"$@\""),
             "jos-greet passes the session command as arguments"

@@ -25,9 +25,11 @@ export XDG_SESSION_TYPE=wayland
 : "${XDG_CURRENT_DESKTOP:=COSMIC}"
 export XDG_CURRENT_DESKTOP
 # jos_vmsvga (VirtualBox's VMSVGA, QEMU's vmware display) is a KMS driver
-# without 3D: Mesa has no driver of that name and renders in software.
+# without 3D and without a render node: Mesa's GBM refuses it ("failed to
+# get compatible render device") unless told to render in software
+# (kms_swrast on the dumb buffers).
 if /sbin/kldstat -q -n jos_vmsvga; then
-	: "${MESA_LOADER_DRIVER_OVERRIDE:=kms_swrast}"
-	export MESA_LOADER_DRIVER_OVERRIDE
+	: "${GBM_ALWAYS_SOFTWARE:=1}"
+	export GBM_ALWAYS_SOFTWARE
 fi
 exec "$@"
