@@ -233,12 +233,13 @@ pub fn checks() -> Vec<(&'static str, String, u64)> {
 
 /// What is checked once the password is typed on the login screen: the
 /// panel only starts once the compositor runs. The session log tells why
-/// it did not.
+/// it did not. The panel, dock and applets draw in software some seconds
+/// after their processes start, so the screenshot waits for them.
 pub fn desktop_checks() -> Vec<(&'static str, String, u64)> {
     vec![(
         "COSMIC is up (its panel runs)",
         "i=0; until pgrep -x cosmic-panel; do i=$((i+1)); [ $i -lt 60 ] || break; \
-         sleep 5; done; pgrep -x cosmic-panel || \
+         sleep 5; done; pgrep -x cosmic-panel && sleep 30 || \
          { tail -n 40 /var/run/user/*/jos-session.log; false; }"
             .to_string(),
         6,

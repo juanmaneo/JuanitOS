@@ -207,7 +207,11 @@ frame buffer KMS driver without a render node, so `jos-session` sets
 `GBM_ALWAYS_SOFTWARE=1` and Mesa renders in software. In VirtualBox
 (VMSVGA, `jos-release vbox`) logging in on `jos-greet` brings up the whole
 COSMIC session: `cosmic-comp`, the panel and dock, the launcher, the app
-library, the workspaces view, notifications and the settings daemon.
+library, the workspaces view, notifications and the settings daemon
+(`desktop.png` of that run):
+
+![COSMIC on jos_vmsvga in VirtualBox](images/cosmic-vmsvga.png)
+
 PipeWire is not running (the settings daemon retries it), and neither is
 a COSMIC session on real hardware yet (amd64 with an Intel or AMD GPU that
 `drm-kmod` drives).
