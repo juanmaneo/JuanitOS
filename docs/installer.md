@@ -359,11 +359,12 @@ The VM (`jos-vbox`, 4 CPUs, 6 GB, a 20 GB VDI) is created under `<work>/vbox`
 and unregistered with its disk afterwards unless `--keep`; `installer.png`
 and `login-screen.png` stay as evidence of the graphical path, next to the
 serial `console.log`. No nested virtualization is enabled, so the host
-checks inside report no VT-x (`--ignore-doctor`). COSMIC cannot be tried
-this way: FreeBSD has no KMS driver for any of VirtualBox's (or QEMU's)
-virtual GPUs, so `cosmic-comp` exits at once; a desktop session needs a
-real GPU, which is what the `gpu` qube and the dom0's own `i915`/`amdgpu`
-are about.
+checks inside report no VT-x (`--ignore-doctor`). drm-kmod has no driver
+for VirtualBox's (or QEMU's) virtual GPUs; JuanitOS ships its own for
+VMSVGA, `freebsd/jos_vmsvga`, which the installer selects
+(`jos_kms_module="jos_vmsvga"`) so that `cosmic-comp` finds a KMS device
+and renders with Mesa's software rasteriser. It drives the device in a
+FreeBSD VM; a COSMIC session on it has not been tried yet.
 
 ## Building on a Linux box
 

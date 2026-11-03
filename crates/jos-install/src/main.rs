@@ -298,7 +298,7 @@ fn gpu_module_from(devices: &[PciDevice]) -> Option<String> {
     devices
         .iter()
         .filter(|d| d.is_gpu())
-        .find_map(|d| juanitos_core::dom0::gpu_kernel_module(d.vendor))
+        .find_map(|d| juanitos_core::dom0::gpu_kernel_module(d.vendor, d.device))
         .map(str::to_string)
 }
 

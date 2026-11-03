@@ -24,4 +24,10 @@ fi
 export XDG_SESSION_TYPE=wayland
 : "${XDG_CURRENT_DESKTOP:=COSMIC}"
 export XDG_CURRENT_DESKTOP
+# jos_vmsvga (VirtualBox's VMSVGA, QEMU's vmware display) is a KMS driver
+# without 3D: Mesa has no driver of that name and renders in software.
+if /sbin/kldstat -q -n jos_vmsvga; then
+	: "${MESA_LOADER_DRIVER_OVERRIDE:=kms_swrast}"
+	export MESA_LOADER_DRIVER_OVERRIDE
+fi
 exec "$@"

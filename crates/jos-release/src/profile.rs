@@ -18,7 +18,13 @@ pub struct Profile {
     pub bios: bool,
     pub packages: Packages,
     pub source: Source,
-    pub grub: Grub,
+    /// The GRUB release whose headers build `freebsd/grub/jos_efi.mod`
+    /// (the module Ventoy's GRUB loads for its direct kernel boot); only
+    /// the tarball's `include/` is used.
+    pub grub: Tarball,
+    /// The drm-kmod tag the dom0's `drm-kmod` package is built from, whose
+    /// LinuxKPI and DRM headers build `freebsd/jos_vmsvga`.
+    pub drm_kmod: Tarball,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,13 +50,10 @@ pub struct Source {
     pub vendor: bool,
 }
 
-/// The GRUB release whose headers build `freebsd/grub/jos_efi.mod` (the
-/// module Ventoy's GRUB loads for its direct kernel boot).
+/// A source tarball the build fetches and checks against its sha256.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Grub {
+pub struct Tarball {
     pub version: String,
-    /// The source tarball; only its `include/` directory is used.
     pub url: String,
     pub sha256: String,
 }
@@ -67,7 +70,17 @@ impl Default for Profile {
             bios: true,
             packages: Packages::default(),
             source: Source::default(),
-            grub: Grub::default(),
+            grub: Tarball {
+                version: "2.04".into(),
+                url: "https://ftp.gnu.org/gnu/grub/grub-2.04.tar.xz".into(),
+                sha256: "e5292496995ad42dabe843a0192cf2a2c502e7ffcc7479398232b10a472df77d".into(),
+            },
+            drm_kmod: Tarball {
+                version: "drm_v6.12.110_1".into(),
+                url: "https://github.com/freebsd/drm-kmod/archive/refs/tags/drm_v6.12.110_1.tar.gz"
+                    .into(),
+                sha256: "9c99c05c3269271ca6ea19ccdca53b27517b1d6b679065fc5c3dfc2682ddfaef".into(),
+            },
         }
     }
 }
@@ -93,25 +106,16 @@ impl Default for Source {
     }
 }
 
-impl Default for Grub {
-    fn default() -> Self {
-        Grub {
-            version: "2.04".into(),
-            url: "https://ftp.gnu.org/gnu/grub/grub-2.04.tar.xz".into(),
-            sha256: "e5292496995ad42dabe843a0192cf2a2c502e7ffcc7479398232b10a472df77d".into(),
-        }
-    }
-}
-
-impl Grub {
+impl Tarball {
     /// The tarball's file name (`grub-2.04.tar.xz`).
     pub fn tarball(&self) -> &str {
         self.url.rsplit('/').next().unwrap_or(&self.url)
     }
 
-    /// The directory the tarball unpacks to (`grub-2.04`).
-    pub fn source_dir(&self) -> String {
-        format!("grub-{}", self.version)
+    /// The directory the tarball of `project` unpacks to: `grub-2.04`,
+    /// `drm-kmod-drm_v6.12.110_1` (GitHub's archives are named so).
+    pub fn source_dir(&self, project: &str) -> String {
+        format!("{project}-{}", self.version)
     }
 }
 
@@ -187,21 +191,28 @@ mod tests {
             p.packages.local_repo.as_deref(),
             Some("target/work/cosmic/repo")
         );
-        assert_eq!(p.grub, Grub::default());
+        // The defaults are the pins the profile ships.
+        let d = Profile::default();
+        assert_eq!(p.grub, d.grub);
+        assert_eq!(p.drm_kmod, d.drm_kmod);
     }
 
     #[test]
-    fn grub_names_follow_the_url_and_version() {
-        let g = Grub::default();
-        assert_eq!(g.tarball(), "grub-2.04.tar.xz");
-        assert_eq!(g.source_dir(), "grub-2.04");
-        let g = Grub {
+    fn tarball_names_follow_the_url_and_version() {
+        let p = Profile::default();
+        assert_eq!(p.grub.tarball(), "grub-2.04.tar.xz");
+        assert_eq!(p.grub.source_dir("grub"), "grub-2.04");
+        assert_eq!(p.drm_kmod.tarball(), "drm_v6.12.110_1.tar.gz");
+        assert_eq!(
+            p.drm_kmod.source_dir("drm-kmod"),
+            "drm-kmod-drm_v6.12.110_1"
+        );
+        let g = Tarball {
             version: "2.12".into(),
             url: "grub-2.12.tar.gz".into(),
             sha256: String::new(),
         };
         assert_eq!(g.tarball(), "grub-2.12.tar.gz");
-        assert_eq!(g.source_dir(), "grub-2.12");
     }
 
     #[test]
@@ -248,5 +259,8 @@ mod tests {
         assert_eq!(p.packages.repo, "quarterly");
         assert!(p.packages.local_repo.is_none());
         assert_eq!(p.grub.version, "2.04");
+        // A pin is all or nothing.
+        let err = toml::from_str::<Profile>("[drm_kmod]\nversion = \"x\"\n").unwrap_err();
+        assert!(err.to_string().contains("missing field `url`"), "{err}");
     }
 }

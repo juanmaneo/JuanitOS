@@ -5,8 +5,9 @@
 # REQUIRE: kldxref
 # BEFORE: jos-splash kld
 #
-# Loads the dom0's KMS driver (graphics/drm-kmod: amdgpu or i915kms, from
-# the installer's look at pciconf) before the boot splash maps the
+# Loads the dom0's KMS driver (graphics/drm-kmod's amdgpu or i915kms, or
+# jos_vmsvga in VirtualBox and QEMU; from the installer's look at pciconf)
+# before the boot splash maps the
 # framebuffer: the driver replaces vt(4)'s efifb and whoever mapped the old
 # one draws into nothing. drm-kmod wants its modules loaded from rc(8)
 # rather than the loader, which is what kld_list is for, but rc.d/kld

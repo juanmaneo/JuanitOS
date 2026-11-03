@@ -16,7 +16,7 @@ use juanitos_core::fsops::FsOps;
 use juanitos_core::release::{parse_freebsd_manifest, sha256_file, DistManifest, ReleaseInfo};
 use juanitos_core::sys::Runner;
 
-use crate::profile::Profile;
+use crate::profile::{Profile, Tarball};
 use crate::ventoy;
 
 /// FreeBSD source set, fetched only to build kernel modules.
@@ -25,6 +25,15 @@ pub const SRC_SET: &str = "src.txz";
 pub const VENTOY_MODULE: &str = "geom_ventoy";
 /// `freebsd/grub`: the GRUB module for Ventoy's direct kernel boot.
 pub const GRUB_DIR: &str = "grub";
+/// What `freebsd/jos_vmsvga` needs of drm-kmod's tarball.
+pub const DRM_KMOD_MEMBERS: &[&str] = &[
+    "compiler_flags.mk",
+    "drivers/gpu/drm/drm_os_freebsd.h",
+    "include",
+    "kconfig.mk",
+    "linuxkpi",
+    "linuxkpi_version.mk",
+];
 /// Where the dom0 keeps its own sources (stage 2 builds from here).
 pub const INSTALLED_SOURCE: &str = "/usr/local/src/juanitos";
 
@@ -544,6 +553,13 @@ impl<'a> Builder<'a> {
                  cannot mount its root stays on the splash"
             );
         }
+        if let Err(e) = self.vmsvga_module() {
+            println!(
+                "   warning: {}.ko not built ({e:#}); no desktop on VirtualBox's \
+                 VMSVGA or QEMU's vmware display",
+                dom0::VMSVGA_MODULE
+            );
+        }
 
         // Base has no /etc/fstab; the installer and the ISO step write
         // their own, but an empty one keeps rc quiet in between.
@@ -860,35 +876,60 @@ impl Builder<'_> {
         Ok(sys)
     }
 
-    /// GRUB's headers for building its module: the release's tarball
-    /// (`[grub]` in the profile), fetched and sha256-checked, with its
-    /// `include/` extracted under the work directory.
-    fn grub_sources(&self) -> anyhow::Result<PathBuf> {
-        let grub = &self.profile.grub;
+    /// `members` of the source tarball `t` of `project`, fetched into the
+    /// dist directory and sha256-checked, extracted under the work
+    /// directory unless `probe` (one of the extracted files) is there.
+    fn tarball_sources(
+        &self,
+        t: &Tarball,
+        project: &str,
+        members: &[&str],
+        probe: &str,
+    ) -> anyhow::Result<PathBuf> {
         let dir = self.dist_dir();
-        let tarball = dir.join(grub.tarball());
+        let tarball = dir.join(t.tarball());
         if !tarball.is_file() {
             self.fs.mkdir_p(&dir)?;
-            self.download(&grub.url, &tarball)?;
+            self.download(&t.url, &tarball)?;
         }
         if !self.fs.dry_run {
-            DistManifest::verify_sha256(&tarball, &grub.sha256)?;
+            DistManifest::verify_sha256(&tarball, &t.sha256)?;
         }
-        let src = self.work.join(grub.source_dir());
-        if !src.join("include/grub/dl.h").is_file() {
-            let include = format!("{}/include", grub.source_dir());
-            self.runner.run_checked(
-                "tar",
-                &[
-                    "-xf",
-                    &Self::s(&tarball),
-                    "-C",
-                    &Self::s(&self.work),
-                    &include,
-                ],
-            )?;
+        let name = t.source_dir(project);
+        let src = self.work.join(&name);
+        if !src.join(probe).is_file() {
+            let mut args = vec![
+                "-xf".to_string(),
+                Self::s(&tarball),
+                "-C".to_string(),
+                Self::s(&self.work),
+            ];
+            args.extend(members.iter().map(|m| format!("{name}/{m}")));
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.runner.run_checked("tar", &args)?;
         }
         Ok(src)
+    }
+
+    /// GRUB's headers for building its module (`[grub]` in the profile).
+    fn grub_sources(&self) -> anyhow::Result<PathBuf> {
+        self.tarball_sources(
+            &self.profile.grub,
+            "grub",
+            &["include"],
+            "include/grub/dl.h",
+        )
+    }
+
+    /// drm-kmod's LinuxKPI and DRM headers and the make fragments
+    /// `freebsd/jos_vmsvga/Makefile` includes (`[drm_kmod]` in the profile).
+    fn drm_kmod_sources(&self) -> anyhow::Result<PathBuf> {
+        self.tarball_sources(
+            &self.profile.drm_kmod,
+            "drm-kmod",
+            DRM_KMOD_MEMBERS,
+            "compiler_flags.mk",
+        )
     }
 
     /// The source directory `freebsd/<name>` when it is in the tree (a
@@ -928,16 +969,16 @@ impl Builder<'_> {
         let Some(src) = self.vendored(name) else {
             return Ok(None);
         };
+        self.make_kmod(&src, name, vars).map(Some)
+    }
+
+    /// [`Self::build_kmod`] of the source directory `src`.
+    fn make_kmod(&self, src: &Path, name: &str, vars: &[&str]) -> anyhow::Result<Vec<u8>> {
         self.step(&format!("Building {name}.ko"));
         let sys = format!("SYSDIR={}", Self::s(&self.kernel_sources()?));
         let mut all = vec![sys.as_str()];
         all.extend(vars);
-        Ok(Some(self.make_copy(
-            &src,
-            name,
-            &all,
-            &format!("{name}.ko"),
-        )?))
+        self.make_copy(src, name, &all, &format!("{name}.ko"))
     }
 
     /// Install a module into the root's `dir` and refresh its
@@ -1027,6 +1068,20 @@ impl Builder<'_> {
         self.fs
             .write(&self.rootfs().join(path.trim_start_matches('/')), &content)?;
         Ok(())
+    }
+
+    /// `jos_vmsvga.ko` (see `freebsd/jos_vmsvga`), the KMS driver of the
+    /// VMware SVGA II device VirtualBox and QEMU emulate, in the dom0's
+    /// `/boot/modules`. The installer names it in `jos_kms_module` when it
+    /// finds the device, as it names `amdgpu` or `i915kms`.
+    fn vmsvga_module(&self) -> anyhow::Result<()> {
+        let name = dom0::VMSVGA_MODULE;
+        let Some(src) = self.vendored(name) else {
+            return Ok(());
+        };
+        let drm = format!("DRMKMOD={}", Self::s(&self.drm_kmod_sources()?));
+        let bytes = self.make_kmod(&src, name, &[&drm])?;
+        self.install_kmod("boot/modules", name, &bytes)
     }
 
     /// Make the ISO bootable when written to a USB stick, as FreeBSD's
@@ -1934,6 +1989,74 @@ mod tests {
     }
 
     #[test]
+    fn the_dom0_ships_the_vmsvga_driver_when_it_builds() {
+        let s = Scratch::new("vmsvga");
+        let mut profile = Profile {
+            source: Source {
+                include: false,
+                vendor: false,
+            },
+            ..Profile::default()
+        };
+        for bin in dom0::BINARIES {
+            s.put(&format!("bins/{bin}"), b"elf");
+        }
+        s.put("repo/freebsd/jos_vmsvga/Makefile", b"KMOD=jos_vmsvga\n");
+        s.put("root/usr/src/sys/conf/kmod.mk", b"");
+        // `make` is mocked: the module it would build.
+        s.put("repo/freebsd/jos_vmsvga/jos_vmsvga.ko", b"\x7fELF");
+        let tarball = pinned(&s, &mut profile.drm_kmod);
+        let work = s.0.join("work");
+        let module = work.join("rootfs/boot/modules/jos_vmsvga.ko");
+        let install = |m: &MockRunner, profile: &Profile| {
+            let _ = std::fs::remove_dir_all(work.join("rootfs"));
+            real_builder(m, profile, &s.0).install_juanitos().unwrap();
+        };
+
+        let m = MockRunner::new();
+        install(&m, &profile);
+        assert_eq!(std::fs::read(&module).unwrap(), b"\x7fELF");
+        let top = "drm-kmod-drm_v6.12.110_1";
+        let members: Vec<String> = DRM_KMOD_MEMBERS
+            .iter()
+            .map(|m| format!("{top}/{m}"))
+            .collect();
+        let calls = m.calls();
+        assert!(
+            calls.contains(&format!(
+                "tar -xf {} -C {} {}",
+                unix(&tarball),
+                unix(&work),
+                members.join(" ")
+            )),
+            "{calls:?}"
+        );
+        assert!(calls.contains(&format!(
+            "make -C {} SYSDIR={} DRMKMOD={}",
+            unix(&work.join("jos_vmsvga")),
+            unix(&s.0.join("root/usr/src/sys")),
+            unix(&work.join(top))
+        )));
+        assert!(calls.contains(&format!(
+            "kldxref {}",
+            unix(&work.join("rootfs/boot/modules"))
+        )));
+
+        // A failed build, or a tarball that is not the pinned one, costs
+        // the driver and not the dom0.
+        install(
+            &MockRunner::new().respond("make", &[], CmdOutput::failed(2, "cc: error")),
+            &profile,
+        );
+        assert!(!module.exists());
+        std::fs::write(&tarball, b"tampered").unwrap();
+        let m = MockRunner::new();
+        install(&m, &profile);
+        assert!(!module.exists());
+        assert!(!m.calls().iter().any(|c| c.starts_with("make ")));
+    }
+
+    #[test]
     fn source_tree_and_vendoring_follow_the_profile() {
         let run = |include: bool, vendor: bool| {
             let profile = Profile {
@@ -2146,15 +2269,18 @@ mod tests {
         assert!(!conf.contains("geom_ventoy"), "{conf}");
     }
 
+    /// The source tarball `t` under `work/dist`, with `t` naming its
+    /// checksum.
+    fn pinned(s: &Scratch, t: &mut Tarball) -> PathBuf {
+        let tarball = s.put(&format!("work/dist/{}", t.tarball()), b"sources");
+        t.sha256 = sha256_file(&tarball).unwrap();
+        tarball
+    }
+
     /// GRUB's tarball under `work/dist`, with the profile naming its
     /// checksum.
     fn grub_tarball(s: &Scratch, profile: &mut Profile) -> PathBuf {
-        let tarball = s.put(
-            &format!("work/dist/{}", profile.grub.tarball()),
-            b"grub sources",
-        );
-        profile.grub.sha256 = sha256_file(&tarball).unwrap();
-        tarball
+        pinned(s, &mut profile.grub)
     }
 
     #[test]
@@ -2439,7 +2565,12 @@ mod tests {
     #[test]
     fn every_failing_command_stops_the_build_or_is_best_effort() {
         let s = Scratch::new("walk");
-        for name in [VENTOY_MODULE, dom0::BOOTWATCH_MODULE, GRUB_DIR] {
+        for name in [
+            VENTOY_MODULE,
+            dom0::BOOTWATCH_MODULE,
+            dom0::VMSVGA_MODULE,
+            GRUB_DIR,
+        ] {
             s.put(&format!("repo/freebsd/{name}/Makefile"), b"");
         }
         let profile = Profile::default();

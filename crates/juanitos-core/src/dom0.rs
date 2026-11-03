@@ -91,17 +91,23 @@ pub fn freebsd_repo_conf(branch: &str) -> String {
     )
 }
 
-/// The kernel module `drm-kmod` provides for a GPU vendor, loaded at boot
-/// so the compositor finds a KMS device. NVIDIA has no KMS driver in
-/// `drm-kmod` (and in JuanitOS the NVIDIA card is passed through to the
-/// `gpu` qube anyway).
-pub fn gpu_kernel_module(vendor: u16) -> Option<&'static str> {
-    match vendor {
-        0x1002 => Some("amdgpu"),
-        0x8086 => Some("i915kms"),
+/// The KMS driver for a display device (PCI vendor and device ID), loaded
+/// at boot so the compositor finds a KMS device: `drm-kmod`'s for AMD and
+/// Intel, [`VMSVGA_MODULE`] for the VMware SVGA II device of VirtualBox
+/// and QEMU. NVIDIA has no KMS driver in `drm-kmod` (and in JuanitOS the
+/// NVIDIA card is passed through to the `gpu` qube anyway).
+pub fn gpu_kernel_module(vendor: u16, device: u16) -> Option<&'static str> {
+    match (vendor, device) {
+        (0x1002, _) => Some("amdgpu"),
+        (0x8086, _) => Some("i915kms"),
+        (0x15ad, 0x0405) => Some(VMSVGA_MODULE),
         _ => None,
     }
 }
+
+/// Built from `freebsd/jos_vmsvga` against drm-kmod by `jos-release` and
+/// installed in `/boot/modules`.
+pub const VMSVGA_MODULE: &str = "jos_vmsvga";
 
 /// The login screen, `jos-greet`, runs on this virtual terminal (1-based).
 /// VT 9 is `ttyv8`, whose line in FreeBSD's stock `/etc/ttys` is `off`
@@ -562,14 +568,23 @@ mod tests {
 
     #[test]
     fn gpu_modules_follow_drm_kmod() {
-        assert_eq!(gpu_kernel_module(0x1002), Some("amdgpu"));
-        assert_eq!(gpu_kernel_module(0x8086), Some("i915kms"));
+        assert_eq!(gpu_kernel_module(0x1002, 0x73bf), Some("amdgpu"));
+        assert_eq!(gpu_kernel_module(0x8086, 0x7d55), Some("i915kms"));
+        assert_eq!(gpu_kernel_module(0x15ad, 0x0405), Some("jos_vmsvga"));
         assert_eq!(
-            gpu_kernel_module(0x10de),
+            gpu_kernel_module(0x15ad, 0x0406),
+            None,
+            "SVGA 3 is not the device jos_vmsvga drives"
+        );
+        assert_eq!(
+            gpu_kernel_module(0x10de, 0x2684),
             None,
             "NVIDIA goes to the gpu qube"
         );
-        assert_eq!(gpu_kernel_module(0x1234), None);
+        assert_eq!(gpu_kernel_module(0x1234, 0x1111), None);
+        let src = include_str!("../../../freebsd/jos_vmsvga/svga_reg.h");
+        assert!(src.contains("#define SVGA_PCI_VENDOR 0x15ad"), "{src}");
+        assert!(src.contains("#define SVGA_PCI_DEVICE 0x0405"));
     }
 
     #[test]
@@ -579,6 +594,12 @@ mod tests {
         let session = find("/usr/local/libexec/jos-session");
         assert!(session.2, "the session wrapper must be executable");
         assert!(session.1.contains("XDG_RUNTIME_DIR"));
+        assert!(session
+            .1
+            .contains(&format!("kldstat -q -n {VMSVGA_MODULE}; then\n")));
+        assert!(session
+            .1
+            .contains("MESA_LOADER_DRIVER_OVERRIDE:=kms_swrast"));
         assert!(
             session.1.trim_end().ends_with("exec \"$@\""),
             "jos-greet passes the session command as arguments"

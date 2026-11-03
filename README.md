@@ -453,8 +453,9 @@ hardware runs): passthrough on real hardware (the nested run above proves
 the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
 Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
 but has not been booted), a display for Redox qubes (until `pci_types`
-is fixed upstream), a COSMIC session on real hardware (the packages
-install; the desktop has not been seen running yet), and `jos setup` on
+is fixed upstream), a COSMIC session (the packages install, and
+`freebsd/jos_vmsvga` gives VirtualBox and QEMU a KMS device; the desktop
+has not been seen running yet), and `jos setup` on
 real hardware (the nested run above covers it without a GPU).
 
 ## License
