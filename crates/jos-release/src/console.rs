@@ -125,20 +125,33 @@ impl<'a> Console<'a> {
     /// Wait until `pattern` appears in the output, consuming through it.
     /// Returns what preceded the match (since the previous `expect`).
     pub fn expect(&mut self, pattern: &str, timeout: Duration) -> anyhow::Result<String> {
-        self.wait_for(&[pattern], timeout).map(|(_, before)| before)
+        self.wait_for(&[pattern], timeout)?
+            .map(|(_, before)| before)
+            .ok_or_else(|| timed_out(&[pattern], timeout))
     }
 
     /// Wait for whichever of `patterns` appears first in the output and
     /// return its index, consuming through it.
     pub fn expect_any(&mut self, patterns: &[&str], timeout: Duration) -> anyhow::Result<usize> {
-        self.wait_for(patterns, timeout).map(|(i, _)| i)
+        self.wait_for(patterns, timeout)?
+            .map(|(i, _)| i)
+            .ok_or_else(|| timed_out(patterns, timeout))
     }
 
+    /// Like [`Console::expect`], except that `pattern` not showing up in
+    /// time is `Ok(false)` rather than an error: for a prompt that may
+    /// need another nudge.
+    pub fn expect_within(&mut self, pattern: &str, timeout: Duration) -> anyhow::Result<bool> {
+        self.wait_for(&[pattern], timeout)
+            .map(|found| found.is_some())
+    }
+
+    /// `None` when `timeout` passes without a match.
     fn wait_for(
         &mut self,
         patterns: &[&str],
         timeout: Duration,
-    ) -> anyhow::Result<(usize, String)> {
+    ) -> anyhow::Result<Option<(usize, String)>> {
         let deadline = Instant::now() + timeout;
         loop {
             let first = patterns
@@ -149,14 +162,11 @@ impl<'a> Console<'a> {
             if let Some((pos, i, len)) = first {
                 let before: Vec<u8> = self.buf.drain(..pos + len).collect();
                 let before = before.get(..pos).unwrap_or(&[]);
-                return Ok((i, String::from_utf8_lossy(before).into_owned()));
+                return Ok(Some((i, String::from_utf8_lossy(before).into_owned())));
             }
             let now = Instant::now();
             if now >= deadline {
-                bail!(
-                    "timed out after {}s waiting for {patterns:?}",
-                    timeout.as_secs()
-                );
+                return Ok(None);
             }
             self.pump((deadline - now).min(Duration::from_millis(500)))?;
         }
@@ -224,6 +234,13 @@ impl Drop for Console<'_> {
             self.guest.kill();
         }
     }
+}
+
+fn timed_out(patterns: &[&str], timeout: Duration) -> anyhow::Error {
+    anyhow::anyhow!(
+        "timed out after {}s waiting for {patterns:?}",
+        timeout.as_secs()
+    )
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -318,6 +335,10 @@ mod tests {
             .expect_any(&["a", "b"], Duration::from_millis(200))
             .unwrap_err();
         assert!(err.to_string().contains(r#"["a", "b"]"#), "{err}");
+        // A nudgeable wait reports the timeout as a plain `false`.
+        assert!(!c.expect_within("a", Duration::from_millis(200)).unwrap());
+        c.send_line("echo a").unwrap();
+        assert!(c.expect_within("a", t).unwrap());
         // Raw bytes go through as they are, no newline added.
         c.send_raw(b"printf 'raw\\n'\n").unwrap();
         c.expect("raw", t).unwrap();

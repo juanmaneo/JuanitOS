@@ -4,10 +4,12 @@
 //! firmware, a Graphics Output Protocol for `jos-boot` (VMSVGA with 128 MB
 //! of VRAM, which offers modes up to 7680x4320), the kernel splash, the
 //! graphical installer and the login screen on the framebuffer, the disk
-//! on AHCI (`ada0`), PS/2 input. The serial console carries only a login
-//! prompt (the installer is on the screen), so the install is the
-//! unattended one and the checks run in the installed dom0; screenshots
-//! of the installer and of the login screen land in the output directory.
+//! on AHCI (`ada0`), PS/2 input. The graphical installer owns the console
+//! until it exits (`rc.local` runs it before the gettys start), so the
+//! harness screenshots it, quits it through the keyboard, logs in on the
+//! serial getty that then appears, runs the unattended install and the
+//! checks in the installed dom0; screenshots of the installer and of the
+//! login screen land in the output directory.
 //!
 //! Everything goes through `VBoxManage` via the [`Runner`], so the whole
 //! sequence can be dry-run and unit-tested.
@@ -53,6 +55,23 @@ impl VBox {
 /// How long to wait for VirtualBox to serve the serial socket after
 /// `startvm`.
 const SERIAL_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How long a boot may take to reach its login (the live medium's
+/// installer, then its serial getty; the installed dom0's getty).
+const BOOT_PATIENCE: Duration = Duration::from_secs(20 * 60);
+
+/// The serial port stays silent from the loader's banner until the
+/// installer, on the screen, has been quit: the quit keys are pressed
+/// again this often until the login appears (keys sent before the
+/// installer listens are lost).
+const QUIT_ROUND: Duration = Duration::from_secs(15);
+
+/// PS/2 scancodes (make and break) that quit the graphical installer
+/// whatever its state: Enter on *Start* opens the next page and Esc comes
+/// back, which puts the focus on *Start* again; Shift+Tab moves it to
+/// *Quit* and Enter presses it. With the focus on *Quit* already, the
+/// first Enter quits and the rest lands on the console's login.
+pub const QUIT_INSTALLER_KEYS: &[&str] = &["1c 9c", "01 81", "2a 0f 8f aa", "1c 9c"];
 
 /// The `VBoxManage` invocations that create the VM, in order: EFI, the
 /// serial port as a socket server, VMSVGA, a NAT virtio NIC, the disk on
@@ -331,19 +350,16 @@ pub fn run_vbox(v: &VBox, runner: &dyn Runner, dry_run: bool) -> anyhow::Result<
     if dry_run {
         return Ok(());
     }
-    // Evidence of the graphical path; a missing picture is not a failure.
-    let screenshot = |file: &str| {
-        let path = v.out.join(file).display().to_string();
-        match runner.run_checked(
-            "VBoxManage",
-            &["controlvm", &v.name, "screenshotpng", &path],
-        ) {
-            Ok(_) => println!("   screenshot: {path}"),
-            Err(e) => println!("note: no screenshot {file}: {e}"),
-        }
-    };
-    let result = connect(v, runner, SERIAL_PATIENCE)
-        .and_then(|mut con| drive_vbox(&mut con, &install_command(), &checks, &screenshot));
+    let screen = Screen { v, runner };
+    let result = connect(v, runner, SERIAL_PATIENCE).and_then(|mut con| {
+        drive_vbox(
+            &mut con,
+            &install_command(),
+            &checks,
+            &screen,
+            BOOT_PATIENCE,
+        )
+    });
     // The console (and the VM it would kill when dropped) is gone by now:
     // the VM is powered off, or stopped by the console's drop.
     if !v.keep {
@@ -357,31 +373,90 @@ pub fn run_vbox(v: &VBox, runner: &dyn Runner, dry_run: bool) -> anyhow::Result<
     Ok(())
 }
 
-/// The console side of [`run_vbox`]: the live medium's serial login,
-/// install, reboot, `checks` in the installed dom0, power off (also after
-/// a failed check, so the VM's state stays consistent).
+/// The VM's screen and keyboard, through `VBoxManage controlvm`.
+pub trait Display {
+    /// Save a picture of the screen; a missing picture is not a failure.
+    fn screenshot(&self, file: &str);
+    /// Press keys (PS/2 scancodes, one string per key).
+    fn press(&self, keys: &[&str]) -> anyhow::Result<()>;
+}
+
+struct Screen<'a> {
+    v: &'a VBox,
+    runner: &'a dyn Runner,
+}
+
+impl Display for Screen<'_> {
+    fn screenshot(&self, file: &str) {
+        let path = self.v.out.join(file).display().to_string();
+        match self.runner.run_checked(
+            "VBoxManage",
+            &["controlvm", &self.v.name, "screenshotpng", &path],
+        ) {
+            Ok(_) => println!("   screenshot: {path}"),
+            Err(e) => println!("note: no screenshot {file}: {e}"),
+        }
+    }
+
+    fn press(&self, keys: &[&str]) -> anyhow::Result<()> {
+        for key in keys {
+            let args = [
+                &["controlvm", &self.v.name, "keyboardputscancode"][..],
+                &key.split(' ').collect::<Vec<_>>(),
+            ]
+            .concat();
+            self.runner.run_checked("VBoxManage", &args)?;
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        Ok(())
+    }
+}
+
+/// The console side of [`run_vbox`]: wait for the live medium (the
+/// installer on the screen, nothing on the serial port yet), quit the
+/// installer, log in on the serial getty that follows, install, reboot,
+/// `checks` in the installed dom0, power off (also after a failed check,
+/// so the VM's state stays consistent). `patience` bounds each boot.
 fn drive_vbox(
     con: &mut Console<'_>,
     install: &str,
     checks: &[(&str, String, u64)],
-    screenshot: &dyn Fn(&str),
+    screen: &dyn Display,
+    patience: Duration,
 ) -> anyhow::Result<()> {
     println!("\n==> vbox: booting the live medium");
-    con.expect("login:", Duration::from_secs(20 * 60))?;
-    screenshot("installer.png");
+    // The loader's banner is the last thing the serial port shows before
+    // the installer takes the screen (the kernel boots muted).
+    con.expect("Consoles:", patience)?;
+    println!("\n==> vbox: quitting the installer for the serial login");
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        // The last picture before the quit works is the installer.
+        screen.screenshot("installer.png");
+        screen.press(QUIT_INSTALLER_KEYS)?;
+        if con.expect_within("login:", QUIT_ROUND.min(patience / 2))? {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "no serial login after {}s of quitting the installer",
+                patience.as_secs()
+            );
+        }
+    }
     root_shell(con, None)?;
     run_steps(con, "vbox", [("install to ada0", install, 30)])?;
 
     println!("\n==> vbox: rebooting into the installed dom0");
     con.send_line("reboot")?;
-    con.expect("login:", Duration::from_secs(20 * 60))?;
+    con.expect("login:", patience)?;
     root_shell(con, Some(SELFHOST_PASSWORD))?;
     let result = run_steps(
         con,
         "vbox",
         checks.iter().map(|(w, c, m)| (*w, c.as_str(), *m)),
     );
-    screenshot("login-screen.png");
+    screen.screenshot("login-screen.png");
     power_off(con, "vbox")?;
     result
 }
@@ -470,21 +545,81 @@ mod tests {
         }
     }
 
+    /// The loader's banner, which the live medium prints before its
+    /// installer takes the screen.
+    const BANNER: &str = "printf 'Consoles: EFI console\\n'";
+
+    /// A screen that remembers what was done to it; `deaf` makes its
+    /// keyboard fail.
+    #[derive(Default)]
+    struct FakeScreen {
+        log: std::cell::RefCell<Vec<String>>,
+        deaf: bool,
+    }
+
+    impl Display for FakeScreen {
+        fn screenshot(&self, file: &str) {
+            self.log.borrow_mut().push(file.to_string());
+        }
+        fn press(&self, keys: &[&str]) -> anyhow::Result<()> {
+            if self.deaf {
+                bail!("no keyboard");
+            }
+            self.log.borrow_mut().push(format!("press {}", keys.len()));
+            Ok(())
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn dialogue_with_a_guest() {
         use crate::qemu::tests::{guest, DEAF, EVAL, LOGIN, POWEROFF, REBOOT};
-        let shots = std::cell::RefCell::new(Vec::new());
-        let shot = |f: &str| shots.borrow_mut().push(f.to_string());
         let checks = vec![("first", "true".to_string(), 1)];
+        let patience = Duration::from_secs(5);
+        let screen = FakeScreen::default();
         drive_vbox(
-            &mut guest(&[REBOOT, POWEROFF, LOGIN, EVAL]),
+            &mut guest(&[REBOOT, POWEROFF, BANNER, LOGIN, EVAL]),
             "true",
             &checks,
-            &shot,
+            &screen,
+            patience,
         )
         .unwrap();
-        assert_eq!(*shots.borrow(), ["installer.png", "login-screen.png"]);
+        assert_eq!(
+            *screen.log.borrow(),
+            ["installer.png", "press 4", "login-screen.png"]
+        );
+
+        // The installer not reacting to the keys in time (they are pressed
+        // again every round), and a keyboard that does not work at all.
+        let silent = [BANNER, "sleep 3"];
+        let screen = FakeScreen::default();
+        let err = drive_vbox(
+            &mut guest(&silent),
+            "true",
+            &checks,
+            &screen,
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "no serial login after 0s of quitting the installer"
+        );
+        let presses = screen
+            .log
+            .borrow()
+            .iter()
+            .filter(|l| *l == "press 4")
+            .count();
+        assert!(presses >= 2);
+        let deaf_screen = FakeScreen {
+            deaf: true,
+            ..FakeScreen::default()
+        };
+        let err =
+            drive_vbox(&mut guest(&silent), "true", &checks, &deaf_screen, patience).unwrap_err();
+        assert_eq!(err.to_string(), "no keyboard");
 
         let failing = [("second", "false".to_string(), 1)];
         let closing = [("close", DEAF.to_string(), 1)];
@@ -506,59 +641,100 @@ mod tests {
                 "the guest's console closed",
             ),
             (
+                "gone after the banner",
+                &[BANNER],
+                "true",
+                &checks,
+                "the guest's console closed",
+            ),
+            (
                 "deaf at the live login",
-                &[DEAF, "printf 'login: '"],
+                &[DEAF, BANNER, "printf 'login: '"],
                 "true",
                 &checks,
                 deaf,
             ),
             (
                 "failed install",
-                &[REBOOT, LOGIN, EVAL],
+                &[REBOOT, BANNER, LOGIN, EVAL],
                 "false",
                 &checks,
                 "vbox step failed: install to ada0",
             ),
             (
                 "deaf after the install",
-                &[REBOOT, LOGIN, EVAL],
+                &[REBOOT, BANNER, LOGIN, EVAL],
                 DEAF,
                 &checks,
                 deaf,
             ),
             (
                 "no reboot",
-                &["reboot() { exit 0; }", LOGIN, EVAL],
+                &["reboot() { exit 0; }", BANNER, LOGIN, EVAL],
                 "true",
                 &checks,
                 "the guest's console closed",
             ),
             (
                 "deaf at the dom0 login",
-                &["reboot() { exec 0<&-; printf 'login: '; }", LOGIN, EVAL],
+                &[
+                    "reboot() { exec 0<&-; printf 'login: '; }",
+                    BANNER,
+                    LOGIN,
+                    EVAL,
+                ],
                 "true",
                 &checks,
                 deaf,
             ),
             (
                 "failing check, reported after the power-off",
-                &[REBOOT, POWEROFF, LOGIN, EVAL],
+                &[REBOOT, POWEROFF, BANNER, LOGIN, EVAL],
                 "true",
                 &failing,
                 "vbox step failed: second",
             ),
             (
                 "deaf at power off",
-                &[REBOOT, POWEROFF, LOGIN, EVAL],
+                &[REBOOT, POWEROFF, BANNER, LOGIN, EVAL],
                 "true",
                 &closing,
                 deaf,
             ),
         ];
         for (name, parts, install, checks, want) in cases {
-            let err = drive_vbox(&mut guest(parts), install, checks, &|_| {}).unwrap_err();
+            let screen = FakeScreen::default();
+            let err =
+                drive_vbox(&mut guest(parts), install, checks, &screen, patience).unwrap_err();
             assert_eq!((name, err.to_string()), (name, want.to_string()));
         }
+    }
+
+    #[test]
+    fn the_screen_goes_through_vboxmanage() {
+        let dir = PathBuf::from("/w");
+        let v = vbox(&dir);
+        let m = MockRunner::new().respond(
+            "VBoxManage",
+            &["controlvm", "jos-test", "screenshotpng"],
+            CmdOutput::failed(1, "no screen"),
+        );
+        let screen = Screen { v: &v, runner: &m };
+        screen.screenshot("a.png");
+        screen.press(&["1c 9c"]).unwrap();
+        assert_eq!(
+            m.calls(),
+            [
+                "VBoxManage controlvm jos-test screenshotpng /w/a.png",
+                "VBoxManage controlvm jos-test keyboardputscancode 1c 9c",
+            ]
+        );
+        let broken = MockRunner::new().missing("VBoxManage");
+        let screen = Screen {
+            v: &v,
+            runner: &broken,
+        };
+        assert!(screen.press(QUIT_INSTALLER_KEYS).is_err());
     }
 
     #[test]
@@ -655,6 +831,7 @@ mod tests {
         let script = [
             "reboot() { exit 9; }; poweroff() { exit 9; }",
             REBOOT,
+            BANNER,
             LOGIN,
             ack,
         ]
@@ -677,6 +854,9 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.contains("screenshotpng") && c.ends_with("installer.png")));
+        assert!(calls
+            .iter()
+            .any(|c| c.ends_with("keyboardputscancode 2a 0f 8f aa")));
         assert!(calls.iter().any(|c| c.ends_with("login-screen.png")));
         assert!(
             calls
