@@ -35,17 +35,17 @@ static char bw_buf[BW_TAIL + 1];
 
 /* The last `BW_TAIL` bytes of the message buffer, NUL-terminated. */
 static size_t bw_tail() {
-  struct msgbuf *mbp = msgbufp;
+  struct msgbuf* mbp = msgbufp;
   u_int seq;
   u_int want;
   size_t len = 0;
   int n;
 
-  if (mbp == NULL) {
+  if (NULL == mbp) {
     return 0;
   }
   want = min(BW_TAIL, mbp->msg_size);
-  if ((mbp->msg_flags & MSGBUF_WRAP) == 0 && mbp->msg_wseq < want) {
+  if (0 == (mbp->msg_flags & MSGBUF_WRAP) && mbp->msg_wseq < want) {
     seq = 0;
   } else {
     seq = MSGBUF_SEQSUB(mbp, mbp->msg_wseq, want);
@@ -64,16 +64,16 @@ static size_t bw_tail() {
 static bool bw_at_prompt(size_t len) {
   size_t plen = sizeof(BW_PROMPT) - 1;
 
-  return len >= plen && memcmp(bw_buf + len - plen, BW_PROMPT, plen) == 0;
+  return len >= plen && 0 == memcmp(bw_buf + len - plen, BW_PROMPT, plen);
 }
 
 static void bw_reveal(size_t len) {
-  const char *start = bw_buf;
+  const char* start = bw_buf;
 
   /* A full buffer starts mid-line: begin the replay on a line boundary. */
-  if (len == BW_TAIL) {
-    const char *nl = strchr(bw_buf, '\n');
-    if (nl != NULL) {
+  if (BW_TAIL == len) {
+    const char* nl = strchr(bw_buf, '\n');
+    if (NULL != nl) {
       start = nl + 1;
     }
   }
@@ -90,7 +90,7 @@ static void bw_reveal(size_t len) {
   cnputs("\nmountroot> ");
 }
 
-static void bw_tick(void *arg __unused) {
+static void bw_tick(void* arg __unused) {
   size_t len;
 
   if (root_mounted() || !cn_mute) {
@@ -104,15 +104,15 @@ static void bw_tick(void *arg __unused) {
   callout_schedule(&bw_callout, hz);
 }
 
-static void bw_start(void *arg __unused) {
-  if ((boothowto & RB_MUTE) == 0 || root_mounted()) {
+static void bw_start(void* arg __unused) {
+  if (0 == (boothowto & RB_MUTE) || root_mounted()) {
     return;
   }
   callout_reset(&bw_callout, hz, bw_tick, NULL);
 }
 SYSINIT(jos_bootwatch, SI_SUB_LAST, SI_ORDER_ANY, bw_start, NULL);
 
-static int bw_modevent(module_t mod __unused, int type, void *data __unused) {
+static int bw_modevent(module_t mod __unused, int type, void* data __unused) {
   switch (type) {
   case MOD_LOAD:
     callout_init(&bw_callout, 1);

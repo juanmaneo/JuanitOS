@@ -123,10 +123,10 @@ struct jos_vmsvga {
   struct mutex hw_lock;
   struct delayed_work flush;
   /* The frame buffer the plane last put on screen; NULL when none. */
-  struct drm_framebuffer *scanout_fb;
+  struct drm_framebuffer* scanout_fb;
   u_int io;
-  u8 __iomem *vram;
-  u32 __iomem *fifo;
+  u8 __iomem* vram;
+  u32 __iomem* fifo;
   u32 vram_size;
   u32 fifo_size;
   u32 caps;
@@ -142,16 +142,16 @@ struct jos_vmsvga {
 
 struct jos_vmsvga_bo {
   struct drm_gem_object base;
-  struct page **pages;
+  struct page** pages;
   unsigned int npages;
-  void *vaddr;
+  void* vaddr;
 };
 
-static struct jos_vmsvga *to_jos_vmsvga(struct drm_device *dev) {
+static struct jos_vmsvga* to_jos_vmsvga(struct drm_device* dev) {
   return container_of(dev, struct jos_vmsvga, drm);
 }
 
-static struct jos_vmsvga_bo *to_jos_vmsvga_bo(struct drm_gem_object *obj) {
+static struct jos_vmsvga_bo* to_jos_vmsvga_bo(struct drm_gem_object* obj) {
   return container_of(obj, struct jos_vmsvga_bo, base);
 }
 
@@ -159,21 +159,21 @@ static struct jos_vmsvga_bo *to_jos_vmsvga_bo(struct drm_gem_object *obj) {
  * Registers and FIFO.
  */
 
-static u32 jos_vmsvga_rd(const struct jos_vmsvga *sc, u32 reg) {
+static u32 jos_vmsvga_rd(const struct jos_vmsvga* sc, u32 reg) {
   outl(sc->io + SVGA_INDEX_PORT, reg);
   return inl(sc->io + SVGA_VALUE_PORT);
 }
 
-static void jos_vmsvga_wr(const struct jos_vmsvga *sc, u32 reg, u32 value) {
+static void jos_vmsvga_wr(const struct jos_vmsvga* sc, u32 reg, u32 value) {
   outl(sc->io + SVGA_INDEX_PORT, reg);
   outl(sc->io + SVGA_VALUE_PORT, value);
 }
 
-static u32 jos_vmsvga_fifo_rd(const struct jos_vmsvga *sc, u32 index) {
+static u32 jos_vmsvga_fifo_rd(const struct jos_vmsvga* sc, u32 index) {
   return ioread32(sc->fifo + index);
 }
 
-static void jos_vmsvga_fifo_wr(const struct jos_vmsvga *sc, u32 index,
+static void jos_vmsvga_fifo_wr(const struct jos_vmsvga* sc, u32 index,
                                u32 value) {
   iowrite32(value, sc->fifo + index);
 }
@@ -183,12 +183,12 @@ static void jos_vmsvga_fifo_wr(const struct jos_vmsvga *sc, u32 index,
  * did not within the bound; said once, then the driver keeps going
  * without waiting (the screen is late, the kernel is not stuck).
  */
-static bool jos_vmsvga_sync(struct jos_vmsvga *sc) {
+static bool jos_vmsvga_sync(struct jos_vmsvga* sc) {
   int polls;
 
   jos_vmsvga_wr(sc, SVGA_REG_SYNC, 1);
   for (polls = 0; polls < JOS_VMSVGA_SYNC_POLLS; polls++) {
-    if (jos_vmsvga_rd(sc, SVGA_REG_BUSY) == 0) {
+    if (0 == jos_vmsvga_rd(sc, SVGA_REG_BUSY)) {
       return true;
     }
     udelay(JOS_VMSVGA_SYNC_POLL_US);
@@ -201,7 +201,7 @@ static bool jos_vmsvga_sync(struct jos_vmsvga *sc) {
 }
 
 /* Bytes free in the command ring; one dword always stays unused. */
-static u32 jos_vmsvga_fifo_free(const struct jos_vmsvga *sc) {
+static u32 jos_vmsvga_fifo_free(const struct jos_vmsvga* sc) {
   u32 min = jos_vmsvga_fifo_rd(sc, SVGA_FIFO_MIN);
   u32 max = jos_vmsvga_fifo_rd(sc, SVGA_FIFO_MAX);
   u32 next = jos_vmsvga_fifo_rd(sc, SVGA_FIFO_NEXT_CMD);
@@ -217,7 +217,7 @@ static u32 jos_vmsvga_fifo_free(const struct jos_vmsvga *sc) {
 }
 
 /* Append one command; a ring too full for it is drained first. */
-static void jos_vmsvga_fifo_cmd(struct jos_vmsvga *sc, const u32 *words,
+static void jos_vmsvga_fifo_cmd(struct jos_vmsvga* sc, const u32* words,
                                 u32 count) {
   u32 min;
   u32 max;
@@ -243,7 +243,7 @@ static void jos_vmsvga_fifo_cmd(struct jos_vmsvga *sc, const u32 *words,
   jos_vmsvga_fifo_wr(sc, SVGA_FIFO_NEXT_CMD, next);
 }
 
-static void jos_vmsvga_fifo_update(struct jos_vmsvga *sc, u32 x, u32 y, u32 w,
+static void jos_vmsvga_fifo_update(struct jos_vmsvga* sc, u32 x, u32 y, u32 w,
                                    u32 h) {
   const u32 cmd[SVGA_CMD_UPDATE_WORDS] = {SVGA_CMD_UPDATE, x, y, w, h};
 
@@ -254,11 +254,11 @@ static void jos_vmsvga_fifo_update(struct jos_vmsvga *sc, u32 x, u32 y, u32 w,
  * Negotiate the interface, read the device's limits and set the FIFO up.
  * Memory maps are the caller's.
  */
-static int jos_vmsvga_hw_init(struct jos_vmsvga *sc) {
+static int jos_vmsvga_hw_init(struct jos_vmsvga* sc) {
   u32 min;
 
   jos_vmsvga_wr(sc, SVGA_REG_ID, SVGA_ID_2);
-  if (jos_vmsvga_rd(sc, SVGA_REG_ID) != SVGA_ID_2) {
+  if (SVGA_ID_2 != jos_vmsvga_rd(sc, SVGA_REG_ID)) {
     drm_err(&sc->drm, "the device does not speak SVGA II\n");
     return -ENODEV;
   }
@@ -267,7 +267,7 @@ static int jos_vmsvga_hw_init(struct jos_vmsvga *sc) {
   sc->max_height = jos_vmsvga_rd(sc, SVGA_REG_MAX_HEIGHT);
 
   min = SVGA_FIFO_LEGACY_REGS;
-  if ((sc->caps & SVGA_CAP_EXTENDED_FIFO) != 0) {
+  if (0 != (sc->caps & SVGA_CAP_EXTENDED_FIFO)) {
     min = jos_vmsvga_rd(sc, SVGA_REG_MEM_REGS);
   }
   min *= sizeof(u32);
@@ -288,14 +288,14 @@ static int jos_vmsvga_hw_init(struct jos_vmsvga *sc) {
 }
 
 /* Program a mode and learn the pitch and offset the device chose. */
-static void jos_vmsvga_set_mode(struct jos_vmsvga *sc, u32 width, u32 height) {
+static void jos_vmsvga_set_mode(struct jos_vmsvga* sc, u32 width, u32 height) {
   u64 end;
 
   jos_vmsvga_wr(sc, SVGA_REG_WIDTH, width);
   jos_vmsvga_wr(sc, SVGA_REG_HEIGHT, height);
   jos_vmsvga_wr(sc, SVGA_REG_BITS_PER_PIXEL, JOS_VMSVGA_BPP);
   jos_vmsvga_wr(sc, SVGA_REG_ENABLE, SVGA_REG_ENABLE_ENABLE);
-  if ((sc->caps & SVGA_CAP_DISPLAY_TOPOLOGY) != 0) {
+  if (0 != (sc->caps & SVGA_CAP_DISPLAY_TOPOLOGY)) {
     jos_vmsvga_wr(sc, SVGA_REG_NUM_GUEST_DISPLAYS, 1);
     jos_vmsvga_wr(sc, SVGA_REG_DISPLAY_ID, 0);
     jos_vmsvga_wr(sc, SVGA_REG_DISPLAY_IS_PRIMARY, 1);
@@ -320,7 +320,7 @@ static void jos_vmsvga_set_mode(struct jos_vmsvga *sc, u32 width, u32 height) {
   sc->height = height;
 }
 
-static void jos_vmsvga_screen_off(struct jos_vmsvga *sc) {
+static void jos_vmsvga_screen_off(struct jos_vmsvga* sc) {
   jos_vmsvga_wr(sc, SVGA_REG_ENABLE, SVGA_REG_ENABLE_DISABLE);
   sc->width = 0;
   sc->height = 0;
@@ -330,31 +330,31 @@ static void jos_vmsvga_screen_off(struct jos_vmsvga *sc) {
  * GEM objects: page arrays in system memory.
  */
 
-static void jos_vmsvga_gem_free(struct drm_gem_object *obj) {
-  struct jos_vmsvga_bo *bo = to_jos_vmsvga_bo(obj);
+static void jos_vmsvga_gem_free(struct drm_gem_object* obj) {
+  struct jos_vmsvga_bo* bo = to_jos_vmsvga_bo(obj);
   unsigned int i;
 
-  if (bo->vaddr != NULL) {
+  if (NULL != bo->vaddr) {
     vunmap(bo->vaddr);
   }
   for (i = 0; i < bo->npages; i++) {
-    if (bo->pages[i] != NULL) {
+    if (NULL != bo->pages[i]) {
       __free_page(bo->pages[i]);
     }
   }
-  kvfree((void *)bo->pages);
+  kvfree((void*)bo->pages);
   drm_gem_object_release(obj);
   kfree(bo);
 }
 
-static int jos_vmsvga_gem_vmap(struct drm_gem_object *obj,
-                               struct iosys_map *map) {
+static int jos_vmsvga_gem_vmap(struct drm_gem_object* obj,
+                               struct iosys_map* map) {
   iosys_map_set_vaddr(map, to_jos_vmsvga_bo(obj)->vaddr);
   return 0;
 }
 
-static void jos_vmsvga_gem_vunmap(struct drm_gem_object *obj __unused,
-                                  struct iosys_map *map __unused) {}
+static void jos_vmsvga_gem_vunmap(struct drm_gem_object* obj __unused,
+                                  struct iosys_map* map __unused) {}
 
 /*
  * Insert the faulting page and a few after it into the mapping's VM
@@ -362,10 +362,10 @@ static void jos_vmsvga_gem_vunmap(struct drm_gem_object *obj __unused,
  * tracks their mappings) and stay wired, so they outlive the object.
  * The mapping starts at the object's fake offset; vm_pgoff holds it.
  */
-static int jos_vmsvga_gem_fault(struct vm_fault *vmf) {
-  struct vm_area_struct *vma = vmf->vma;
-  struct drm_gem_object *obj = vma->vm_private_data;
-  struct jos_vmsvga_bo *bo = to_jos_vmsvga_bo(obj);
+static int jos_vmsvga_gem_fault(struct vm_fault* vmf) {
+  struct vm_area_struct* vma = vmf->vma;
+  struct drm_gem_object* obj = vma->vm_private_data;
+  struct jos_vmsvga_bo* bo = to_jos_vmsvga_bo(obj);
   unsigned long address = vmf->address;
   unsigned long node = drm_vma_node_start(&obj->vma_node);
   unsigned long page_offset;
@@ -385,14 +385,14 @@ static int jos_vmsvga_gem_fault(struct vm_fault *vmf) {
 
   VM_OBJECT_WLOCK(vma->vm_obj);
   for (i = 0; i < JOS_VMSVGA_PREFAULT && page_offset < page_last; i++) {
-    struct page *page = bo->pages[page_offset];
+    struct page* page = bo->pages[page_offset];
 
     page->oflags &= ~VPO_UNMANAGED;
     ret = lkpi_vmf_insert_pfn_prot_locked(vma, address, page_to_pfn(page),
                                           vma->vm_page_prot);
-    if ((ret & VM_FAULT_ERROR) != 0) {
+    if (0 != (ret & VM_FAULT_ERROR)) {
       /* The first page is retried by the caller; the rest were extra. */
-      if (i == 0) {
+      if (0 == i) {
         ret = VM_FAULT_NOPAGE;
       }
       break;
@@ -411,8 +411,8 @@ static const struct vm_operations_struct jos_vmsvga_gem_vm_ops = {
 };
 
 /* Cached, like the kernel's own mapping of the pages. */
-static int jos_vmsvga_gem_mmap(struct drm_gem_object *obj __unused,
-                               struct vm_area_struct *vma) {
+static int jos_vmsvga_gem_mmap(struct drm_gem_object* obj __unused,
+                               struct vm_area_struct* vma) {
   vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
   vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
   return 0;
@@ -426,19 +426,19 @@ static const struct drm_gem_object_funcs jos_vmsvga_gem_funcs = {
     .vm_ops = &jos_vmsvga_gem_vm_ops,
 };
 
-static struct jos_vmsvga_bo *jos_vmsvga_bo_create(struct drm_device *dev,
+static struct jos_vmsvga_bo* jos_vmsvga_bo_create(struct drm_device* dev,
                                                   size_t size) {
-  struct jos_vmsvga_bo *bo;
+  struct jos_vmsvga_bo* bo;
   unsigned int i;
 
   size = PAGE_ALIGN(size);
   bo = kzalloc(sizeof(*bo), GFP_KERNEL);
-  if (bo == NULL) {
+  if (NULL == bo) {
     return ERR_PTR(-ENOMEM);
   }
   bo->npages = size >> PAGE_SHIFT;
   bo->pages = kvcalloc(bo->npages, sizeof(*bo->pages), GFP_KERNEL);
-  if (bo->pages == NULL) {
+  if (NULL == bo->pages) {
     kfree(bo);
     return ERR_PTR(-ENOMEM);
   }
@@ -446,26 +446,26 @@ static struct jos_vmsvga_bo *jos_vmsvga_bo_create(struct drm_device *dev,
   bo->base.funcs = &jos_vmsvga_gem_funcs;
   for (i = 0; i < bo->npages; i++) {
     bo->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
-    if (bo->pages[i] == NULL) {
+    if (NULL == bo->pages[i]) {
       jos_vmsvga_gem_free(&bo->base);
       return ERR_PTR(-ENOMEM);
     }
   }
   bo->vaddr = vmap(bo->pages, bo->npages, VM_MAP, PAGE_KERNEL);
-  if (bo->vaddr == NULL) {
+  if (NULL == bo->vaddr) {
     jos_vmsvga_gem_free(&bo->base);
     return ERR_PTR(-ENOMEM);
   }
   return bo;
 }
 
-static int jos_vmsvga_dumb_create(struct drm_file *file, struct drm_device *dev,
-                                  struct drm_mode_create_dumb *args) {
-  struct jos_vmsvga *sc = to_jos_vmsvga(dev);
-  struct jos_vmsvga_bo *bo;
+static int jos_vmsvga_dumb_create(struct drm_file* file, struct drm_device* dev,
+                                  struct drm_mode_create_dumb* args) {
+  struct jos_vmsvga* sc = to_jos_vmsvga(dev);
+  struct jos_vmsvga_bo* bo;
   int ret;
 
-  if (args->bpp != JOS_VMSVGA_BPP || args->width == 0 || args->height == 0 ||
+  if (JOS_VMSVGA_BPP != args->bpp || 0 == args->width || 0 == args->height ||
       args->width > sc->max_width || args->height > sc->max_height) {
     return -EINVAL;
   }
@@ -485,11 +485,11 @@ static int jos_vmsvga_dumb_create(struct drm_file *file, struct drm_device *dev,
  */
 
 /* Copy a damaged rectangle of the plane's buffer to VRAM and show it. */
-static void jos_vmsvga_blit(struct jos_vmsvga *sc,
-                            const struct drm_plane_state *state,
-                            const struct drm_rect *clip) {
-  struct drm_framebuffer *fb = state->fb;
-  const struct jos_vmsvga_bo *bo = to_jos_vmsvga_bo(drm_gem_fb_get_obj(fb, 0));
+static void jos_vmsvga_blit(struct jos_vmsvga* sc,
+                            const struct drm_plane_state* state,
+                            const struct drm_rect* clip) {
+  struct drm_framebuffer* fb = state->fb;
+  const struct jos_vmsvga_bo* bo = to_jos_vmsvga_bo(drm_gem_fb_get_obj(fb, 0));
   u32 src_x1 = (u32)(state->src.x1 >> JOS_VMSVGA_FIXED_SHIFT);
   u32 src_y1 = (u32)(state->src.y1 >> JOS_VMSVGA_FIXED_SHIFT);
   u32 x;
@@ -497,8 +497,8 @@ static void jos_vmsvga_blit(struct jos_vmsvga *sc,
   u32 w;
   u32 h;
   u32 row;
-  const u8 *src;
-  u8 __iomem *dst;
+  const u8* src;
+  u8 __iomem* dst;
   size_t len;
 
   if (clip->x1 < 0 || clip->y1 < 0 || clip->x2 <= clip->x1 ||
@@ -512,7 +512,7 @@ static void jos_vmsvga_blit(struct jos_vmsvga *sc,
   }
   w = min((u32)drm_rect_width(clip), sc->width - x);
   h = min((u32)drm_rect_height(clip), sc->height - y);
-  src = (const u8 *)bo->vaddr + fb->offsets[0] +
+  src = (const u8*)bo->vaddr + fb->offsets[0] +
         ((size_t)clip->y1 * fb->pitches[0]) +
         ((size_t)clip->x1 * JOS_VMSVGA_CPP);
   dst = sc->vram + sc->fb_offset + ((size_t)y * sc->pitch) +
@@ -526,13 +526,13 @@ static void jos_vmsvga_blit(struct jos_vmsvga *sc,
   jos_vmsvga_fifo_update(sc, x, y, w, h);
 }
 
-static int jos_vmsvga_plane_atomic_check(struct drm_plane *plane,
-                                         struct drm_atomic_state *state) {
-  struct drm_plane_state *new_state =
+static int jos_vmsvga_plane_atomic_check(struct drm_plane* plane,
+                                         struct drm_atomic_state* state) {
+  struct drm_plane_state* new_state =
       drm_atomic_get_new_plane_state(state, plane);
-  struct drm_crtc_state *crtc_state = NULL;
+  struct drm_crtc_state* crtc_state = NULL;
 
-  if (new_state->crtc != NULL) {
+  if (NULL != new_state->crtc) {
     crtc_state = drm_atomic_get_new_crtc_state(state, new_state->crtc);
   }
   return drm_atomic_helper_check_plane_state(
@@ -540,18 +540,18 @@ static int jos_vmsvga_plane_atomic_check(struct drm_plane *plane,
       false);
 }
 
-static void jos_vmsvga_plane_atomic_update(struct drm_plane *plane,
-                                           struct drm_atomic_state *state) {
-  struct jos_vmsvga *sc = to_jos_vmsvga(plane->dev);
-  struct drm_plane_state *old_state =
+static void jos_vmsvga_plane_atomic_update(struct drm_plane* plane,
+                                           struct drm_atomic_state* state) {
+  struct jos_vmsvga* sc = to_jos_vmsvga(plane->dev);
+  struct drm_plane_state* old_state =
       drm_atomic_get_old_plane_state(state, plane);
-  struct drm_plane_state *new_state =
+  struct drm_plane_state* new_state =
       drm_atomic_get_new_plane_state(state, plane);
   struct drm_atomic_helper_damage_iter iter;
   struct drm_rect clip;
   int idx;
 
-  if (new_state->fb == NULL || !new_state->visible) {
+  if (NULL == new_state->fb || !new_state->visible) {
     WRITE_ONCE(sc->scanout_fb, NULL);
     return;
   }
@@ -560,7 +560,7 @@ static void jos_vmsvga_plane_atomic_update(struct drm_plane *plane,
     return;
   }
   mutex_lock(&sc->hw_lock);
-  if (sc->width != 0) {
+  if (0 != sc->width) {
     drm_atomic_helper_damage_iter_init(&iter, old_state, new_state);
     drm_atomic_for_each_plane_damage(&iter, &clip) {
       jos_vmsvga_blit(sc, new_state, &clip);
@@ -572,9 +572,9 @@ static void jos_vmsvga_plane_atomic_update(struct drm_plane *plane,
 }
 
 static void
-jos_vmsvga_plane_atomic_disable(struct drm_plane *plane,
-                                struct drm_atomic_state *state __unused) {
-  struct jos_vmsvga *sc = to_jos_vmsvga(plane->dev);
+jos_vmsvga_plane_atomic_disable(struct drm_plane* plane,
+                                struct drm_atomic_state* state __unused) {
+  struct jos_vmsvga* sc = to_jos_vmsvga(plane->dev);
 
   WRITE_ONCE(sc->scanout_fb, NULL);
 }
@@ -598,7 +598,7 @@ static const u32 jos_vmsvga_formats[] = {
     DRM_FORMAT_XRGB8888,
 };
 
-static enum drm_mode_status jos_vmsvga_mode_fits(const struct jos_vmsvga *sc,
+static enum drm_mode_status jos_vmsvga_mode_fits(const struct jos_vmsvga* sc,
                                                  u32 width, u32 height) {
   if (width > sc->max_width || height > sc->max_height) {
     return MODE_BAD;
@@ -610,15 +610,15 @@ static enum drm_mode_status jos_vmsvga_mode_fits(const struct jos_vmsvga *sc,
 }
 
 static enum drm_mode_status
-jos_vmsvga_crtc_mode_valid(struct drm_crtc *crtc,
-                           const struct drm_display_mode *mode) {
+jos_vmsvga_crtc_mode_valid(struct drm_crtc* crtc,
+                           const struct drm_display_mode* mode) {
   return jos_vmsvga_mode_fits(to_jos_vmsvga(crtc->dev), mode->hdisplay,
                               mode->vdisplay);
 }
 
-static int jos_vmsvga_crtc_atomic_check(struct drm_crtc *crtc,
-                                        struct drm_atomic_state *state) {
-  struct drm_crtc_state *crtc_state =
+static int jos_vmsvga_crtc_atomic_check(struct drm_crtc* crtc,
+                                        struct drm_atomic_state* state) {
+  struct drm_crtc_state* crtc_state =
       drm_atomic_get_new_crtc_state(state, crtc);
 
   if (!crtc_state->enable) {
@@ -627,12 +627,12 @@ static int jos_vmsvga_crtc_atomic_check(struct drm_crtc *crtc,
   return drm_atomic_helper_check_crtc_primary_plane(crtc_state);
 }
 
-static void jos_vmsvga_crtc_atomic_enable(struct drm_crtc *crtc,
-                                          struct drm_atomic_state *state) {
-  struct jos_vmsvga *sc = to_jos_vmsvga(crtc->dev);
-  struct drm_crtc_state *crtc_state =
+static void jos_vmsvga_crtc_atomic_enable(struct drm_crtc* crtc,
+                                          struct drm_atomic_state* state) {
+  struct jos_vmsvga* sc = to_jos_vmsvga(crtc->dev);
+  struct drm_crtc_state* crtc_state =
       drm_atomic_get_new_crtc_state(state, crtc);
-  const struct drm_display_mode *mode = &crtc_state->mode;
+  const struct drm_display_mode* mode = &crtc_state->mode;
   int idx;
 
   if (!drm_dev_enter(&sc->drm, &idx)) {
@@ -645,9 +645,9 @@ static void jos_vmsvga_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 static void
-jos_vmsvga_crtc_atomic_disable(struct drm_crtc *crtc,
-                               struct drm_atomic_state *state __unused) {
-  struct jos_vmsvga *sc = to_jos_vmsvga(crtc->dev);
+jos_vmsvga_crtc_atomic_disable(struct drm_crtc* crtc,
+                               struct drm_atomic_state* state __unused) {
+  struct jos_vmsvga* sc = to_jos_vmsvga(crtc->dev);
   int idx;
 
   if (!drm_dev_enter(&sc->drm, &idx)) {
@@ -660,13 +660,13 @@ jos_vmsvga_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 /* No vertical blank interrupt: a commit's event is sent when it is done. */
-static void jos_vmsvga_crtc_atomic_flush(struct drm_crtc *crtc,
-                                         struct drm_atomic_state *state) {
-  struct drm_crtc_state *crtc_state =
+static void jos_vmsvga_crtc_atomic_flush(struct drm_crtc* crtc,
+                                         struct drm_atomic_state* state) {
+  struct drm_crtc_state* crtc_state =
       drm_atomic_get_new_crtc_state(state, crtc);
-  struct drm_pending_vblank_event *event = crtc_state->event;
+  struct drm_pending_vblank_event* event = crtc_state->event;
 
-  if (event == NULL) {
+  if (NULL == event) {
     return;
   }
   crtc_state->event = NULL;
@@ -692,14 +692,14 @@ static const struct drm_crtc_funcs jos_vmsvga_crtc_funcs = {
     .atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
 };
 
-static int jos_vmsvga_connector_get_modes(struct drm_connector *connector) {
-  struct jos_vmsvga *sc = to_jos_vmsvga(connector->dev);
+static int jos_vmsvga_connector_get_modes(struct drm_connector* connector) {
+  struct jos_vmsvga* sc = to_jos_vmsvga(connector->dev);
   int count;
 
   count =
       drm_add_modes_noedid(connector, (int)sc->max_width, (int)sc->max_height);
-  if (jos_vmsvga_mode_fits(sc, JOS_VMSVGA_PREFERRED_WIDTH,
-                           JOS_VMSVGA_PREFERRED_HEIGHT) == MODE_OK) {
+  if (MODE_OK == jos_vmsvga_mode_fits(sc, JOS_VMSVGA_PREFERRED_WIDTH,
+                                      JOS_VMSVGA_PREFERRED_HEIGHT)) {
     drm_set_preferred_mode(connector, JOS_VMSVGA_PREFERRED_WIDTH,
                            JOS_VMSVGA_PREFERRED_HEIGHT);
   }
@@ -707,8 +707,8 @@ static int jos_vmsvga_connector_get_modes(struct drm_connector *connector) {
 }
 
 static enum drm_mode_status
-jos_vmsvga_connector_mode_valid(struct drm_connector *connector,
-                                struct drm_display_mode *mode) {
+jos_vmsvga_connector_mode_valid(struct drm_connector* connector,
+                                struct drm_display_mode* mode) {
   return jos_vmsvga_mode_fits(to_jos_vmsvga(connector->dev), mode->hdisplay,
                               mode->vdisplay);
 }
@@ -737,12 +737,12 @@ static const struct drm_mode_config_funcs jos_vmsvga_mode_config_funcs = {
     .atomic_commit = drm_atomic_helper_commit,
 };
 
-static int jos_vmsvga_modeset_init(struct jos_vmsvga *sc) {
-  struct drm_device *dev = &sc->drm;
+static int jos_vmsvga_modeset_init(struct jos_vmsvga* sc) {
+  struct drm_device* dev = &sc->drm;
   int ret;
 
   ret = drmm_mode_config_init(dev);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   dev->mode_config.max_width = (int)sc->max_width;
@@ -753,7 +753,7 @@ static int jos_vmsvga_modeset_init(struct jos_vmsvga *sc) {
   ret = drm_universal_plane_init(dev, &sc->plane, 0, &jos_vmsvga_plane_funcs,
                                  jos_vmsvga_formats, nitems(jos_vmsvga_formats),
                                  NULL, DRM_PLANE_TYPE_PRIMARY, NULL);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   drm_plane_helper_add(&sc->plane, &jos_vmsvga_plane_helper_funcs);
@@ -761,26 +761,26 @@ static int jos_vmsvga_modeset_init(struct jos_vmsvga *sc) {
 
   ret = drm_crtc_init_with_planes(dev, &sc->crtc, &sc->plane, NULL,
                                   &jos_vmsvga_crtc_funcs, NULL);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   drm_crtc_helper_add(&sc->crtc, &jos_vmsvga_crtc_helper_funcs);
 
   ret = drm_encoder_init(dev, &sc->encoder, &jos_vmsvga_encoder_funcs,
                          DRM_MODE_ENCODER_VIRTUAL, NULL);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   sc->encoder.possible_crtcs = drm_crtc_mask(&sc->crtc);
 
   ret = drm_connector_init(dev, &sc->connector, &jos_vmsvga_connector_funcs,
                            DRM_MODE_CONNECTOR_VIRTUAL);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   drm_connector_helper_add(&sc->connector, &jos_vmsvga_connector_helper_funcs);
   ret = drm_connector_attach_encoder(&sc->connector, &sc->encoder);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   drm_mode_config_reset(dev);
@@ -791,11 +791,11 @@ static int jos_vmsvga_modeset_init(struct jos_vmsvga *sc) {
  * The console shadow: pushed to the screen while the console's frame
  * buffer is the one shown (see the top of the file).
  */
-static void jos_vmsvga_flush_work(struct work_struct *work) {
-  struct jos_vmsvga *sc = container_of(work, struct jos_vmsvga, flush.work);
-  struct drm_fb_helper *helper = sc->drm.fb_helper;
+static void jos_vmsvga_flush_work(struct work_struct* work) {
+  struct jos_vmsvga* sc = container_of(work, struct jos_vmsvga, flush.work);
+  struct drm_fb_helper* helper = sc->drm.fb_helper;
 
-  if (helper != NULL && helper->info != NULL && helper->fb != NULL &&
+  if (NULL != helper && NULL != helper->info && NULL != helper->fb &&
       READ_ONCE(sc->scanout_fb) == helper->fb) {
     drm_fb_helper_damage_area(helper->info, 0, 0, helper->fb->width,
                               helper->fb->height);
@@ -821,26 +821,26 @@ static const struct drm_driver jos_vmsvga_driver = {
     .minor = DRIVER_MINOR,
 };
 
-static void jos_vmsvga_unmap(struct jos_vmsvga *sc) {
-  if (sc->fifo != NULL) {
+static void jos_vmsvga_unmap(struct jos_vmsvga* sc) {
+  if (NULL != sc->fifo) {
     iounmap(sc->fifo);
     sc->fifo = NULL;
   }
-  if (sc->vram != NULL) {
+  if (NULL != sc->vram) {
     iounmap(sc->vram);
     sc->vram = NULL;
   }
 }
 
 /* BAR 0: ports; BAR 1: VRAM, write-combined; BAR 2: FIFO, uncached. */
-static int jos_vmsvga_map(struct jos_vmsvga *sc, struct pci_dev *pdev) {
+static int jos_vmsvga_map(struct jos_vmsvga* sc, struct pci_dev* pdev) {
   unsigned long vram_len = pci_resource_len(pdev, 1);
   unsigned long fifo_len = pci_resource_len(pdev, 2);
   u32 vram_size;
   u32 fifo_size;
 
   sc->io = (u_int)pci_resource_start(pdev, 0);
-  if (sc->io == 0 || vram_len == 0 || fifo_len == 0) {
+  if (0 == sc->io || 0 == vram_len || 0 == fifo_len) {
     drm_err(&sc->drm, "the device lacks its ports, VRAM or FIFO BAR\n");
     return -ENODEV;
   }
@@ -850,22 +850,22 @@ static int jos_vmsvga_map(struct jos_vmsvga *sc, struct pci_dev *pdev) {
   sc->fifo_size = (u32)min_t(unsigned long, fifo_size, fifo_len);
   sc->vram = ioremap_wc(pci_resource_start(pdev, 1), sc->vram_size);
   sc->fifo = ioremap(pci_resource_start(pdev, 2), sc->fifo_size);
-  if (sc->vram == NULL || sc->fifo == NULL) {
+  if (NULL == sc->vram || NULL == sc->fifo) {
     jos_vmsvga_unmap(sc);
     return -ENOMEM;
   }
   return 0;
 }
 
-static int jos_vmsvga_pci_probe(struct pci_dev *pdev,
-                                const struct pci_device_id *id __unused) {
-  struct jos_vmsvga *sc;
-  struct drm_device *dev;
+static int jos_vmsvga_pci_probe(struct pci_dev* pdev,
+                                const struct pci_device_id* id __unused) {
+  struct jos_vmsvga* sc;
+  struct drm_device* dev;
   int ret;
 
   ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev,
                                                          &jos_vmsvga_driver);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   sc = devm_drm_dev_alloc(&pdev->dev, &jos_vmsvga_driver, struct jos_vmsvga,
@@ -876,22 +876,22 @@ static int jos_vmsvga_pci_probe(struct pci_dev *pdev,
   dev = &sc->drm;
   pci_set_drvdata(pdev, dev);
   ret = pcim_enable_device(pdev);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   ret = jos_vmsvga_map(sc, pdev);
-  if (ret != 0) {
+  if (0 != ret) {
     return ret;
   }
   mutex_init(&sc->hw_lock);
   ret = jos_vmsvga_hw_init(sc);
-  if (ret == 0) {
+  if (0 == ret) {
     ret = jos_vmsvga_modeset_init(sc);
   }
-  if (ret == 0) {
+  if (0 == ret) {
     ret = drm_dev_register(dev, 0);
   }
-  if (ret != 0) {
+  if (0 != ret) {
     jos_vmsvga_unmap(sc);
     mutex_destroy(&sc->hw_lock);
     return ret;
@@ -905,9 +905,9 @@ static int jos_vmsvga_pci_probe(struct pci_dev *pdev,
   return 0;
 }
 
-static void jos_vmsvga_pci_remove(struct pci_dev *pdev) {
-  struct drm_device *dev = pci_get_drvdata(pdev);
-  struct jos_vmsvga *sc = to_jos_vmsvga(dev);
+static void jos_vmsvga_pci_remove(struct pci_dev* pdev) {
+  struct drm_device* dev = pci_get_drvdata(pdev);
+  struct jos_vmsvga* sc = to_jos_vmsvga(dev);
 
   cancel_delayed_work_sync(&sc->flush);
   drm_dev_unplug(dev);
@@ -938,7 +938,7 @@ static struct pci_driver jos_vmsvga_pci_driver = {
  * rc.d/jos-kms loads it quietly from jos_kms_module in rc.conf.
  */
 static int jos_vmsvga_modevent(module_t mod __unused, int type,
-                               void *data __unused) {
+                               void* data __unused) {
   switch (type) {
   case MOD_LOAD:
     return -pci_register_driver(&jos_vmsvga_pci_driver);

@@ -82,7 +82,7 @@ struct efi_fb {
 
 /* grub_bsd_add_meta is bsd.mod's (grub/i386/bsd.h); GRUB resolves a
    module's undefined symbols against every loaded module. */
-static grub_err_t add_meta(grub_uint32_t type, const void *data,
+static grub_err_t add_meta(grub_uint32_t type, const void* data,
                            grub_uint32_t len) {
   return grub_bsd_add_meta(FREEBSD_MODINFO_METADATA | type, data, len);
 }
@@ -99,40 +99,40 @@ static grub_err_t add_arch() {
 }
 
 /* The configuration table is packed: compare its GUID in place. */
-static int guid_eq(const void *a, const grub_efi_guid_t *b) {
-  return grub_memcmp(a, b, sizeof(*b)) == 0;
+static int guid_eq(const void* a, const grub_efi_guid_t* b) {
+  return 0 == grub_memcmp(a, b, sizeof(*b));
 }
 
 /* The RSDP goes through the environment, as loader.efi's acpi.rsdp. */
 static grub_err_t set_rsdp() {
   grub_efi_guid_t acpi20 = GRUB_EFI_ACPI_20_TABLE_GUID;
   grub_efi_guid_t acpi10 = GRUB_EFI_ACPI_TABLE_GUID;
-  grub_efi_configuration_table_t *table =
+  grub_efi_configuration_table_t* table =
       grub_efi_system_table->configuration_table;
   grub_efi_uintn_t n = grub_efi_system_table->num_table_entries;
-  void *rsdp = NULL;
-  void *rsdp10 = NULL;
+  void* rsdp = NULL;
+  void* rsdp10 = NULL;
   char buf[RSDP_BUF];
 
   for (grub_efi_uintn_t i = 0; i < n; i++) {
-    const void *guid = &table[i];
+    const void* guid = &table[i];
     if (guid_eq(guid, &acpi20)) {
       rsdp = table[i].vendor_table;
     } else if (guid_eq(guid, &acpi10)) {
       rsdp10 = table[i].vendor_table;
     }
   }
-  if (rsdp == NULL) {
+  if (NULL == rsdp) {
     rsdp = rsdp10;
   }
-  if (rsdp == NULL) {
+  if (NULL == rsdp) {
     return grub_error(GRUB_ERR_BAD_OS,
                       "no ACPI RSDP in the EFI configuration table");
   }
   grub_snprintf(buf, sizeof(buf), "0x%llx",
                 (unsigned long long)(grub_addr_t)rsdp);
   grub_printf("jos_efi: acpi.rsdp=%s\n", buf);
-  if (grub_env_set("kFreeBSD.acpi.rsdp", buf) != GRUB_ERR_NONE) {
+  if (GRUB_ERR_NONE != grub_env_set("kFreeBSD.acpi.rsdp", buf)) {
     return grub_errno;
   }
   return grub_env_set("kFreeBSD.hint.acpi.0.rsdp", buf);
@@ -140,15 +140,15 @@ static grub_err_t set_rsdp() {
 
 static grub_err_t add_framebuffer() {
   grub_efi_guid_t gop_guid = GRUB_EFI_GOP_GUID;
-  struct grub_efi_gop *gop;
-  struct grub_efi_gop_mode_info *info;
+  struct grub_efi_gop* gop;
+  struct grub_efi_gop_mode_info* info;
   struct efi_fb fb;
 
   /* GRUB's video driver puts the firmware's mode back when the kernel
      boots: describe that mode, not the menu's. */
   grub_video_restore();
   gop = grub_efi_locate_protocol(&gop_guid, NULL);
-  if (gop == NULL || gop->mode == NULL || gop->mode->info == NULL) {
+  if (NULL == gop || NULL == gop->mode || NULL == gop->mode->info) {
     return grub_error(GRUB_ERR_BAD_DEVICE, "no graphics output protocol");
   }
   info = gop->mode->info;
@@ -189,13 +189,13 @@ static grub_err_t add_framebuffer() {
 /* Runtime services stay physically addressed (GRUB never calls
    SetVirtualAddressMap, as loader.efi with efi_disable_vmap): record that,
    since efirt(4) checks the runtime table against the virtual ranges. */
-static void identity_map_runtime(grub_uint8_t *descriptors,
+static void identity_map_runtime(grub_uint8_t* descriptors,
                                  grub_efi_uintn_t size,
                                  grub_efi_uintn_t desc_size) {
   for (grub_efi_uintn_t off = 0; off + desc_size <= size; off += desc_size) {
-    grub_efi_memory_descriptor_t *m =
-        (grub_efi_memory_descriptor_t *)(descriptors + off);
-    if ((m->attribute & GRUB_EFI_MEMORY_RUNTIME) != 0) {
+    grub_efi_memory_descriptor_t* m =
+        (grub_efi_memory_descriptor_t*)(descriptors + off);
+    if (0 != (m->attribute & GRUB_EFI_MEMORY_RUNTIME)) {
       m->virtual_start = m->physical_start;
     }
   }
@@ -208,8 +208,8 @@ static grub_err_t add_memory_map() {
   grub_efi_uint32_t desc_version;
   grub_size_t hdr =
       ALIGN_UP(sizeof(struct efi_map_header), EFI_MAP_HEADER_ALIGN);
-  grub_uint8_t *buf;
-  struct efi_map_header *h;
+  grub_uint8_t* buf;
+  struct efi_map_header* h;
   grub_err_t err;
 
   if (grub_efi_get_memory_map(&size, NULL, &key, &desc_size, &desc_version) <
@@ -219,15 +219,15 @@ static grub_err_t add_memory_map() {
   /* Room for what GRUB allocates between the two calls. */
   size += EFI_MAP_SLACK * desc_size;
   buf = grub_zalloc(hdr + size);
-  if (buf == NULL) {
+  if (NULL == buf) {
     return grub_errno;
   }
-  if (grub_efi_get_memory_map(&size, (void *)(buf + hdr), &key, &desc_size,
-                              &desc_version) != 1) {
+  if (1 != grub_efi_get_memory_map(&size, (void*)(buf + hdr), &key, &desc_size,
+                                   &desc_version)) {
     grub_free(buf);
     return grub_error(GRUB_ERR_BAD_DEVICE, "cannot read the EFI memory map");
   }
-  h = (struct efi_map_header *)buf;
+  h = (struct efi_map_header*)buf;
   h->memory_size = size;
   h->descriptor_size = desc_size;
   h->descriptor_version = desc_version;
@@ -242,23 +242,23 @@ static grub_err_t add_memory_map() {
 static grub_err_t grub_cmd_jos_efi_meta(grub_command_t cmd
                                         __attribute__((unused)),
                                         int argc __attribute__((unused)),
-                                        char **argv __attribute__((unused))) {
+                                        char** argv __attribute__((unused))) {
   grub_err_t err;
 
   err = add_fw_handle();
-  if (err != GRUB_ERR_NONE) {
+  if (GRUB_ERR_NONE != err) {
     return err;
   }
   err = add_arch();
-  if (err != GRUB_ERR_NONE) {
+  if (GRUB_ERR_NONE != err) {
     return err;
   }
   err = set_rsdp();
-  if (err != GRUB_ERR_NONE) {
+  if (GRUB_ERR_NONE != err) {
     return err;
   }
   /* No framebuffer is a text console, not a failure. */
-  if (add_framebuffer() != GRUB_ERR_NONE) {
+  if (GRUB_ERR_NONE != add_framebuffer()) {
     grub_print_error();
     grub_errno = GRUB_ERR_NONE;
   }
@@ -275,16 +275,16 @@ static grub_err_t fix_kernel_type() {
   grub_dl_t bsd = grub_dl_get("bsd");
   int patched = 0;
 
-  if (bsd == NULL) {
+  if (NULL == bsd) {
     return grub_error(GRUB_ERR_BAD_MODULE, "bsd module not loaded");
   }
-  for (grub_dl_segment_t seg = bsd->segment; seg != NULL; seg = seg->next) {
-    char *p = seg->addr;
-    if (p == NULL || seg->size < sizeof(old)) {
+  for (grub_dl_segment_t seg = bsd->segment; NULL != seg; seg = seg->next) {
+    char* p = seg->addr;
+    if (NULL == p || seg->size < sizeof(old)) {
       continue;
     }
     for (grub_size_t i = 0; i + sizeof(old) <= seg->size; i++) {
-      if (grub_memcmp(p + i, old, sizeof(old)) != 0) {
+      if (0 != grub_memcmp(p + i, old, sizeof(old))) {
         continue;
       }
       grub_memset(p + i, 0, sizeof(old));
@@ -292,7 +292,7 @@ static grub_err_t fix_kernel_type() {
       patched++;
     }
   }
-  if (patched == 0) {
+  if (0 == patched) {
     return grub_error(GRUB_ERR_BAD_MODULE,
                       "kernel type string not found in bsd.mod");
   }
@@ -302,7 +302,7 @@ static grub_err_t fix_kernel_type() {
 static grub_command_t cmd;
 
 GRUB_MOD_INIT(jos_efi) {
-  if (fix_kernel_type() != GRUB_ERR_NONE) {
+  if (GRUB_ERR_NONE != fix_kernel_type()) {
     grub_print_error();
     grub_errno = GRUB_ERR_NONE;
   }

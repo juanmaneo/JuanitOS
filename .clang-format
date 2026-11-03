@@ -8,6 +8,10 @@ BasedOnStyle: LLVM
 # body is a classic bug. clang-tidy's readability-braces-around-statements
 # fails the build on what this does not catch.
 InsertBraces: true
+# The `*` goes with the type (`struct jos_vmsvga* sc`): it is part of the
+# type, not of the name. One declarator per declaration keeps that honest
+# (`int* a, b` would make only `a` a pointer).
+PointerAlignment: Left
 # FreeBSD kernel headers are not self-contained: <sys/param.h>, then
 # <sys/systm.h>, must come before the others (FreeBSD's own .clang-format
 # has the same rule). The rest of an include block is sorted as usual.

@@ -12,8 +12,13 @@
 # - readability-identifier-length: kernel idioms are short (`hz`, `n`).
 # - readability-implicit-bool-conversion: C idioms (`!cn_mute`, returning
 #   the result of `&&`).
+#
+# custom-constant-on-the-left is ours (CustomChecks below; xtask passes
+# --experimental-custom-checks): in `==` and `!=` the constant goes on the
+# left, `0 != ret`, so a mistyped `=` (`0 = ret`) does not compile.
 Checks: >
   -*,
+  custom-constant-on-the-left,
   bugprone-*,
   clang-analyzer-*,
   misc-*,
@@ -37,3 +42,26 @@ FormatStyle: file
 # `f()`.
 CheckOptions:
   readability-braces-around-statements.ShortStatementLines: 0
+# A constant is a literal, sizeof/alignof, an enumerator or a const
+# variable, possibly cast, negated or combined with another constant
+# (`(int)TAIL`, `-1`, `(0x9 << 8) | 2`). A comparison is reported when
+# its right side is one and its left side is not. Comparisons written in
+# the kernel's macros are in system headers and not reported.
+# A finding is reported at the comparison and at its right side: when one
+# of the two is spelled in a system header macro (`memcmp(...) == 0`,
+# `p == NULL`), clang-tidy drops that report and the other one remains.
+# So a plain `ret != 0` is reported twice.
+CustomChecks:
+  - Name: constant-on-the-left
+    Query: |
+      let lit expr(anyOf(integerLiteral(), characterLiteral(), floatLiteral(), stringLiteral(), gnuNullExpr(), cxxNullPtrLiteralExpr(), unaryExprOrTypeTraitExpr(), declRefExpr(to(anyOf(enumConstantDecl(), varDecl(hasType(isConstQualified())))))))
+      let c1 expr(anyOf(lit, cStyleCastExpr(hasSourceExpression(ignoringParenImpCasts(lit))), unaryOperator(hasUnaryOperand(ignoringParenImpCasts(lit))), binaryOperator(hasLHS(ignoringParenImpCasts(lit)), hasRHS(ignoringParenImpCasts(lit)))))
+      let c2 expr(anyOf(c1, cStyleCastExpr(hasSourceExpression(ignoringParenImpCasts(c1))), unaryOperator(hasUnaryOperand(ignoringParenImpCasts(c1))), binaryOperator(hasLHS(ignoringParenImpCasts(c1)), hasRHS(ignoringParenImpCasts(c1)))))
+      match binaryOperator(hasAnyOperatorName("==", "!="), hasRHS(ignoringParenImpCasts(expr(c2).bind("rhs"))), unless(hasLHS(ignoringParenImpCasts(c2)))).bind("cmp")
+    Diagnostic:
+      - BindName: cmp
+        Message: put the constant on the left of the comparison (0 != ret)
+        Level: Warning
+      - BindName: rhs
+        Message: put the constant on the left of the comparison (0 != ret)
+        Level: Warning

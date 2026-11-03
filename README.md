@@ -281,8 +281,12 @@ the `jos_efi` GRUB module; `freebsd/geom_ventoy` is vendored and left as
 upstream has it)
 are C23 (`-std=gnu23`) in LLVM style, with braces around every
 `if`/`else`/`for`/`while` body (a statement added to an unbraced body is
-a classic bug; `--fix` inserts them) and `f()` rather than `f(void)`
-(the same prototype since C23): `.clang-format` is checked by `cargo xtask fmt` and
+a classic bug; `--fix` inserts them), `f()` rather than `f(void)`
+(the same prototype since C23), the `*` with the type
+(`struct jos_vmsvga* sc`; `--fix` moves it) and the constant on the left
+of `==` and `!=` (`0 != ret`, `NULL == p`: a mistyped `=` then does not
+compile; a custom clang-tidy check, written by hand when it fires):
+`.clang-format` is checked by `cargo xtask fmt` and
 `.clang-tidy` by `cargo xtask lint`, every finding being an error.
 clang-tidy compiles the kernel modules the way `bsd.kmod.mk` does (the
 DRM driver with drm-kmod's flags on top) and the GRUB module with its

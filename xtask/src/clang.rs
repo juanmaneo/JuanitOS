@@ -189,9 +189,9 @@ fn module_name(file: &Path) -> String {
 }
 
 /// `--quiet` (no statistics about the system headers' suppressed
-/// findings) and the files.
+/// findings), the `CustomChecks` of `.clang-tidy` enabled, and the files.
 fn tidy_args(files: &[PathBuf]) -> Vec<String> {
-    let mut args: Vec<String> = vec!["--quiet".into()];
+    let mut args: Vec<String> = vec!["--quiet".into(), "--experimental-custom-checks".into()];
     args.extend(files.iter().map(|f| f.display().to_string()));
     args
 }
@@ -798,7 +798,11 @@ mod tests {
         assert_eq!(module_name(Path::new("alice.c")), "");
         assert_eq!(
             tidy_args(&g.grub),
-            ["--quiet".to_string(), "freebsd/grub/jos_efi.c".into()]
+            [
+                "--quiet".to_string(),
+                "--experimental-custom-checks".into(),
+                "freebsd/grub/jos_efi.c".into()
+            ]
         );
         assert_eq!(
             grub_flag(Path::new("/c/grub-2.04/include")),
