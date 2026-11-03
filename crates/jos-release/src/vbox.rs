@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Install the ISO in a VirtualBox VM and boot what it installed, driven
 //! over the VM's serial port. This is the graphical path that the QEMU
 //! harness (`selfhost`, no display) never takes: VirtualBox's own EFI

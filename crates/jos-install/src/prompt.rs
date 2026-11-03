@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Line-oriented questions for the text installer, over any reader and
 //! writer so they are tested with in-memory input. Both are boxed: one
 //! compiled `Prompter` serves the console and the tests alike.

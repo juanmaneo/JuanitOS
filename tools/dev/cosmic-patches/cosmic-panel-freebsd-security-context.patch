@@ -1,3 +1,4 @@
+SPDX-License-Identifier: GPL-3.0-only
 Abstract unix socket names (std::os::linux::net::SocketAddrExt) are Linux
 only. Elsewhere the security-context listener gets a socket file under
 XDG_RUNTIME_DIR, removed when the context is dropped. Applied to

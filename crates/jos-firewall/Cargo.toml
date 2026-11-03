@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-firewall"
 description = "JuanitOS sys-firewall unikernel: a UEFI application running the jos-fwnet engine"

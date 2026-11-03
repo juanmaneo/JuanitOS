@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-splash` — BeOS/Haiku-style boot splash for the JuanitOS dom0.
 //!
 //! `jos-splash run` is started by `rc.d/jos-splash` right after the file

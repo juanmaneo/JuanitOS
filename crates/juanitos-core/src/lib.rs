@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `juanitos-core` — the library behind the `jos` CLI.
 //!
 //! JuanitOS runs isolated virtual machines ("qubes") on FreeBSD/bhyve with

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! An RGBA raster and the handful of primitives the artwork needs.
 //!
 //! Shapes are anti-aliased by 4×4 supersampling of a signed-distance test,

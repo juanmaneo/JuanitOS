@@ -1,3 +1,4 @@
+SPDX-License-Identifier: MIT
 FreeBSD's pipewire.h renames pw_init/pw_deinit to pipewire_init/pipewire_deinit
 ("BSD has pw_init already": libc's pw_init from <pwd.h>), so the bindings
 pipewire-sys generates carry the renamed symbols. Applied to the registry

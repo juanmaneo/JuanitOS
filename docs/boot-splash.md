@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Graphical boot: Haiku-style, in Rust, on stock FreeBSD
 
 JuanitOS boots like BeOS/Haiku: a dark screen, the logo, and a row of

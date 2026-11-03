@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # jos_vmsvga
 
 KMS driver for the VMware SVGA II display device: VirtualBox's VMSVGA

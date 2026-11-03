@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # jos_bootwatch
 
 Kernel module that shows why a quiet (`-m`) boot stopped before mounting

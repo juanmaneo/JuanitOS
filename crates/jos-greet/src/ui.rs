@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Drawing the login screen in the boot splash's palette and font, so the
 //! boot card, the installer and the greeter look like one product. Laid
 //! out on the installer's logical 1280×800 canvas, scaled by an integer

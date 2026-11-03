@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-gfx"
 description = "JuanitOS boot artwork: a tiny no_std rasterizer shared by the UEFI pre-loader, the kernel splash generator and the splash daemon"

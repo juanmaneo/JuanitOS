@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Messages between `jos-splash <cmd>` clients (rc.d scripts) and the
 //! daemon, as single UDP-style datagrams on a Unix socket.
 //!

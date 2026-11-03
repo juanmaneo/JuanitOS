@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # Coverage allowances checked by `cargo xtask coverage`.
 #
 # The target is 100 % of lines, functions and regions in every file.

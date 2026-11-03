@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-release` end to end. With `--dry-run` every subcommand prints the
 //! host commands it would run, so the whole release pipeline is exercised
 //! on a development machine without FreeBSD tools, root or network. The

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Key presses from FreeBSD's `evdev(4)` nodes, `/dev/input/event*`.
 //!
 //! The console delivers keys to the active terminal only. The boot splash

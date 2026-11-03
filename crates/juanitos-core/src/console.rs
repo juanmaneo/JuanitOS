@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Running a command inside a qube over its serial console: what `jos
 //! run` falls back to when the qube has no agent channel
 //! ([`crate::agent`]): Redox qubes, clones made before the daemon

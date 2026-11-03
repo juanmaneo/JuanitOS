@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [toolchain]
 # Pinned: the coverage gate counts lines and regions exactly, and two
 # compiler versions instrument the same code differently. Moving to a new

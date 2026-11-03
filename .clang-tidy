@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # clang-tidy for the C sources JuanitOS maintains, run by `cargo xtask lint`
 # with the FreeBSD kernel's compile flags (xtask/src/clang.rs). Every
 # finding is an error; a check that does not fit kernel C is switched off

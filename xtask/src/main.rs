@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `cargo xtask` — project automation in Rust (no Makefiles, no shell
 //! scripts to keep portable).
 //!
@@ -5,7 +6,7 @@
 //! cargo xtask ci                  everything CI runs, in order
 //! cargo xtask security-audit      cargo-audit + cargo-deny (deny.toml), all workspaces
 //! cargo xtask fmt [--fix]         rustfmt, all three workspaces; clang-format on the C sources
-//! cargo xtask lint                clippy -D warnings: host, FreeBSD, UEFI, kernel; clang-tidy on the C sources
+//! cargo xtask lint                SPDX tags; clippy -D warnings: host, FreeBSD, UEFI, kernel; clang-tidy on the C sources
 //! cargo xtask test                tests: workspace + jos-boot lib on the host
 //! cargo xtask coverage [--ratchet] [--html]
 //!                                 line coverage per crate, gated by coverage.toml
@@ -17,6 +18,7 @@
 
 mod clang;
 mod coverage;
+mod spdx;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -91,8 +93,9 @@ cargo xtask <task> [options] [-- <cargo args>]
                          (cargo-deny: advisories, licenses, sources) on every lockfile
   fmt [--fix]            check (or apply) rustfmt in all workspaces and clang-format
                          (LLVM style) on the C sources
-  lint                   clippy -D warnings for host, FreeBSD, UEFI and kernel targets, then
-                         clang-tidy on the C sources with the FreeBSD kernel headers
+  lint                   an SPDX license tag in every file (or REUSE.toml), clippy -D warnings
+                         for host, FreeBSD, UEFI and kernel targets, then clang-tidy on the
+                         C sources with the FreeBSD kernel headers
   test                   workspace tests + jos-boot's library tests on the host
   coverage [--ratchet] [--html]
                          line coverage per crate, checked against coverage.toml;
@@ -273,6 +276,7 @@ fn security_audit(ctx: &Ctx) -> anyhow::Result<()> {
 }
 
 fn lint(ctx: &Ctx) -> anyhow::Result<()> {
+    spdx::check(&ctx.root)?;
     cargo(
         ctx,
         &ctx.root,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Drawing the installer: a Calamares-style layout (steps in a sidebar on
 //! the left, the current page on the right, Back/Next at the bottom) in
 //! the boot splash's palette and font, so boot → installer → desktop look

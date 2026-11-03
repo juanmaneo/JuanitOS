@@ -1,3 +1,4 @@
+SPDX-License-Identifier: MIT
 FreeBSD's pipewire.h renames pw_init/pw_deinit to pipewire_init/pipewire_deinit
 ("BSD has pw_init already"); the bindgen allowlist of pipewire-sys only
 keeps pw_* functions, so the renamed ones were missing from the bindings.

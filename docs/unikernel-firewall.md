@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Unikernel qubes: a Rust `sys-firewall`
 
 QubesOS ships an optional `sys-firewall` built as a MirageOS unikernel

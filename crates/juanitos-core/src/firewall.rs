@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Host side of the firewall: client addressing and rendering the config
 //! disk a `sys-firewall` unikernel boots with.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! PCI addresses and `pciconf(8)` parsing for bhyve passthrough.
 
 use std::fmt;

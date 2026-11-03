@@ -1,4 +1,5 @@
 #cloud-config
+# SPDX-License-Identifier: BSD-3-Clause
 # JuanitOS template "fbsd15-net": FreeBSD 15.1 as the network qube
 # (`sys-net`): DHCP client towards the world, DHCP server + DNS forwarder
 # (dnsmasq) + pf NAT towards its clients.
@@ -85,6 +86,7 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/sh
+      # SPDX-License-Identifier: BSD-3-Clause
       # PROVIDE: jos_agent
       # REQUIRE: FILESYSTEMS hostname
       # BEFORE: netif
@@ -121,6 +123,7 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/sh
+      # SPDX-License-Identifier: BSD-3-Clause
       # JuanitOS guest agent daemon: runs the commands dom0 sends over the
       # qube's agent channel, a bhyve virtio-console port named "jos"
       # (FreeBSD: /dev/ttyV0.0, Linux: /dev/virtio-ports/jos). Replaces typing
@@ -204,6 +207,7 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/sh
+      # SPDX-License-Identifier: BSD-3-Clause
       # PROVIDE: jos_agentd
       # REQUIRE: jos_agent
       #
@@ -228,6 +232,7 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/sh
+      # SPDX-License-Identifier: BSD-3-Clause
       # jos-copy PATH QUBE: ask dom0 to copy PATH from this qube into QUBE's
       # inbox (/mnt/jos/in/<this qube>/ there). The file goes to the outbox of
       # the dom0 share, a request goes to /mnt/jos/req/, and dom0 (`jos serve`)

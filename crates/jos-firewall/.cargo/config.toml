@@ -1,2 +1,3 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [build]
 target = "x86_64-unknown-uefi"

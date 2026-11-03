@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "xtask"
 description = "JuanitOS project automation: `cargo xtask ci | coverage | lint | ...`"

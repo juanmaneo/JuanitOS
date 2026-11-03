@@ -1,4 +1,5 @@
 #!/usr/bin/env perl
+# SPDX-License-Identifier: BSD-3-Clause
 # libcosmic's iced fork keeps a stale BSD-only block in iced_winit's window
 # attribute conversion (old winit API, fields that only exist for Linux)
 # and limits the Linux platform settings to target_os = "linux". The BSDs

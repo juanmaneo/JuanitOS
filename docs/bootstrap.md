@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Bootstrapping JuanitOS
 
 The approach is borrowed from *Linux From Scratch*: build a temporary

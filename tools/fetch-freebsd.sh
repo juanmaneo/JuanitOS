@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # Fetch FreeBSD release pieces needed for testing on a non-FreeBSD host,
 # into $JOS_WORK/freebsd/ (JOS_WORK defaults to ./target/work, so
 # `cargo clean` wipes it). Everything is verified against the release MANIFEST

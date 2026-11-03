@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-firewall` — the JuanitOS `sys-firewall` unikernel.
 //!
 //! A UEFI application that never leaves boot services: the firmware keeps

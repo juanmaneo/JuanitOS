@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # Stock FreeBSD VM under QEMU/KVM for development work that needs a
 # FreeBSD userland (building COSMIC packages, running bhyve for guest
 # experiments, ...). Everything lives under $JOS_WORK (default

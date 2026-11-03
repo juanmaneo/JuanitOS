@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos setup`: the first-boot step that turns a fresh install into a
 //! working system, like the QubesOS firstboot creating `sys-net`,
 //! `sys-firewall` and the default qubes.

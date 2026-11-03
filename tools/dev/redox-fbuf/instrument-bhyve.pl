@@ -1,4 +1,5 @@
 #!/usr/bin/env perl
+# SPDX-License-Identifier: BSD-3-Clause
 # Add BAR bookkeeping prints to bhyve's sources (usr.sbin/bhyve of a
 # FreeBSD 15.1 tree), for tools/dev/redox-fbuf/repro.sh trace. With
 # BHYVE_BAR_DEBUG set in the environment the instrumented bhyve prints

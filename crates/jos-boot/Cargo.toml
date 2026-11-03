@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-boot"
 description = "JuanitOS graphical pre-loader: a UEFI application that shows the boot card, offers a small menu and chain-loads FreeBSD's loader.efi"

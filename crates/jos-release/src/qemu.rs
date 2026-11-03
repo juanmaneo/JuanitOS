@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Boot the ISO (or the disk it installed to) under QEMU with OVMF, and
 //! run a FreeBSD builder VM on a Linux box. Both are plain command-line
 //! assembly so they work unchanged on Linux, FreeBSD and macOS hosts.

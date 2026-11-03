@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The build steps: fetch → bins → rootfs → pack → iso.
 //!
 //! Must run as root on FreeBSD (or JuanitOS): it uses the FreeBSD release

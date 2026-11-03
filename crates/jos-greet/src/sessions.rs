@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Desktop sessions the greeter offers: the `.desktop` files in
 //! `/usr/local/share/wayland-sessions` (COSMIC installs `cosmic.desktop`
 //! there), as display managers read them.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-release compare`: are two dom0 tarballs the same system?
 //!
 //! Stage 3 of the bootstrap (`docs/bootstrap.md`) rebuilds JuanitOS on a

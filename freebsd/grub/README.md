@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # jos_efi: a GRUB module that boots the FreeBSD kernel on UEFI
 
 Ventoy boots a FreeBSD ISO by chain-loading its `loader.efi` ("normal

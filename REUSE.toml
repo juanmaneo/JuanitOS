@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Licenses of the files that cannot carry an SPDX comment of their own
+# (binary, generated, single-value, or vendored and kept as upstream has
+# them), in the REUSE 3.2 format (https://reuse.software). Every other file
+# names its license in its first lines; `cargo xtask lint` checks both
+# (xtask/src/spdx.rs). The license texts are LICENSE (BSD-3-Clause, the
+# default) and the ones referenced in THIRD_PARTY.md.
+version = 1
+
+[[annotations]]
+path = [
+    "LICENSE",
+    "AUTHORS",
+    ".clang-version",
+    "Cargo.lock",
+    "crates/*/Cargo.lock",
+    "docs/images/*.png",
+    "tools/dev/redox-fbuf/trace-*.txt",
+]
+SPDX-FileCopyrightText = "2026 Juanito and the JuanitOS contributors"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = "freebsd/grub/compile_flags.txt"
+SPDX-FileCopyrightText = "2026 Juanito and the JuanitOS contributors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+path = ["crates/jos-gfx/fonts/OpenSans-Regular.ttf", "crates/jos-gfx/fonts/OFL.txt"]
+SPDX-FileCopyrightText = "2020 The Open Sans Project Authors (https://github.com/googlefonts/opensans)"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "freebsd/geom_ventoy/**"
+SPDX-FileCopyrightText = [
+    "2020 longpanda <admin@ventoy.net>",
+    "2004-2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>",
+]
+SPDX-License-Identifier = "BSD-2-Clause"

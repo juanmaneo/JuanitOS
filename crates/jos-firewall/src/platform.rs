@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Firmware glue: device lookup by PCI slot, the config disk, reset and
 //! idle halt. The only `unsafe` in the unikernel lives here.
 

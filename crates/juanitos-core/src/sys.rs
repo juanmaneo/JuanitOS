@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Command execution abstraction.
 //!
 //! Everything that talks to the host (`bhyve`, `zfs`, `ifconfig`, ...) goes

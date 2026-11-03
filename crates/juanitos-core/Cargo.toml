@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "juanitos-core"
 description = "Core library for JuanitOS: qube configuration, bhyve, ZFS, PCI passthrough and networking helpers"

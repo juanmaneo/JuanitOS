@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Layout of the boot "card": what the three boot programs all draw.
 //!
 //! The card is a fixed-size picture centred on the screen. The kernel's

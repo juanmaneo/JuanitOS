@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-release` — build the JuanitOS dom0 tarball and live/install ISO.
 //!
 //! Stage 1 runs on a FreeBSD host (a VM is fine, see `builder`); stage 2

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Testing JuanitOS on a real machine
 
 A checklist for the first boot of the live ISO on new hardware, so that

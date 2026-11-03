@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # Ventoy stick image for testing the ISO the way a user boots it from a
 # Ventoy USB key: the stick layout Ventoy2Disk.sh writes (MBR, p1 ext4
 # "Ventoy" holding the ISO, p2 VTOYEFI), booted under QEMU/KVM either

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The `jos-install` binary end to end: what `main` exits with and says.
 //! `PATH` is an empty directory, so no tool of the machine running the
 //! tests is ever started: every host query fails, as on a machine

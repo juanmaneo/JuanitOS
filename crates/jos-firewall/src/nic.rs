@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! A NIC behind the firmware's `SimpleNetwork` protocol, selected by PCI
 //! slot so the upstream/downstream roles follow the bhyve `-s` layout.
 

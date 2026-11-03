@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Coverage per file from llvm-cov's JSON summary, and the ratcheting gate.
 //!
 //! The target is 100 % of lines, functions and regions in every file.
@@ -187,7 +188,8 @@ impl Floors {
 
     pub fn render(&self) -> String {
         let mut s = String::from(
-            "# Coverage allowances checked by `cargo xtask coverage`.\n\
+            "# SPDX-License-Identifier: BSD-3-Clause\n\
+             # Coverage allowances checked by `cargo xtask coverage`.\n\
              #\n\
              # The target is 100 % of lines, functions and regions in every file.\n\
              # Each entry below says how many of them a file may still leave\n\
@@ -419,6 +421,7 @@ mod tests {
         );
         assert_eq!(f.allowed("crates/new.rs"), Allowed::default());
         let text = f.render();
+        assert!(text.starts_with("# SPDX-License-Identifier: "), "{text}");
         assert!(
             text.contains("[files.\"crates/a.rs\"]\nfunctions = 1\n"),
             "{text}"

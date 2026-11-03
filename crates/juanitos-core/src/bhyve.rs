@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! bhyve command construction and VM lifecycle.
 //!
 //! PCI slot layout inside the guest:

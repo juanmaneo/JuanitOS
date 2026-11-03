@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Just enough GPT to find a disk image's EFI system partition, and a
 //! helper that drops a file into it with `mtools` (no root, no loop
 //! devices). Used to give the stock FreeBSD VM image a serial console

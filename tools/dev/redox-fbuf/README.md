@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Redox OS under bhyve: `fbuf` kills the VM
 
 A Redox OS guest with bhyve's `fbuf` display device aborts the whole VM a

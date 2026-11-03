@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Guest-initiated requests with a dom0 policy: the `qrexec` idea of
 //! QubesOS, over the per-qube share ([`crate::share`]).
 //!

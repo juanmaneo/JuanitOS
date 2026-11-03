@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 * text=auto eol=lf
 freebsd/rc.d/* eol=lf
 *.png binary

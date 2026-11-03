@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The config disk written by `jos` (see `jos_fwcfg`) turned into an
 //! owned client table.
 

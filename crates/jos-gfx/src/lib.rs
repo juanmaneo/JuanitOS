@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Boot artwork for JuanitOS, drawn procedurally.
 //!
 //! Three programs show the same picture at different moments of a boot,

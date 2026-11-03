@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # Out-of-tree build against the kernel's sources and drm-kmod's (the tag
 # the dom0's drm-kmod package was built from; see [drm_kmod] in
 # release/juanitos.toml):

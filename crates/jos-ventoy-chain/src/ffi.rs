@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The kernel side: `jos_ventoy_fill_map`, called from `g_ventoy.c`, and
 //! what it needs from the kernel. Only built for `x86_64-unknown-none`
 //! (`jos-release` emits the crate as one object for `geom_ventoy.ko`);

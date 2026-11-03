@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The graphical installer's event loop: keys and mouse packets from the
 //! display go to the [`Wizard`], frames go back to the display, and the
 //! installation itself runs on a background thread that reports

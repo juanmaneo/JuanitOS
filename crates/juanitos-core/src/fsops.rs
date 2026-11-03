@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Filesystem operations that respect `--dry-run`.
 //!
 //! The release builder and the installer both populate directory trees;

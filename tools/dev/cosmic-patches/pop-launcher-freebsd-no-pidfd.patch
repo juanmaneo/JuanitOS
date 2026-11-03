@@ -1,3 +1,4 @@
+SPDX-License-Identifier: GPL-3.0-only
 The pulse plugin waits for pactl through async-pidfd, which is Linux only
 (pidfd_open). tokio's own Child::wait does the same job everywhere.
 Applied to pop-launcher by tools/dev/cosmic-build.sh patch.

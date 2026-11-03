@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # JuanitOS guest agent daemon: runs the commands dom0 sends over the
 # qube's agent channel, a bhyve virtio-console port named "jos"
 # (FreeBSD: /dev/ttyV0.0, Linux: /dev/virtio-ports/jos). Replaces typing

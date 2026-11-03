@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-3-Clause
 """Drive a QEMU serial console (unix socket) from scripts.
 
     tools/dev/serial.py SOCK expect 'login:' [TIMEOUT]      wait for text, print what arrived

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Guest templates built from upstream cloud images.
 //!
 //! QubesOS ships TemplateVMs; JuanitOS builds them on the host from the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Qube-initiated events: the guest-to-dom0 half of the agent channel.
 //!
 //! The virtio-console at slot 30 ([`crate::agent`]) carries a second

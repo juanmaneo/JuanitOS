@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Raw GPT disk images for tests: used by the `disk` unit tests and by the
 //! CLI tests, where a fake `qemu-img convert` copies one into place as the
 //! builder VM's disk.

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # JuanitOS architecture
 
 JuanitOS is a FreeBSD host that runs every workload inside a bhyve virtual

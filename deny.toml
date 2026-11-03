@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # cargo-deny policy, checked by `cargo xtask security-audit` (and so by
 # `cargo xtask ci`) on the three workspaces: the host one, crates/jos-boot
 # and crates/jos-firewall. cargo-audit runs alongside on the same lockfiles.

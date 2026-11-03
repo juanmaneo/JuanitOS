@@ -1,3 +1,4 @@
+SPDX-License-Identifier: GPL-3.0-only
 The bluetooth applet is built on bluer, which refuses to compile anywhere
 but Linux (compile_error!). Make it a Linux-only dependency of the applets
 binary; its desktop entry is still installed and the binary answers it by

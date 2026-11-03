@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-release"
 description = "JuanitOS release builder: assembles the dom0 tarball and the live/install ISO from FreeBSD release artifacts"

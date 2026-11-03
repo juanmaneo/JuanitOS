@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The installation itself: GPT + ESP + ZFS pool, extract the dom0 tarball
 //! the live medium booted from, configure, done.
 //!

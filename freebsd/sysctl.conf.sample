@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # JuanitOS /etc/sysctl.conf sample
 # Hardening knobs in the spirit of HardenedBSD. Review before applying;
 # some may need to be relaxed for specific workloads.

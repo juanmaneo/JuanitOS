@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The `jos-splash` binary: PNG rendering (used by jos-release for the
 //! kernel splash) and the client commands, which must be harmless when no
 //! daemon is running (text boot, or splash already finished).

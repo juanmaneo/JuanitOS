@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The daemon: a scene, a display, and a message loop.
 //!
 //! [`Splash`] is the pure part (state transitions, redraw policy) and is

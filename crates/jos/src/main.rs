@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos` — JuanitOS qube management CLI.
 
 use std::path::PathBuf;

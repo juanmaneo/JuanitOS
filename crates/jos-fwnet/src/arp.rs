@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! ARP over Ethernet/IPv4 (RFC 826), just enough for a gateway.
 
 use alloc::vec::Vec;

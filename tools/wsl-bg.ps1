@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # Run a shell command inside WSL as a detached session that survives the
 # calling terminal (WSL2 stops its VM when no session is open, so a plain
 # `nohup ... &` inside WSL dies after the idle timeout).

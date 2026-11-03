@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-install"
 description = "JuanitOS installer: lays the dom0 from the live ISO onto a ZFS pool"

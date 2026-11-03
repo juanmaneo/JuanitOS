@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # JuanitOS
 
 A FreeBSD distribution with bhyve aiming at beeing like QubesOS for FreeBSD
@@ -59,6 +60,7 @@ crates/jos-ventoy-chain no_std reader of Ventoy's chain blob, linked into geom_v
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
 coverage.toml          per-file uncovered-line/function/region allowances (ratcheted down to 0)
 deny.toml              cargo-deny policy: advisories, licenses, sources
+REUSE.toml             licenses of the files that cannot carry an SPDX tag (binary, generated, vendored)
 templates/             cloud-init user-data of the guest template recipes; agent/ the guest agents (share, jos-agentd) and jos-copy
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
 freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet, the C modules
@@ -244,7 +246,7 @@ Project automation is a Rust program too ([cargo xtask](https://github.com/matkl
 cargo xtask ci            # security audit, fmt, clippy + clang-tidy, tests + coverage gate, UEFI builds
 cargo xtask security-audit  # cargo-audit + cargo-deny (deny.toml) on all three lockfiles
 cargo xtask test          # just the tests (workspace + jos-boot's library on the host)
-cargo xtask lint          # clippy -D warnings on every target, clang-tidy on the C sources
+cargo xtask lint          # SPDX tags, clippy -D warnings on every target, clang-tidy on the C sources
 cargo xtask fmt --fix     # rustfmt, and clang-format on the C sources
 cargo xtask coverage      # lines, functions, regions per file, checked against coverage.toml
 cargo xtask coverage --html --ratchet
@@ -461,5 +463,14 @@ a GRUB module and so GPL-3.0-or-later; nothing else links against it),
 the Rust dependencies' licenses, the projects that inspired the design
 (ideas only, no code taken), and what publishing a built ISO requires
 (sources for the GPL-3.0 COSMIC packages it ships).
+Every file names its license with an `SPDX-License-Identifier:` comment
+in its first lines (line 2 after a `#!` or `#cloud-config` line). The
+files that cannot carry a comment (images, the font, lockfiles, vendored
+files kept as upstream has them) are listed in `REUSE.toml`, in the
+[REUSE](https://reuse.software) format. `cargo xtask lint` checks
+both, and only accepts the licenses `THIRD_PARTY.md` accounts for. The
+license texts are `LICENSE` and those referenced in `THIRD_PARTY.md`.
+There is no `LICENSES/` directory, so `reuse lint` itself would still
+ask for one.
 `AUTHORS` names the copyright holders: Juanito (Juan Manuel CABA
 GONZALEZ-NICOLAS) and the contributors.

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Relibc, COSMIC and the host/guest libc decision
 
 The README states that JuanitOS uses Relibc instead of glibc or musl and the

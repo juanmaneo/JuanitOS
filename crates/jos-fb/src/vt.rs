@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! FreeBSD `vt(4)` framebuffer backend.
 //!
 //! The daemon takes a virtual terminal nobody uses (`ttyv9` by default:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Hardware report (`jos doctor --report FILE`).
 //!
 //! One text file holding the doctor checks and the raw facts needed to

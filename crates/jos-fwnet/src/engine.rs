@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The firewall proper. Frames come in from the upstream NIC (towards
 //! `sys-net`) or the downstream NIC (the client qubes' bridge); the engine
 //! answers ARP/DHCP itself, filters and NATs everything else, and hands

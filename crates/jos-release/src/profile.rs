@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `release/juanitos.toml`.
 
 use std::path::Path;

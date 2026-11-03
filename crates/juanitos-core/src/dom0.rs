@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! What turns a FreeBSD installation into a JuanitOS dom0.
 //!
 //! This is the single source of truth shared by the release builder

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Full-screen graphics on FreeBSD's `vt(4)` console, shared by the boot
 //! splash (`jos-splash`) and the graphical installer (`jos-install`).
 //!

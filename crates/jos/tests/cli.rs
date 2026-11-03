@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! End-to-end tests of the `jos` binary in `--dry-run` mode, against a
 //! throwaway `JOS_CONFIG_DIR`: the README's quick start, the firewall
 //! commands and the error paths. Host commands are only printed, so this

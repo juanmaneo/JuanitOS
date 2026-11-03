@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Packet-level logic for the `jos-firewall` unikernel.
 //!
 //! Everything in here is `no_std` + `alloc`, free of `unsafe`, and takes

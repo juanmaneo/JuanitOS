@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Install medium and installer
 
 ## One dom0, two ways to boot it

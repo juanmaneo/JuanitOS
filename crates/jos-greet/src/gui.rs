@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The greeter's event loop: keys go to the [`Greeter`], frames to the
 //! display, login attempts to a [`Backend`]. Around a desktop session the
 //! display is released (text mode on the same VT, for seatd and the

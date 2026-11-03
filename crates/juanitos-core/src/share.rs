@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The per-qube share: a dom0 directory exported to the guest over
 //! virtio-9p, the channel for everything dom0 tells a qube and for
 //! `jos copy` (the inter-qube file transfer).

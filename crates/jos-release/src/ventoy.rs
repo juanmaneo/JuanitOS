@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `geom_ventoy.ko` for the live ISO.
 //!
 //! Ventoy boots a FreeBSD ISO by injecting a prebuilt `geom_ventoy.ko` for

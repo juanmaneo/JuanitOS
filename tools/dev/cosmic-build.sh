@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # Build the COSMIC desktop (pop-os/cosmic-epoch) from source on FreeBSD and
 # turn every component into a pkg(8) package in a local repository that
 # `jos-release rootfs` installs from (`[packages] local_repo` in

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Turning the bytes a `vt(4)` terminal produces in raw mode into keys.
 //!
 //! With the keyboard in its default `K_XLATE` mode the console sends

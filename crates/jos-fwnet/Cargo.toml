@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-fwnet"
 description = "Packet parsing, filtering, NAT and DHCP logic for the jos-firewall unikernel (no_std + alloc, host-testable)"

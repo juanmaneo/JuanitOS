@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Host readiness checks (`jos doctor`).
 
 use std::path::Path;

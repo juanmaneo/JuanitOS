@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Port-restricted cone NAT (the mirage-nat model): every (client, port,
 //! remote, port) flow gets its own public port; replies are accepted only
 //! from the remote endpoint the client talked to.

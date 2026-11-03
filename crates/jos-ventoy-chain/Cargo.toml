@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-ventoy-chain"
 description = "Fills geom_ventoy's disk map from the chain blob Ventoy's GRUB preloads (no_std; linked into the kernel module)"

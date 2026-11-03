@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Qube definitions and global configuration.
 //!
 //! Each qube is stored as one TOML file under `GlobalConfig::qubes_dir()`.

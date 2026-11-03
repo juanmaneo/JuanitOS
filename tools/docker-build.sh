@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # Build every Rust artifact of JuanitOS. Runs inside the Dockerfile image
 # (entrypoint) but works on any Linux with the same toolchain:
 #   rustup target add x86_64-unknown-uefi; apt install mtools

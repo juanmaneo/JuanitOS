@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Security model and its sources
 
 JuanitOS borrows from three projects. Each one solves a different part of

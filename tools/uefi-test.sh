@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # Boot the JuanitOS UEFI applications under QEMU + OVMF on a Linux host.
 # Needs: qemu-system-x86_64, OVMF, mtools (mformat/mcopy). No root.
 #

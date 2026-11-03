@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Release artifacts: FreeBSD distribution manifests, our own dom0 tarball
 //! manifest, and the `release.toml` record stamped into every dom0.
 

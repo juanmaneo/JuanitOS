@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Bounds-checked views over raw frames. Parsers check a header's length
 //! once and then read fixed fields, so a truncated or malformed packet can
 //! never panic the firewall.

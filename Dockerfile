@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # Stage 0 of the JuanitOS bootstrap: a reproducible Linux toolchain that
 # builds every Rust artifact (host workspace, UEFI applications, firewall
 # image) on any machine with Docker. It does NOT build the ISO: that needs

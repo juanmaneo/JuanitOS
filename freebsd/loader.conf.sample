@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # JuanitOS /boot/loader.conf sample
 # Copy the relevant lines into /boot/loader.conf on the host.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-greet` — the JuanitOS login screen.
 //!
 //! Started by `rc.d/jos-login` (under daemon(8), restarted if it dies) on

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # GPU passthrough: NVIDIA + CUDA in a Linux qube
 
 NVIDIA's FreeBSD driver has no CUDA support, so compute workloads live in a

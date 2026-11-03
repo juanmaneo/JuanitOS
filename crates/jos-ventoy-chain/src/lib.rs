@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Fills `geom_ventoy`'s disk map from the chain blob Ventoy's GRUB builds.
 //!
 //! Ventoy's normal FreeBSD boot writes the ISO's disk map into

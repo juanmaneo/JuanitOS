@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-install` — the JuanitOS installer.
 //!
 //! Runs on the live ISO. First it runs the same host checks as `jos doctor`:

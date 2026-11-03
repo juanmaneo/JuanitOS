@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The graphical installer's model: pages, fields, focus, validation.
 //!
 //! Inspired by Calamares (a sidebar of steps walked in order) and by

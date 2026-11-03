@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # Everything is in `cargo xtask ci` (xtask/src/main.rs), so CI and a
 # developer's machine run exactly the same checks.
 name: CI

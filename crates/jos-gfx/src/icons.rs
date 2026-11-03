@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The logo and the boot-stage icons, drawn from primitives.
 //!
 //! Every icon is designed in a unit square and scaled to `size` pixels, so

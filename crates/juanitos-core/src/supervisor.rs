@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Per-qube supervisor: keeps a guest booted across reboots.
 //!
 //! `jos start <name>` spawns `jos supervise <name>` in the background; the

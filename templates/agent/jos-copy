@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # jos-copy PATH QUBE: ask dom0 to copy PATH from this qube into QUBE's
 # inbox (/mnt/jos/in/<this qube>/ there). The file goes to the outbox of
 # the dom0 share, a request goes to /mnt/jos/req/, and dom0 (`jos serve`)

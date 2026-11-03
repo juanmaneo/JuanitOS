@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-fb"
 description = "JuanitOS full-screen graphics on the FreeBSD vt(4) framebuffer: display, pixel packing, keyboard decoding"

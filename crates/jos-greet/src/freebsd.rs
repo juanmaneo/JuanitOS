@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The FreeBSD backend: OpenPAM (`/etc/pam.d/jos-greet`) authenticates
 //! and opens the session; the desktop is started in a child that calls
 //! `setusercontext(3)` (groups, login class, umask, uid: what login(1)

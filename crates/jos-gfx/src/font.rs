@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Anti-aliased text in Open Sans, the interface font of COSMIC.
 //!
 //! The face is embedded (`fonts/OpenSans-Regular.ttf`, SIL OFL 1.1, see

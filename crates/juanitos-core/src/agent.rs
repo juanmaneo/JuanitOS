@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The agent channel: a virtio-console port between dom0 and each FreeBSD
 //! or Linux qube, served inside the guest by `jos-agentd`
 //! (`templates/agent/jos-agentd`). `jos run` uses it instead of typing

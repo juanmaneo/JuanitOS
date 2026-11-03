@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # Out-of-tree build: make SYSDIR=/path/to/usr/src/sys
 KMOD=	jos_bootwatch
 SRCS=	jos_bootwatch.c

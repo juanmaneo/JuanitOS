@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Millisecond clock from the TSC, calibrated once against the firmware's
 //! `stall` (UEFI offers no monotonic clock API while in boot services).
 

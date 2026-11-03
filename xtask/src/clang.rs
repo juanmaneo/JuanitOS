@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! clang-format and clang-tidy on the C sources JuanitOS maintains.
 //!
 //! `.clang-format` (LLVM style) and `.clang-tidy` at the repository root

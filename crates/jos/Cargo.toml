@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos"
 description = "JuanitOS management CLI: create, start, stop and inspect qubes"

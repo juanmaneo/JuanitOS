@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-fwcfg"
 description = "Firewall rule grammar and config-disk format shared by jos and the jos-firewall unikernel"

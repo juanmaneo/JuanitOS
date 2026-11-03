@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The firmware-independent half of `jos-boot`: what the menu offers, how
 //! keys move through it, and how the chosen entry becomes `loader.efi`
 //! arguments. Everything here is plain data so it can be unit-tested on

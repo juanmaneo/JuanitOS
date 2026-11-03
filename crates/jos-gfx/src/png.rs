@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! PNG export (feature `png`, pulls in `std`): used by `jos-release` to
 //! produce the kernel splash image and by `jos-splash render` for
 //! previews. The kernel's `vt(4)` wants a 32-bit RGBA image, which is what

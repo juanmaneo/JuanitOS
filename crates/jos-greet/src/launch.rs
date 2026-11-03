@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! What starting a desktop session means, as data: the account it runs
 //! as, its environment, its command line. The FreeBSD backend executes
 //! this plan (fork, `setusercontext(3)`, exec); building it is pure and

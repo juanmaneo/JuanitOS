@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-greet"
 description = "JuanitOS login screen: a greeter on the vt(4) framebuffer that starts the COSMIC session"

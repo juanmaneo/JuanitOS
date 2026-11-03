@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 # Reproducer: bhyve aborts when a Redox OS guest sizes the BARs of the
 # `fbuf` display device. See README.md next to this script for the
 # analysis. Runs on FreeBSD as root (the build VM of

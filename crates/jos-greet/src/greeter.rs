@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! The login screen as a pure state machine: keys in, [`Action`]s out.
 //! Nothing here touches the system, so every behaviour is unit-tested on
 //! any host; [`crate::gui`] wires it to a display and a [`crate::gui::Backend`].

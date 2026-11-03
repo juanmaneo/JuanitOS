@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # clang-format for the C sources JuanitOS maintains, checked by
 # `cargo xtask fmt` (applied with --fix). Vendored C (freebsd/geom_ventoy)
 # has its own .clang-format that turns formatting off, so it stays as

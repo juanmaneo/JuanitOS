@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! A minimal "expect" over a guest's serial console: wait for a pattern,
 //! send a line. Used to drive the FreeBSD builder VM so stage 1 runs
 //! unattended from a Linux host (`jos-release builder --auto`), the

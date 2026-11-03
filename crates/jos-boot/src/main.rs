@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-boot` — the JuanitOS graphical pre-loader.
 //!
 //! Installed as `EFI/BOOT/BOOTX64.EFI`, it paints the boot card on the

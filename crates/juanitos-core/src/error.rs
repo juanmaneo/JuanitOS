@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Error type shared by all `juanitos-core` modules.
 
 use thiserror::Error;

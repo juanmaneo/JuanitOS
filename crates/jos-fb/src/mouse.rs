@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Mouse packets from FreeBSD's `/dev/sysmouse`.
 //!
 //! `moused` feeds every mouse and touchpad into `sysmouse(4)`. Opened at

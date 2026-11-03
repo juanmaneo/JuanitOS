@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Inter-qube: the share, the guest agent, `jos run`, `jos copy` and the policy
 
 QubesOS has *qrexec*: a dom0-mediated RPC channel between qubes, with

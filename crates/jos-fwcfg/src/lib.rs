@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Firewall rule grammar and configuration-disk format shared by the `jos`
 //! host tooling and the `jos-firewall` unikernel.
 //!

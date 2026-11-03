@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [package]
 name = "jos-splash"
 description = "JuanitOS boot splash daemon: BeOS/Haiku-style stage icons on the vt(4) framebuffer"

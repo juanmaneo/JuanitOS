@@ -1,3 +1,4 @@
+SPDX-License-Identifier: GPL-3.0-only
 When cosmic-comp exits before it is ready (no display, no usable GPU),
 cosmic-session waits for its environment forever: the exit is reported on
 the session channel, which is only read once the session is up. The

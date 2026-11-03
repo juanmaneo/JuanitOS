@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Disk discovery on the live medium (`kern.disks` + `diskinfo`).
 
 use juanitos_core::sys::Runner;

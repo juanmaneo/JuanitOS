@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Host-side networking: one bridge per NetVM/FirewallVM, one tap per qube.
 //!
 //! Interface names on FreeBSD are limited to `IFNAMSIZ - 1` = 15 characters.

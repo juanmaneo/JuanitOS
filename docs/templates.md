@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 # Guest templates
 
 QubesOS ships TemplateVMs; app qubes run on top of them and are thrown

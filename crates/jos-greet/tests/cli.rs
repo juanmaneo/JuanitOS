@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! `jos-greet` as a program: the exit status and error report of `main`.
 
 // Test helpers outside #[test] functions are test code too.

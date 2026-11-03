@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! DHCPv4 (RFC 2131/2132): a server for the client qubes and a client for
 //! the upstream link.
 

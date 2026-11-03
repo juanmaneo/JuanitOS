@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 [Unit]
 Description=JuanitOS guest agent daemon (jos run)
 DefaultDependencies=no

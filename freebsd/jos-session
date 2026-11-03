@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
 #
 # JuanitOS: run a desktop session for the user who just logged in.
 # jos-greet (the login screen) starts every session as

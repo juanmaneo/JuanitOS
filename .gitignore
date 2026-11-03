@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 # Root workspace, and the standalone UEFI workspaces' own target/ dirs
 # (crates/jos-boot, crates/jos-firewall)
 target/
