@@ -57,6 +57,12 @@
 /* 16.16 fixed point of a plane's source rectangle. */
 #define JOS_KMSFB_FIXED_SHIFT 16
 
+/*
+ * The refresh rate of a fixed mode, which compositors pace their frames
+ * on (DRM_SIMPLE_MODE's 1 kHz pixel clock would make it 0 Hz).
+ */
+#define JOS_KMSFB_FIXED_HZ 60
+
 struct jos_kmsfb_bo {
   struct drm_gem_object base;
   struct page** pages;
@@ -478,7 +484,8 @@ static int jos_kmsfb_connector_get_modes(struct drm_connector* connector) {
 
   if (kms->fixed) {
     const struct drm_display_mode mode = {
-        DRM_SIMPLE_MODE((u16)kms->max_width, (u16)kms->max_height, 0, 0),
+        DRM_MODE_INIT(JOS_KMSFB_FIXED_HZ, (u16)kms->max_width,
+                      (u16)kms->max_height, 0, 0),
     };
 
     return drm_connector_helper_get_modes_fixed(connector, &mode);

@@ -224,7 +224,11 @@ few seconds (or when there is no driver to load). `jos-session` sets
 as on VMSVGA, with the limits of a fallback: the firmware's resolution on
 the monitor it lit, rendering on the CPU, UEFI boots only, and a reboot
 before a driver installed later can take the display over. `jos doctor`
-reports it as a warning.
+reports it as a warning. In QEMU with `-vga std` and OVMF (no drm-kmod
+driver for that device), the installed dom0 falls back on it and runs
+the same session at the firmware's 2560x1600:
+
+![COSMIC on jos_efifb in QEMU](images/cosmic-efifb.png)
 
 PipeWire is not running (the settings daemon retries it), and neither is
 a COSMIC session on real hardware yet (amd64 with an Intel or AMD GPU that

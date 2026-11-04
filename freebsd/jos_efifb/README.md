@@ -27,6 +27,13 @@ when there is none; `jos doctor` then warns that the desktop renders in
 software. At load it finds the display device whose memory BAR holds the
 frame buffer and attaches to that device only, below any other driver.
 
+Status: in QEMU with `-vga std` and OVMF (a GOP frame buffer, no
+drm-kmod driver for the device), the ISO installs a dom0 that falls back
+on it at boot and runs the whole COSMIC session at 2560x1600: compositor,
+panel, dock, launcher (`docs/images/cosmic-efifb.png`). The fixed mode
+is offered at 60 Hz: with the 0 Hz of a pixel-clock-less mode,
+`cosmic-comp` drew its first frame and never another.
+
 Original code (BSD-3-Clause). `jos-release` builds it against the
 drm-kmod tag in `[drm_kmod]` of `release/juanitos.toml` and ships it as
 `/boot/modules/jos_efifb.ko`. By hand, on FreeBSD:
