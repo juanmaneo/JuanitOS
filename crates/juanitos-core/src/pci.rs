@@ -453,10 +453,10 @@ ppt0@pci0:1:0:1:\tclass=0x040300 rev=0xa1 hdr=0x00 vendor=0x10de device=0x10f0 s
         assert!(!devs[1].is_nvidia());
         assert_eq!(devs[4].label(), "vendor 0x10de device 0x1234");
         let named = PciDevice {
-            description: Some("NVIDIA RTX 500 Ada".into()),
+            description: Some("NVIDIA GeForce RTX 3050 Mobile".into()),
             ..devs[4].clone()
         };
-        assert_eq!(named.label(), "NVIDIA RTX 500 Ada");
+        assert_eq!(named.label(), "NVIDIA GeForce RTX 3050 Mobile");
     }
 
     #[test]

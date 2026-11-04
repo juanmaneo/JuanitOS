@@ -192,10 +192,10 @@ mod tests {
     use crate::sys::{CmdOutput, MockRunner};
 
     const DMESG: &str = "\
-CPU: Intel(R) Core(TM) Ultra 7 165H (2995.20-MHz K8-class CPU)
+CPU: 12th Gen Intel(R) Core(TM) i7-12700H (2688.00-MHz K8-class CPU)
   VT-x: PAT,HLT,MTF,PAUSE,EPT,UG,VPID
 DMAR: Found table at 0x7a3d0000
-VT(efifb): resolution 2560x1600
+VT(efifb): resolution 1920x1080
 nda0: Serial Number S6XNNS0W123456
 Mounting from cd9660:/dev/iso9660/JUANITOS failed with error 19.
 mountroot>
@@ -247,7 +247,7 @@ mountroot>
             "smbios.system.serial=\"PF3ABCDE\"\n\
              smbios.system.uuid=\"4c4c4544-0000\"\n\
              smbios.chassis.tag=\"ASSET-1\"\n\
-             smbios.system.product=\"21FV\"\n\
+             smbios.system.product=\"Example Laptop\"\n\
              nda0: Serial Number S6XNNS0W123456\n\
              ugen0.2: <Kingstön> SERIAL NUMBER 0123\n\
              vfs.root.mountfrom=\"zfs:zroot/ROOT/default\"\n\
@@ -262,7 +262,10 @@ mountroot>
             "{text}"
         );
         assert!(text.contains("nda0: Serial Number (removed)"), "{text}");
-        assert!(text.contains("smbios.system.product=\"21FV\""), "{text}");
+        assert!(
+            text.contains("smbios.system.product=\"Example Laptop\""),
+            "{text}"
+        );
         assert!(text.contains("zfs:zroot/ROOT/default"), "{text}");
         assert!(
             text.contains("<Kingstön> SERIAL NUMBER (removed)"),

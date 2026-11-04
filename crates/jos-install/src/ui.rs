@@ -939,8 +939,7 @@ pub fn sample_wizard() -> Wizard {
         status,
         detail: detail.into(),
     };
-    // A hybrid-graphics laptop: Intel Arc iGPU for the dom0, NVIDIA for
-    // CUDA.
+    // A hybrid-graphics laptop: Intel iGPU for the dom0, NVIDIA for CUDA.
     let dev = |addr: PciAddr, vendor: u16, device: u16, class: u32, d: &str| PciDevice {
         addr,
         driver: "none0".into(),
@@ -953,37 +952,37 @@ pub fn sample_wizard() -> Wizard {
         dev(
             PciAddr::new(0, 2, 0),
             0x8086,
-            0x7d55,
+            0x46a6,
             0x030000,
-            "Intel Corporation Meteor Lake-P [Intel Arc Graphics]",
+            "Intel Corporation Alder Lake-P GT2 [Iris Xe Graphics]",
         ),
         dev(
             PciAddr::new(0, 20, 3),
             0x8086,
-            0x7e40,
+            0x51f0,
             0x028000,
-            "Intel Corporation Meteor Lake PCH CNVi WiFi",
+            "Intel Corporation Alder Lake-P PCH CNVi WiFi",
         ),
         dev(
             PciAddr::new(0, 31, 6),
             0x8086,
-            0x550a,
+            0x1a1e,
             0x020000,
-            "Intel Corporation Ethernet Connection (18) I219-LM",
+            "Intel Corporation Ethernet Connection (16) I219-LM",
         ),
         dev(
             PciAddr::new(1, 0, 0),
             0x10de,
-            0x28b9,
+            0x25a2,
             0x030000,
-            "NVIDIA Corporation AD107GLM [RTX 500 Ada Generation Laptop GPU]",
+            "NVIDIA Corporation GA107M [GeForce RTX 3050 Mobile]",
         ),
         dev(
             PciAddr::new(1, 0, 1),
             0x10de,
-            0x22be,
+            0x2291,
             0x040300,
-            "NVIDIA Corporation AD107 High Definition Audio Controller",
+            "NVIDIA Corporation GA107 High Definition Audio Controller",
         ),
     ];
     Wizard::new(

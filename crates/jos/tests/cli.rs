@@ -1573,13 +1573,13 @@ fn fake_host(e: &Env, tools: &[(&str, &str)]) -> PathBuf {
 /// (GPU and audio) reserved at install time, the wired NIC on em0.
 #[cfg(unix)]
 const PCICONF: &str = r#"printf '%s\n' \
-  'vgapci0@pci0:0:2:0:  class=0x030000 rev=0x00 hdr=0x00 vendor=0x8086 device=0x7d55' \
+  'vgapci0@pci0:0:2:0:  class=0x030000 rev=0x00 hdr=0x00 vendor=0x8086 device=0x46a6' \
   "    vendor     = 'Intel Corporation'" \
-  "    device     = 'Arc Graphics'" \
-  'ppt0@pci0:1:0:0:  class=0x030000 rev=0xa1 hdr=0x00 vendor=0x10de device=0x28b8' \
+  "    device     = 'Alder Lake-P GT2 [Iris Xe Graphics]'" \
+  'ppt0@pci0:1:0:0:  class=0x030000 rev=0xa1 hdr=0x00 vendor=0x10de device=0x25a2' \
   "    vendor     = 'NVIDIA Corporation'" \
-  "    device     = 'RTX 500 Ada Generation Laptop GPU'" \
-  'ppt1@pci0:1:0:1:  class=0x040300 rev=0xa1 hdr=0x00 vendor=0x10de device=0x22be' \
+  "    device     = 'GA107M [GeForce RTX 3050 Mobile]'" \
+  'ppt1@pci0:1:0:1:  class=0x040300 rev=0xa1 hdr=0x00 vendor=0x10de device=0x2291' \
   'em0@pci0:5:0:0:  class=0x020000 rev=0x10 hdr=0x00 vendor=0x8086 device=0x15bc' \
   "    vendor     = 'Intel Corporation'" \
   "    device     = 'Ethernet Connection I219-LM'""#;
@@ -1598,7 +1598,7 @@ fn a_ready_host_passes_the_doctor_and_setup_reserves_its_cards() {
                 "sysctl",
                 r#"case "$1" in
   hw.vmm.iommu.enable) echo 'hw.vmm.iommu.enable: 1' ;;
-  hw.model) echo 'hw.model: Intel(R) Core(TM) Ultra 7 165H' ;;
+  hw.model) echo 'hw.model: 12th Gen Intel(R) Core(TM) i7-12700H' ;;
   *) exit 1 ;;
 esac"#,
             ),
@@ -1657,7 +1657,7 @@ esac"#,
         report.contains("==== pciconf -lv ====\nvgapci0@pci0:0:2:0:"),
         "{report}"
     );
-    assert!(report.contains("RTX 500 Ada Generation"), "{report}");
+    assert!(report.contains("GeForce RTX 3050 Mobile"), "{report}");
     assert!(
         report.contains("==== uname -a ====\n(exit code"),
         "{report}"
@@ -1667,7 +1667,7 @@ esac"#,
     let all = ok(&["pci", "list"]);
     assert!(all.starts_with("ADDR"), "{all}");
     assert!(
-        all.contains("1/0/0    ppt0       10de:28b8 030000   NVIDIA Corporation RTX 500"),
+        all.contains("1/0/0    ppt0       10de:25a2 030000   NVIDIA Corporation GA107M"),
         "{all}"
     );
     assert!(all.contains("5/0/0    em0"), "{all}");

@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn gpu_modules_follow_drm_kmod() {
         assert_eq!(gpu_kernel_module(0x1002, 0x73bf), Some("amdgpu"));
-        assert_eq!(gpu_kernel_module(0x8086, 0x7d55), Some("i915kms"));
+        assert_eq!(gpu_kernel_module(0x8086, 0x46a6), Some("i915kms"));
         assert_eq!(gpu_kernel_module(0x15ad, 0x0405), Some("jos_vmsvga"));
         assert_eq!(
             gpu_kernel_module(0x15ad, 0x0406),
