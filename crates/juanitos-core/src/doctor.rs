@@ -309,6 +309,12 @@ pub fn run_host_checks(runner: &dyn Runner, cfg: &GlobalConfig) -> Vec<Check> {
 
     checks.push(vmm_device_check(Path::new("/dev/vmm").exists()));
 
+    // The desktop's KMS device is the UEFI frame buffer fallback.
+    let efifb = runner
+        .run("kldstat", &["-q", "-m", crate::dom0::EFIFB_MODULE])
+        .is_ok_and(|out| out.success());
+    checks.extend(software_rendering_check(efifb));
+
     // UEFI firmware
     if Path::new(&cfg.uefi_firmware).is_file() {
         checks.push(Check::new(
@@ -367,6 +373,24 @@ fn vmm_device_check(present: bool) -> Check {
             "missing; appears after vmm is loaded and the first VM is created",
         )
     }
+}
+
+/// A warning when the desktop runs on the UEFI frame buffer fallback
+/// (`jos_efifb`, loaded by `rc.d/jos-kms`): nothing otherwise, the display
+/// is not a requirement of a dom0.
+fn software_rendering_check(efifb: bool) -> Option<Check> {
+    efifb.then(|| {
+        Check::new(
+            "display",
+            Status::Warn,
+            format!(
+                "software rendering: no KMS driver for this GPU, so the desktop \
+                 runs on the UEFI frame buffer ({}) at the firmware's resolution, \
+                 on one monitor",
+                crate::dom0::EFIFB_MODULE
+            ),
+        )
+    })
 }
 
 /// Checks on the ZFS pool and JuanitOS datasets.
@@ -491,6 +515,7 @@ mod tests {
         assert_eq!(get("dataset zroot/juanitos/qubes").status, Status::Warn);
         assert_eq!(get("ppt devices").status, Status::Ok);
         assert_eq!(get("ppt devices").detail, "1/0/0");
+        assert!(checks.iter().all(|c| c.name != "display"));
         assert!(!all_passed(&checks));
 
         let host = run_host_checks(&m, &cfg);
@@ -553,6 +578,23 @@ mod tests {
 
         assert_eq!(vmm_device_check(true).status, Status::Ok);
         assert_eq!(vmm_device_check(false).status, Status::Warn);
+    }
+
+    #[test]
+    fn the_frame_buffer_fallback_is_a_warning() {
+        let m = MockRunner::new()
+            .respond("kldstat", &[], CmdOutput::failed(1, ""))
+            .respond("kldstat", &["-q", "-m", "jos_efifb"], CmdOutput::ok(""));
+        let checks = run_host_checks(&m, &GlobalConfig::default());
+        let display = checks.iter().find(|c| c.name == "display").unwrap();
+        assert_eq!(display.status, Status::Warn);
+        assert!(
+            display.detail.contains("software rendering"),
+            "{}",
+            display.detail
+        );
+        assert!(display.detail.contains("jos_efifb"));
+        assert_eq!(software_rendering_check(false), None);
     }
 
     #[test]

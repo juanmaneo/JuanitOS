@@ -293,7 +293,9 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
 5. `tar -xpf juanitos-dom0.txz -C /mnt --unlink` after verifying the sha256.
 6. `rc.conf` (`zfs_enable`, `jos_enable`, `seatd`, `dbus`, `jos_login`;
    `jos_kms_module` names the `drm-kmod` driver for the GPU `pciconf`
-   reports, loaded by `rc.d/jos-kms` before the boot splash),
+   reports, loaded by `rc.d/jos-kms` before the boot splash, and
+   `jos_kms_fallback="jos_efifb"` the KMS driver on the UEFI frame buffer
+   it loads instead when that gives no `/dev/dri/card0`),
    `loader.conf` (with `pptdevs` for the reserved devices), `fstab` (swap + ESP at `/boot/efi`), `zpool.cache`,
    `jos.toml`. The login screen (`jos-greet` on `ttyv8`, see
    `docs/relibc-cosmic.md`) needs no `/etc/ttys` change: that terminal

@@ -3,8 +3,8 @@
  *
  * Copyright (c) 2026, Juanito and the JuanitOS contributors (see AUTHORS)
  *
- * jos_kmsfb: what JuanitOS's frame buffer KMS drivers (jos_vmsvga)
- * have in common. It gives a dumb frame buffer what a Wayland
+ * jos_kmsfb: what JuanitOS's frame buffer KMS drivers (jos_vmsvga,
+ * jos_efifb) have in common. It gives a dumb frame buffer what a Wayland
  * compositor needs from a KMS driver: one connector, one CRTC, one
  * primary plane (XRGB8888), dumb buffers that user space can map, atomic
  * commits with damage, the fbdev console. There is no acceleration, no

@@ -68,6 +68,7 @@ freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jo
 freebsd/grub           jos_efi.mod: GRUB module that boots the kernel on UEFI (Ventoy's direct kernel boot)
 freebsd/jos_kmsfb      KMS code the frame buffer drivers share (dumb buffers, one plane, damage, fbdev console)
 freebsd/jos_vmsvga     KMS driver for the VMware SVGA II device (VirtualBox VMSVGA, QEMU -vga vmware)
+freebsd/jos_efifb      KMS driver on the UEFI frame buffer: the software-rendered fallback for a GPU without a driver
 docs/                  design notes (docs/images: rendered previews)
 ```
 
@@ -278,8 +279,8 @@ BSD-3-Clause, and on a dependency from anywhere but crates.io; the
 policy is `deny.toml`, where an advisory that does not apply is ignored
 with its reason.
 
-The C sources (the `jos_bootwatch` and `jos_vmsvga` kernel modules, the
-KMS code in `jos_kmsfb`, and the `jos_efi` GRUB module; `freebsd/geom_ventoy` is vendored and left as
+The C sources (the `jos_bootwatch`, `jos_vmsvga` and `jos_efifb` kernel
+modules, the KMS code in `jos_kmsfb`, and the `jos_efi` GRUB module; `freebsd/geom_ventoy` is vendored and left as
 upstream has it)
 are C23 (`-std=gnu23`) in LLVM style, with braces around every
 `if`/`else`/`for`/`while` body (a statement added to an unbraced body is
@@ -441,7 +442,11 @@ PAM on `ttyv8` and starts the session there, and the installer picks the KMS dri
 `freebsd/jos_vmsvga` drives the VMware SVGA II device of VirtualBox
 (VMSVGA) and QEMU: `jos-release vbox` installs the ISO, logs in on the
 login screen and checks that the COSMIC panel comes up, rendered in
-software. `jos-release oci` turns the dom0 tarball into an OCI image
+software. A GPU that no `drm-kmod` driver drives (too new, missing
+firmware, a failed attach) still gets the desktop: `rc.d/jos-kms` then
+loads `freebsd/jos_efifb`, a KMS driver on the UEFI frame buffer, and
+COSMIC renders in software at the firmware's resolution on one monitor
+(`jos doctor` warns about it). `jos-release oci` turns the dom0 tarball into an OCI image
 (`release/oci/Containerfile`) and checks its userland under podman on
 FreeBSD, nested in QEMU on Linux (`docs/installer.md`); its first run
 found that the dom0 shipped without `pkg`.

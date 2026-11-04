@@ -15,8 +15,8 @@ from somewhere else, and under which terms.
 | `freebsd/jos_vmsvga/svga_reg.h` | Original header with the subset of the SVGA II interface the driver uses; register numbers, capability bits and FIFO layout follow VMware's `svga_reg.h` (as shipped with [xf86-video-vmware](https://gitlab.freedesktop.org/xorg/driver/xf86-video-vmware)) | BSD-3-Clause (`LICENSE`); the interface it describes is documented by VMware under the MIT license. |
 | `freebsd/grub/` | Original code (`jos_efi`, a [GRUB](https://www.gnu.org/software/grub/) module: boots the FreeBSD kernel on UEFI for Ventoy's GRUB) written to GRUB's module interface and linked into GRUB when loaded; built against GRUB 2.04's headers, which are fetched, not vendored | GPL-3.0-or-later, © Juanito and the JuanitOS contributors. Only this directory; nothing of JuanitOS links against it. |
 
-Everything else (Rust crates, kernel modules `jos_bootwatch` and
-`jos_vmsvga` with the KMS code in `jos_kmsfb`, rc.d scripts,
+Everything else (Rust crates, kernel modules `jos_bootwatch`,
+`jos_vmsvga` and `jos_efifb` with the KMS code in `jos_kmsfb`, rc.d scripts,
 templates, boot artwork, the icons) is original work under
 `LICENSE`.
 

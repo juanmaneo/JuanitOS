@@ -25,8 +25,9 @@
 //! adds GRUB's headers (the `[grub]` tarball of the profile, sha256-checked,
 //! `include/` kept under `~/.cache/juanitos/grub-<version>/`).
 //!
-//! `freebsd/jos_vmsvga` is a DRM driver built against drm-kmod, on top of
-//! the KMS code in `freebsd/jos_kmsfb`: besides the kernel flags both get
+//! `freebsd/jos_vmsvga` and `freebsd/jos_efifb` are DRM drivers built
+//! against drm-kmod, on top of the KMS code in `freebsd/jos_kmsfb`:
+//! besides the kernel flags they get
 //! the LinuxKPI and drm-kmod headers (the `[drm_kmod]` tarball, kept under
 //! `~/.cache/juanitos/drm-kmod-<tag>/`), the `-DCONFIG_*` set drm-kmod's
 //! `kconfig.mk` gives amd64 and `freebsd/jos_kmsfb` on the include path
@@ -50,7 +51,11 @@ const SRC_SET: &str = "src.txz";
 /// The GRUB module's sources, compiled with its `compile_flags.txt`.
 const GRUB_DIR: &str = "freebsd/grub";
 /// The DRM drivers' sources, compiled against drm-kmod.
-const DRM_DIRS: &[&str] = &["freebsd/jos_kmsfb", "freebsd/jos_vmsvga"];
+const DRM_DIRS: &[&str] = &[
+    "freebsd/jos_efifb",
+    "freebsd/jos_kmsfb",
+    "freebsd/jos_vmsvga",
+];
 /// What the DRM drivers share, on their include path.
 const KMSFB_DIR: &str = "freebsd/jos_kmsfb";
 /// Directories of `usr/src/sys` a kernel module build includes from: the
@@ -794,6 +799,7 @@ mod tests {
             "freebsd/grubby/alice.c",
             "freebsd/jos_vmsvga/jos_vmsvga.c",
             "freebsd/jos_kmsfb/jos_kmsfb.c",
+            "freebsd/jos_efifb/jos_efifb.c",
         ]
         .map(PathBuf::from);
         let g = Groups::of(files.to_vec());

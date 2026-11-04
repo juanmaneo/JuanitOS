@@ -74,7 +74,7 @@ builds COSMIC itself.
 | Need                 | Linux usual     | FreeBSD host                          |
 |----------------------|-----------------|---------------------------------------|
 | compositor + shell   | `cosmic-*`      | built from `pop-os/cosmic-epoch` (`epoch-1.10.0`) by `tools/dev/cosmic-build.sh`, shipped as a local `pkg` repository |
-| KMS drivers          | kernel          | `graphics/drm-kmod`; the installer sets `jos_kms_module` to `amdgpu`/`i915kms` from `pciconf` (`rc.d/jos-kms` loads it before the boot splash) |
+| KMS drivers          | kernel          | `graphics/drm-kmod`; the installer sets `jos_kms_module` to `amdgpu`/`i915kms` from `pciconf` (`rc.d/jos-kms` loads it before the boot splash), with `jos_efifb` on the UEFI frame buffer as the fallback |
 | seat / VT handling   | `logind`        | `sysutils/seatd` (+ `libseat`)         |
 | desktop IPC          | `dbus`          | `devel/dbus`                           |
 | login                | `cosmic-greeter`| `jos-greet` (Rust, `crates/jos-greet`) on `ttyv8`; `cosmic-greeter` needs greetd |
@@ -211,6 +211,20 @@ library, the workspaces view, notifications and the settings daemon
 (`desktop.png` of that run):
 
 ![COSMIC on jos_vmsvga in VirtualBox](images/cosmic-vmsvga.png)
+
+`drm-kmod` has no simpledrm or efidrm either, so a GPU it does not drive
+(too new for it, firmware missing, an attach that fails) would leave the
+compositor without a KMS device. On top of the same KMS code
+(`freebsd/jos_kmsfb`), `freebsd/jos_efifb` drives the frame buffer the
+UEFI firmware left on screen: the installer writes
+`jos_kms_fallback="jos_efifb"` next to `jos_kms_module`, and
+`rc.d/jos-kms` loads it when the driver gives no `/dev/dri/card0` within a
+few seconds (or when there is no driver to load). `jos-session` sets
+`GBM_ALWAYS_SOFTWARE=1` whenever there is no render node, so COSMIC runs
+as on VMSVGA, with the limits of a fallback: the firmware's resolution on
+the monitor it lit, rendering on the CPU, UEFI boots only, and a reboot
+before a driver installed later can take the display over. `jos doctor`
+reports it as a warning.
 
 PipeWire is not running (the settings daemon retries it), and neither is
 a COSMIC session on real hardware yet (amd64 with an Intel or AMD GPU that

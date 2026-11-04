@@ -112,6 +112,12 @@ pub fn gpu_kernel_module(vendor: u16, device: u16) -> Option<&'static str> {
 /// installed in `/boot/modules`.
 pub const VMSVGA_MODULE: &str = "jos_vmsvga";
 
+/// The KMS driver on the UEFI firmware's frame buffer, built from
+/// `freebsd/jos_efifb` like [`VMSVGA_MODULE`]: `rc.d/jos-kms` loads it
+/// (`jos_kms_fallback`) when no other driver gave a KMS device, so the
+/// desktop still starts, rendered in software.
+pub const EFIFB_MODULE: &str = "jos_efifb";
+
 /// The login screen, `jos-greet`, runs on this virtual terminal (1-based).
 /// VT 9 is `ttyv8`, whose line in FreeBSD's stock `/etc/ttys` is `off`
 /// (it is reserved for xdm), so no getty competes for it and neither
@@ -315,6 +321,12 @@ pub fn rc_conf(flavor: Flavor, opts: &Dom0Options) -> String {
     if let Some(m) = opts.gpu_module.as_deref().filter(|_| opts.gui) {
         s.push_str("# KMS driver for the dom0's display, loaded quietly before the boot splash\n");
         s.push_str(&format!("jos_kms_module=\"{m}\"\n"));
+    }
+    if opts.gui && flavor == Flavor::Installed {
+        s.push_str(
+            "# ... and when it gives no /dev/dri/card0 (or there is none): the UEFI frame buffer\n",
+        );
+        s.push_str(&format!("jos_kms_fallback=\"{EFIFB_MODULE}\"\n"));
     }
     match flavor {
         Flavor::Live => {
@@ -522,6 +534,8 @@ mod tests {
         assert!(s.contains("jos_enable=\"NO\""));
         assert!(s.contains("hostname=\"juanitos\""));
         assert!(!s.contains("jos_login_enable"));
+        // The installer draws on vt(4)'s efifb itself.
+        assert!(!s.contains("jos_kms_fallback"));
     }
 
     #[test]
@@ -553,9 +567,12 @@ mod tests {
         assert!(!no_gui.contains("seatd_enable"));
         assert!(!no_gui.contains("jos_login_enable"));
         assert!(
-            !no_gui.contains("jos_kms_module"),
+            !no_gui.contains("jos_kms_module") && !no_gui.contains("jos_kms_fallback"),
             "no KMS driver without a desktop"
         );
+        // A GPU without a known driver still gets the fallback.
+        assert!(s.contains("jos_kms_fallback=\"jos_efifb\""));
+        assert!(!s.contains("jos_kms_module"));
 
         let amd = rc_conf(
             Flavor::Installed,
@@ -597,9 +614,9 @@ mod tests {
         let session = find("/usr/local/libexec/jos-session");
         assert!(session.2, "the session wrapper must be executable");
         assert!(session.1.contains("XDG_RUNTIME_DIR"));
-        assert!(session
-            .1
-            .contains(&format!("kldstat -q -n {VMSVGA_MODULE}; then\n")));
+        // jos_vmsvga and jos_efifb have no render node: Mesa's GBM must
+        // render in software.
+        assert!(session.1.contains("for node in /dev/dri/renderD*; do"));
         assert!(session.1.contains("GBM_ALWAYS_SOFTWARE:=1"));
         assert!(
             session.1.trim_end().ends_with("exec \"$@\""),
@@ -799,6 +816,10 @@ mod tests {
         assert!(k.contains("# BEFORE: jos-splash kld"));
         assert!(k.contains("kldload -n \"${jos_kms_module}\""));
         assert!(!k.contains("echo"));
+        // The fallback only when the real driver gave no KMS device.
+        let at = |needle: &str| k.find(needle).unwrap();
+        assert!(at("kldload -n \"${jos_kms_module}\"") < at("jos_kms_wait_card\n\tfi"));
+        assert!(at("[ ! -c /dev/dri/card0 ]") < at("kldload -n \"${jos_kms_fallback}\""));
         // A local script cannot come before kld (first pass of /etc/rc).
         let files = static_files();
         for name in ["jos-kms", "jos-splash", "jos-bootok"] {

@@ -24,11 +24,16 @@ fi
 export XDG_SESSION_TYPE=wayland
 : "${XDG_CURRENT_DESKTOP:=COSMIC}"
 export XDG_CURRENT_DESKTOP
-# jos_vmsvga (VirtualBox's VMSVGA, QEMU's vmware display) is a KMS driver
-# without 3D and without a render node: Mesa's GBM refuses it ("failed to
-# get compatible render device") unless told to render in software
+# jos_vmsvga (VirtualBox's VMSVGA, QEMU's vmware display) and jos_efifb
+# (the UEFI frame buffer, when no driver drives the GPU) are KMS drivers
+# without 3D and without a render node: Mesa's GBM refuses them ("failed
+# to get compatible render device") unless told to render in software
 # (kms_swrast on the dumb buffers).
-if /sbin/kldstat -q -n jos_vmsvga; then
+render=
+for node in /dev/dri/renderD*; do
+	[ -c "${node}" ] && render=${node}
+done
+if [ -z "${render}" ]; then
 	: "${GBM_ALWAYS_SOFTWARE:=1}"
 	export GBM_ALWAYS_SOFTWARE
 fi

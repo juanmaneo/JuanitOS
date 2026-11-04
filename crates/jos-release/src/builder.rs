@@ -555,12 +555,19 @@ impl<'a> Builder<'a> {
                  cannot mount its root stays on the splash"
             );
         }
-        if let Err(e) = self.drm_module(dom0::VMSVGA_MODULE) {
-            println!(
-                "   warning: {}.ko not built ({e:#}); no desktop on VirtualBox's \
-                 VMSVGA or QEMU's vmware display",
-                dom0::VMSVGA_MODULE
-            );
+        for (name, without) in [
+            (
+                dom0::VMSVGA_MODULE,
+                "no desktop on VirtualBox's VMSVGA or QEMU's vmware display",
+            ),
+            (
+                dom0::EFIFB_MODULE,
+                "no desktop on a GPU that drm-kmod does not drive",
+            ),
+        ] {
+            if let Err(e) = self.drm_module(name) {
+                println!("   warning: {name}.ko not built ({e:#}); {without}");
+            }
         }
 
         // Base has no /etc/fstab; the installer and the ISO step write
@@ -1076,7 +1083,8 @@ impl Builder<'_> {
     /// drm-kmod) in the dom0's `/boot/modules`: `jos_vmsvga.ko`, the KMS
     /// driver of the VMware SVGA II device VirtualBox and QEMU emulate,
     /// which the installer names in `jos_kms_module` when it finds the
-    /// device, as it names `amdgpu` or `i915kms`.
+    /// device, as it names `amdgpu` or `i915kms`; `jos_efifb.ko`, the
+    /// UEFI frame buffer fallback of `jos_kms_fallback`.
     fn drm_module(&self, name: &str) -> anyhow::Result<()> {
         let Some(src) = self.vendored(name) else {
             return Ok(());
@@ -1995,7 +2003,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dom0_ships_the_vmsvga_driver_when_it_builds() {
+    fn the_dom0_ships_the_drm_drivers_when_they_build() {
         let s = Scratch::new("vmsvga");
         let mut profile = Profile {
             source: Source {
@@ -2007,13 +2015,16 @@ mod tests {
         for bin in dom0::BINARIES {
             s.put(&format!("bins/{bin}"), b"elf");
         }
-        s.put("repo/freebsd/jos_vmsvga/Makefile", b"KMOD=jos_vmsvga\n");
+        for name in [dom0::VMSVGA_MODULE, dom0::EFIFB_MODULE] {
+            s.put(&format!("repo/freebsd/{name}/Makefile"), b"KMOD=x\n");
+            // `make` is mocked: the module it would build.
+            s.put(&format!("repo/freebsd/{name}/{name}.ko"), name.as_bytes());
+        }
         s.put("root/usr/src/sys/conf/kmod.mk", b"");
-        // `make` is mocked: the module it would build.
-        s.put("repo/freebsd/jos_vmsvga/jos_vmsvga.ko", b"\x7fELF");
         let tarball = pinned(&s, &mut profile.drm_kmod);
         let work = s.0.join("work");
         let module = work.join("rootfs/boot/modules/jos_vmsvga.ko");
+        let efifb = work.join("rootfs/boot/modules/jos_efifb.ko");
         let install = |m: &MockRunner, profile: &Profile| {
             let _ = std::fs::remove_dir_all(work.join("rootfs"));
             real_builder(m, profile, &s.0).install_juanitos().unwrap();
@@ -2021,7 +2032,8 @@ mod tests {
 
         let m = MockRunner::new();
         install(&m, &profile);
-        assert_eq!(std::fs::read(&module).unwrap(), b"\x7fELF");
+        assert_eq!(std::fs::read(&module).unwrap(), b"jos_vmsvga");
+        assert_eq!(std::fs::read(&efifb).unwrap(), b"jos_efifb");
         let top = "drm-kmod-drm_v6.12.110_1";
         let members: Vec<String> = DRM_KMOD_MEMBERS
             .iter()
@@ -2044,6 +2056,9 @@ mod tests {
             unix(&work.join(top)),
             unix(&s.0.join("repo/freebsd/jos_kmsfb"))
         )));
+        assert!(calls
+            .iter()
+            .any(|c| c.starts_with(&format!("make -C {} ", unix(&work.join("jos_efifb"))))));
         assert!(calls.contains(&format!(
             "kldxref {}",
             unix(&work.join("rootfs/boot/modules"))
@@ -2055,11 +2070,11 @@ mod tests {
             &MockRunner::new().respond("make", &[], CmdOutput::failed(2, "cc: error")),
             &profile,
         );
-        assert!(!module.exists());
+        assert!(!module.exists() && !efifb.exists());
         std::fs::write(&tarball, b"tampered").unwrap();
         let m = MockRunner::new();
         install(&m, &profile);
-        assert!(!module.exists());
+        assert!(!module.exists() && !efifb.exists());
         assert!(!m.calls().iter().any(|c| c.starts_with("make ")));
     }
 
@@ -2576,6 +2591,7 @@ mod tests {
             VENTOY_MODULE,
             dom0::BOOTWATCH_MODULE,
             dom0::VMSVGA_MODULE,
+            dom0::EFIFB_MODULE,
             GRUB_DIR,
         ] {
             s.put(&format!("repo/freebsd/{name}/Makefile"), b"");

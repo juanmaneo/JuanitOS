@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-# The build of a jos_kmsfb driver (freebsd/jos_vmsvga):
+# The build of a jos_kmsfb driver (freebsd/jos_vmsvga, freebsd/jos_efifb):
 # its Makefile sets KMOD, SRCS and KMSFB (this directory, by default its
 # sibling; jos-release passes it when it builds a copy), then includes
 # this. Out of tree, against the kernel's sources and drm-kmod's (the tag

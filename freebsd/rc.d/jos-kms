@@ -14,8 +14,13 @@
 # announces what it loads on the console and that would end the kernel
 # splash. This loads quietly, as early as kld would.
 #
+# When that gives no KMS device (no driver for the GPU, missing firmware,
+# a failed attach) the fallback, jos_efifb on the UEFI frame buffer, is
+# loaded so that the desktop still starts, rendered in software.
+#
 # /etc/rc.conf:
 #   jos_kms_module="amdgpu"
+#   jos_kms_fallback="jos_efifb"
 
 . /etc/rc.subr
 
@@ -26,11 +31,31 @@ stop_cmd=":"
 load_rc_config $name
 
 : ${jos_kms_module:=""}
+: ${jos_kms_fallback:=""}
+
+# A driver makes /dev/dri/card0 as it attaches; give one that finishes in
+# the background a few seconds.
+jos_kms_wait_card()
+{
+	local tries
+
+	tries=10
+	while [ ! -c /dev/dri/card0 ] && [ "${tries}" -gt 0 ]; do
+		sleep 0.3
+		tries=$((tries - 1))
+	done
+}
 
 jos_kms_start()
 {
-	[ -n "${jos_kms_module}" ] || return 0
-	/sbin/kldload -n "${jos_kms_module}"
+	if [ -n "${jos_kms_module}" ]; then
+		/sbin/kldload -n "${jos_kms_module}"
+		jos_kms_wait_card
+	fi
+	if [ -n "${jos_kms_fallback}" ] && [ ! -c /dev/dri/card0 ]; then
+		/sbin/kldload -n "${jos_kms_fallback}"
+	fi
+	return 0
 }
 
 run_rc_command "$1"

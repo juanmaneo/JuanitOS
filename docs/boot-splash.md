@@ -175,6 +175,8 @@ the `kld` message above. `rc.d/jos-kms` (`REQUIRE: kldxref`, `BEFORE:
 jos-splash kld`) loads `jos_kms_module` from `rc.conf` with a quiet
 `kldload -n` instead, as early as `kld` would have; the kernel redraws its
 splash with the new driver (`vt_replace_backend`), so the picture stays.
+When that gives no `/dev/dri/card0`, it loads `jos_kms_fallback`
+(`jos_efifb`, a KMS driver on the same UEFI frame buffer) the same way.
 
 ```text
 stage <boot|kernel|storage|network|qubes|desktop>   light that icon (and earlier ones)

@@ -1,7 +1,8 @@
 <!-- SPDX-License-Identifier: BSD-3-Clause -->
 # jos_kmsfb
 
-The KMS code of JuanitOS's frame buffer drivers (`freebsd/jos_vmsvga`):
+The KMS code of JuanitOS's frame buffer drivers (`freebsd/jos_vmsvga`,
+`freebsd/jos_efifb`):
 dumb buffers in system memory that user space maps, one connector, CRTC
 and XRGB8888 primary plane, atomic commits with damage, and the fbdev
 console with a timer that pushes a mapped console shadow to the screen.
