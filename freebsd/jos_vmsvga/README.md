@@ -4,10 +4,11 @@
 KMS driver for the VMware SVGA II display device: VirtualBox's VMSVGA
 adapter and QEMU's `-vga vmware`. drm-kmod has no driver for it, so
 without this module `cosmic-comp` finds no DRM device in those VMs and
-the desktop cannot start. It is a plain frame buffer driver (one
-connector, CRTC and primary plane, dumb buffers, atomic commits with
-damage); Mesa renders with `kms_swrast`. Design notes are at the top of
-`jos_vmsvga.c`.
+the desktop cannot start. It is a plain frame buffer driver on
+`freebsd/jos_kmsfb` (one connector, CRTC and primary plane, dumb
+buffers, atomic commits with damage); Mesa renders with `kms_swrast`.
+This directory holds the device side: registers, the command FIFO and
+one `SVGA_CMD_UPDATE` per damaged rectangle (`jos_vmsvga.c`).
 
 Original code (BSD-3-Clause), not a port of Linux's vmwgfx; the register
 and FIFO constants in `svga_reg.h` follow VMware's MIT-licensed

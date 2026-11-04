@@ -25,7 +25,9 @@ pub const SRC_SET: &str = "src.txz";
 pub const VENTOY_MODULE: &str = "geom_ventoy";
 /// `freebsd/grub`: the GRUB module for Ventoy's direct kernel boot.
 pub const GRUB_DIR: &str = "grub";
-/// What `freebsd/jos_vmsvga` needs of drm-kmod's tarball.
+/// `freebsd/jos_kmsfb`: the code the DRM drivers share, and their build.
+pub const KMSFB_DIR: &str = "jos_kmsfb";
+/// What the DRM drivers (see [`KMSFB_DIR`]) need of drm-kmod's tarball.
 pub const DRM_KMOD_MEMBERS: &[&str] = &[
     "compiler_flags.mk",
     "drivers/gpu/drm/drm_os_freebsd.h",
@@ -553,7 +555,7 @@ impl<'a> Builder<'a> {
                  cannot mount its root stays on the splash"
             );
         }
-        if let Err(e) = self.vmsvga_module() {
+        if let Err(e) = self.drm_module(dom0::VMSVGA_MODULE) {
             println!(
                 "   warning: {}.ko not built ({e:#}); no desktop on VirtualBox's \
                  VMSVGA or QEMU's vmware display",
@@ -922,7 +924,7 @@ impl Builder<'_> {
     }
 
     /// drm-kmod's LinuxKPI and DRM headers and the make fragments
-    /// `freebsd/jos_vmsvga/Makefile` includes (`[drm_kmod]` in the profile).
+    /// `freebsd/jos_kmsfb/kmsfb.mk` includes (`[drm_kmod]` in the profile).
     fn drm_kmod_sources(&self) -> anyhow::Result<PathBuf> {
         self.tarball_sources(
             &self.profile.drm_kmod,
@@ -1070,17 +1072,21 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// `jos_vmsvga.ko` (see `freebsd/jos_vmsvga`), the KMS driver of the
-    /// VMware SVGA II device VirtualBox and QEMU emulate, in the dom0's
-    /// `/boot/modules`. The installer names it in `jos_kms_module` when it
-    /// finds the device, as it names `amdgpu` or `i915kms`.
-    fn vmsvga_module(&self) -> anyhow::Result<()> {
-        let name = dom0::VMSVGA_MODULE;
+    /// The DRM driver `freebsd/<name>` (built on [`KMSFB_DIR`] against
+    /// drm-kmod) in the dom0's `/boot/modules`: `jos_vmsvga.ko`, the KMS
+    /// driver of the VMware SVGA II device VirtualBox and QEMU emulate,
+    /// which the installer names in `jos_kms_module` when it finds the
+    /// device, as it names `amdgpu` or `i915kms`.
+    fn drm_module(&self, name: &str) -> anyhow::Result<()> {
         let Some(src) = self.vendored(name) else {
             return Ok(());
         };
         let drm = format!("DRMKMOD={}", Self::s(&self.drm_kmod_sources()?));
-        let bytes = self.make_kmod(&src, name, &[&drm])?;
+        let kmsfb = format!(
+            "KMSFB={}",
+            Self::s(&self.repo.join("freebsd").join(KMSFB_DIR))
+        );
+        let bytes = self.make_kmod(&src, name, &[&drm, &kmsfb])?;
         self.install_kmod("boot/modules", name, &bytes)
     }
 
@@ -2032,10 +2038,11 @@ mod tests {
             "{calls:?}"
         );
         assert!(calls.contains(&format!(
-            "make -C {} SYSDIR={} DRMKMOD={}",
+            "make -C {} SYSDIR={} DRMKMOD={} KMSFB={}",
             unix(&work.join("jos_vmsvga")),
             unix(&s.0.join("root/usr/src/sys")),
-            unix(&work.join(top))
+            unix(&work.join(top)),
+            unix(&s.0.join("repo/freebsd/jos_kmsfb"))
         )));
         assert!(calls.contains(&format!(
             "kldxref {}",

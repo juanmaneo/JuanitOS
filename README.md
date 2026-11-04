@@ -66,6 +66,7 @@ release/juanitos.toml  release profile (FreeBSD version, packages, label)
 release/oci            Containerfile: the dom0 tarball as an OCI image (podman on FreeBSD)
 freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet, the C modules
 freebsd/grub           jos_efi.mod: GRUB module that boots the kernel on UEFI (Ventoy's direct kernel boot)
+freebsd/jos_kmsfb      KMS code the frame buffer drivers share (dumb buffers, one plane, damage, fbdev console)
 freebsd/jos_vmsvga     KMS driver for the VMware SVGA II device (VirtualBox VMSVGA, QEMU -vga vmware)
 docs/                  design notes (docs/images: rendered previews)
 ```
@@ -277,8 +278,8 @@ BSD-3-Clause, and on a dependency from anywhere but crates.io; the
 policy is `deny.toml`, where an advisory that does not apply is ignored
 with its reason.
 
-The C sources (the `jos_bootwatch` and `jos_vmsvga` kernel modules and
-the `jos_efi` GRUB module; `freebsd/geom_ventoy` is vendored and left as
+The C sources (the `jos_bootwatch` and `jos_vmsvga` kernel modules, the
+KMS code in `jos_kmsfb`, and the `jos_efi` GRUB module; `freebsd/geom_ventoy` is vendored and left as
 upstream has it)
 are C23 (`-std=gnu23`) in LLVM style, with braces around every
 `if`/`else`/`for`/`while` body (a statement added to an unbraced body is

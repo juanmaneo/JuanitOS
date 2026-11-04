@@ -25,10 +25,12 @@
 //! adds GRUB's headers (the `[grub]` tarball of the profile, sha256-checked,
 //! `include/` kept under `~/.cache/juanitos/grub-<version>/`).
 //!
-//! `freebsd/jos_vmsvga` is a DRM driver built against drm-kmod: on top of
-//! the kernel flags it gets the LinuxKPI and drm-kmod headers (the
-//! `[drm_kmod]` tarball, kept under `~/.cache/juanitos/drm-kmod-<tag>/`)
-//! and the `-DCONFIG_*` set drm-kmod's `kconfig.mk` gives amd64.
+//! `freebsd/jos_vmsvga` is a DRM driver built against drm-kmod, on top of
+//! the KMS code in `freebsd/jos_kmsfb`: besides the kernel flags both get
+//! the LinuxKPI and drm-kmod headers (the `[drm_kmod]` tarball, kept under
+//! `~/.cache/juanitos/drm-kmod-<tag>/`), the `-DCONFIG_*` set drm-kmod's
+//! `kconfig.mk` gives amd64 and `freebsd/jos_kmsfb` on the include path
+//! (as `kmsfb.mk` does).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -47,8 +49,10 @@ const PROFILE: &str = "release/juanitos.toml";
 const SRC_SET: &str = "src.txz";
 /// The GRUB module's sources, compiled with its `compile_flags.txt`.
 const GRUB_DIR: &str = "freebsd/grub";
-/// The DRM driver's sources, compiled against drm-kmod.
-const DRM_DIR: &str = "freebsd/jos_vmsvga";
+/// The DRM drivers' sources, compiled against drm-kmod.
+const DRM_DIRS: &[&str] = &["freebsd/jos_kmsfb", "freebsd/jos_vmsvga"];
+/// What the DRM drivers share, on their include path.
+const KMSFB_DIR: &str = "freebsd/jos_kmsfb";
 /// Directories of `usr/src/sys` a kernel module build includes from: the
 /// kernel's own headers, the ck concurrency kit, the `machine`/`x86`
 /// directories `bsd.kmod.mk` links into the build, and what LinuxKPI's
@@ -108,7 +112,7 @@ pub fn fmt(root: &Path, fix: bool) -> anyhow::Result<()> {
 }
 
 /// clang-tidy every C file we maintain: the GRUB module with its own
-/// flags and GRUB's headers, the DRM driver against drm-kmod, the rest as
+/// flags and GRUB's headers, the DRM drivers against drm-kmod, the rest as
 /// plain FreeBSD kernel modules.
 pub fn tidy(root: &Path) -> anyhow::Result<()> {
     let files: Vec<PathBuf> = sources(root)?
@@ -142,6 +146,7 @@ pub fn tidy(root: &Path) -> anyhow::Result<()> {
                 let mut args = tidy_args(std::slice::from_ref(file));
                 args.push("--".into());
                 args.extend(flags.iter().cloned());
+                args.push(format!("-I{KMSFB_DIR}"));
                 args.extend(drm_flags(&drm, &headers, &module_name(file))?);
                 run(root, "clang-tidy", &args)?;
             }
@@ -170,7 +175,7 @@ impl Groups {
         for f in files {
             if f.starts_with(GRUB_DIR) {
                 g.grub.push(f);
-            } else if f.starts_with(DRM_DIR) {
+            } else if DRM_DIRS.iter().any(|d| f.starts_with(d)) {
                 g.drm.push(f);
             } else {
                 g.kmod.push(f);
@@ -490,7 +495,7 @@ fn drm_headers(profile: &Profile) -> anyhow::Result<PathBuf> {
 }
 
 /// What drm-kmod's module Makefiles add to the kernel flags for
-/// `module` (as `freebsd/jos_vmsvga/Makefile` does): the LinuxKPI and drm
+/// `module` (as `freebsd/jos_kmsfb/kmsfb.mk` does): the LinuxKPI and drm
 /// headers, as system headers, the module's names and drm-kmod's
 /// `CONFIG_*` set. `compiler_flags.mk`'s `-include compiler_types.h` is
 /// left out: clang-tidy would take that kernel header for our code.
@@ -788,13 +793,15 @@ mod tests {
             "freebsd/jos_bootwatch/jos_bootwatch.c",
             "freebsd/grubby/alice.c",
             "freebsd/jos_vmsvga/jos_vmsvga.c",
+            "freebsd/jos_kmsfb/jos_kmsfb.c",
         ]
         .map(PathBuf::from);
         let g = Groups::of(files.to_vec());
         assert_eq!(g.grub, [files[0].clone()]);
         assert_eq!(g.kmod, [files[1].clone(), files[2].clone()]);
-        assert_eq!(g.drm, [files[3].clone()]);
+        assert_eq!(g.drm, files[3..]);
         assert_eq!(module_name(&files[3]), "jos_vmsvga");
+        assert!(repo().join(KMSFB_DIR).join("jos_kmsfb.h").is_file());
         assert_eq!(module_name(Path::new("alice.c")), "");
         assert_eq!(
             tidy_args(&g.grub),
