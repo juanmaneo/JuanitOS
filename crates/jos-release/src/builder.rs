@@ -1530,7 +1530,7 @@ mod tests {
         assert!(has("mount -t devfs devfs /work/rootfs/dev"));
         assert!(has("pkg -c /work/rootfs bootstrap -y"));
         assert!(has("pkg -c /work/rootfs update -f"));
-        assert!(has("pkg -c /work/rootfs install -y edk2-bhyve"));
+        assert!(has("pkg -c /work/rootfs install -y pkg edk2-bhyve"));
         assert!(has("etdump --format shell /work/"));
         assert!(has("mkimg -s gpt --capacity 0 -b /work/rootfs/boot/pmbr"));
         assert!(has("bs=32k count=1 conv=notrunc"));
@@ -1538,7 +1538,7 @@ mod tests {
         let update = calls.iter().position(|c| c.contains("update -f")).unwrap();
         let install = calls
             .iter()
-            .position(|c| c.contains("install -y edk2-bhyve"))
+            .position(|c| c.contains("install -y pkg edk2-bhyve"))
             .unwrap();
         assert!(update < install);
         assert!(has("umount /work/rootfs/dev"));

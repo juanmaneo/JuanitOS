@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# The JuanitOS dom0 as an OCI image, for podman on FreeBSD (ocijail). The
+# dom0 tarball is a complete FreeBSD root, so it is the whole image; ADD
+# unpacks it. `jos-release oci` builds it and runs its checks (see
+# docs/installer.md, "The container test"); by hand, from a directory
+# holding juanitos-dom0.txz:
+#
+#   podman build -f release/oci/Containerfile -t localhost/juanitos-dom0 DIR
+#   podman run --rm -it localhost/juanitos-dom0
+#
+# buildah unpacks xz at a crawl; the harness hands it the same tarball as
+# zstd (--build-arg TARBALL=juanitos-dom0.tar.zst), which takes minutes.
+FROM scratch
+ARG TARBALL=juanitos-dom0.txz
+ADD ${TARBALL} /
+LABEL org.opencontainers.image.title="JuanitOS dom0" \
+      org.opencontainers.image.licenses="BSD-3-Clause"
+CMD ["/bin/sh"]

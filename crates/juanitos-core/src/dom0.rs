@@ -13,6 +13,9 @@
 
 /// Packages every dom0 needs. Names are FreeBSD `pkg` origins' package names.
 pub const REQUIRED_PACKAGES: &[&str] = &[
+    // pkg itself: `pkg -c ROOT` runs the build host's pkg in the root, so
+    // `bootstrap` finds pkg present and the root keeps only the base stub.
+    "pkg",
     // bootrom for UEFI guests (sysutils/edk2@bhyve; the old
     // `uefi-edk2-bhyve` port is gone). Also installs the compatibility copy
     // at /usr/local/share/uefi-firmware/BHYVE_UEFI.fd that `jos` uses.

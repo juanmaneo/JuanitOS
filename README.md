@@ -63,6 +63,7 @@ deny.toml              cargo-deny policy: advisories, licenses, sources
 REUSE.toml             licenses of the files that cannot carry an SPDX tag (binary, generated, vendored)
 templates/             cloud-init user-data of the guest template recipes; agent/ the guest agents (share, jos-agentd) and jos-copy
 release/juanitos.toml  release profile (FreeBSD version, packages, label)
+release/oci            Containerfile: the dom0 tarball as an OCI image (podman on FreeBSD)
 freebsd/               loader.conf / sysctl.conf samples, rc.d scripts, pam.d/jos-greet, the C modules
 freebsd/grub           jos_efi.mod: GRUB module that boots the kernel on UEFI (Ventoy's direct kernel boot)
 freebsd/jos_vmsvga     KMS driver for the VMware SVGA II device (VirtualBox VMSVGA, QEMU -vga vmware)
@@ -439,7 +440,10 @@ PAM on `ttyv8` and starts the session there, and the installer picks the KMS dri
 `freebsd/jos_vmsvga` drives the VMware SVGA II device of VirtualBox
 (VMSVGA) and QEMU: `jos-release vbox` installs the ISO, logs in on the
 login screen and checks that the COSMIC panel comes up, rendered in
-software.
+software. `jos-release oci` turns the dom0 tarball into an OCI image
+(`release/oci/Containerfile`) and checks its userland under podman on
+FreeBSD, nested in QEMU on Linux (`docs/installer.md`); its first run
+found that the dom0 shipped without `pkg`.
 
 The Redox display problem was traced with an instrumented bhyve: Redox's
 `pcid` sizes PCI BARs through `pci_types` without disabling memory

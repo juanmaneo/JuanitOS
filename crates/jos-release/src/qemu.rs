@@ -187,7 +187,7 @@ pub fn qemu_args(o: &QemuOptions) -> Vec<String> {
 
 /// Print `program args`, then (unless `dry_run`) run it with the terminal
 /// inherited; a non-zero exit is an error.
-fn run_tool(program: &str, args: &[String], dry_run: bool) -> anyhow::Result<()> {
+pub fn run_tool(program: &str, args: &[String], dry_run: bool) -> anyhow::Result<()> {
     println!("+ {program} {}", args.join(" "));
     if dry_run {
         return Ok(());
@@ -331,13 +331,7 @@ pub const AUTO_STEPS: &[(&str, &str, u64)] = &[
          zpool online -e zroot /dev/$part; zpool list -H -o name,size zroot",
         5,
     ),
-    (
-        "mount the host shares (9p)",
-        "kldload -n virtio_p9fs && mkdir -p /mnt/repo /mnt/out && \
-         mount -t p9fs -o trans=virtio juanitos /mnt/repo && \
-         mount -t p9fs -o trans=virtio out /mnt/out && ls /mnt/repo/Cargo.toml",
-        5,
-    ),
+    MOUNT_SHARES,
     (
         "install the toolchain (rust, git)",
         "env ASSUME_ALWAYS_YES=yes pkg bootstrap -y >/dev/null && pkg install -y rust git && cargo --version",
@@ -388,6 +382,23 @@ pub const AUTO_STEPS: &[(&str, &str, u64)] = &[
     ),
 ];
 
+/// `/mnt/repo` and `/mnt/out`, the shares of [`auto_builder_args`].
+pub const MOUNT_SHARES: (&str, &str, u64) = (
+    "mount the host shares (9p)",
+    "kldload -n virtio_p9fs && mkdir -p /mnt/repo /mnt/out && \
+     mount -t p9fs -o trans=virtio juanitos /mnt/repo && \
+     mount -t p9fs -o trans=virtio out /mnt/out && ls /mnt/repo/Cargo.toml",
+    5,
+);
+
+/// QEMU's name for the format of `disk`: qcow2 by its extension, else raw.
+pub fn disk_format(disk: &Path) -> &'static str {
+    match disk.extension() {
+        Some(e) if e == "qcow2" => "qcow2",
+        _ => "raw",
+    }
+}
+
 /// The stock VM images only talk to the VGA console. Booted through UEFI
 /// they read `/efi/freebsd/loader.env` from their ESP, which is how the
 /// serial console is switched on without touching the ZFS root. Hence the
@@ -411,7 +422,11 @@ pub fn auto_builder_args(b: &AutoBuilder, disk: &Path, vars: &Path) -> Vec<Strin
         "-drive".into(),
         format!("if=pflash,format=raw,file={}", vars.display()),
         "-drive".into(),
-        format!("file={},if=virtio,format=raw", disk.display()),
+        format!(
+            "file={},if=virtio,format={}",
+            disk.display(),
+            disk_format(disk)
+        ),
         "-virtfs".into(),
         format!(
             "local,path={},mount_tag=juanitos,security_model=none,readonly=on,id=juanitos",
@@ -519,18 +534,28 @@ pub fn run_auto_builder(b: &AutoBuilder, dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The console side of [`run_auto_builder`]: log in, run [`AUTO_STEPS`],
-/// power off.
+/// The console side of [`run_auto_builder`].
 fn drive_builder(con: &mut Console<'_>) -> anyhow::Result<()> {
+    drive_steps(con, "builder", AUTO_STEPS.iter().copied())
+}
+
+/// Log in as root (no password, as on the stock VM images), run `steps`,
+/// power off (also after a failed step, so the disk stays consistent).
+pub fn drive_steps<'s>(
+    con: &mut Console<'_>,
+    who: &str,
+    steps: impl IntoIterator<Item = (&'s str, &'s str, u64)>,
+) -> anyhow::Result<()> {
     con.expect("login:", std::time::Duration::from_secs(20 * 60))?;
     root_shell(con, None)?;
-    run_steps(con, "builder", AUTO_STEPS.iter().copied())?;
-    power_off(con, "builder")
+    let result = run_steps(con, who, steps);
+    // Powered off either way; a failed step's error comes first.
+    result.and(power_off(con, who))
 }
 
 /// Start QEMU with its serial console on a pipe we drive, logged to
 /// `<out>/console.log`.
-fn spawn_console(args: &[String], out: &Path) -> anyhow::Result<Console<'static>> {
+pub fn spawn_console(args: &[String], out: &Path) -> anyhow::Result<Console<'static>> {
     use std::process::Stdio;
     print!("{}", accel_note(accel()));
     let log = std::fs::File::create(out.join("console.log"))?;

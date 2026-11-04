@@ -111,10 +111,14 @@ fn repo_root() -> PathBuf {
 /// A QEMU whose serial console is a FreeBSD login and a root shell that
 /// answers every command as if it succeeded, without running it. With
 /// stdin closed (an interactive run under the tests) it just exits.
+/// `FAKE_FAIL=rm-disk` deletes its `-drive file=` disk under the harness.
 const QEMU: (&str, &str) = (
     "qemu-system-x86_64",
     r#"#!/bin/sh
 [ "$FAKE_FAIL" = qemu-system-x86_64 ] && exit 3
+if [ "$FAKE_FAIL" = rm-disk ]; then
+    for a; do case $a in file=*) f=${a#file=}; command -p rm -f "${f%%,*}" ;; esac; done
+fi
 printf 'login: '
 read -r u || exit 0
 printf '# '
@@ -128,15 +132,16 @@ done
 "#,
 );
 
-/// `create` makes an empty disk, `convert` copies, the rest succeeds;
-/// the subcommand named by `FAKE_FAIL` fails.
+/// `create` makes an empty disk (sized, or an overlay named last),
+/// `convert` copies, the rest succeeds; the subcommand named by
+/// `FAKE_FAIL` fails.
 const QEMU_IMG: (&str, &str) = (
     "qemu-img",
     r#"#!/bin/sh
 PATH=/usr/bin:/bin
 [ "$1" = "$FAKE_FAIL" ] && exit 1
 case $1 in
-    create) : > "$4" ;;
+    create) for last; do :; done; case $last in *G) : > "$4" ;; *) : > "$last" ;; esac ;;
     convert) cat "$4" > "$5" ;;
 esac
 "#,
@@ -666,6 +671,192 @@ fn selfhost_drives_a_fake_vm() {
     );
     std::fs::write(w.0.join("file"), b"").unwrap();
     failed("file/out", iso, &qemu, "", "Not a directory");
+}
+
+/// podman's subcommands succeed but the one named by `FAKE_FAIL`.
+const PODMAN: (&str, &str) = (
+    "podman",
+    "#!/bin/sh\n[ \"$1\" = \"$FAKE_FAIL\" ] && exit 1\necho \"podman $1\"\n",
+);
+
+#[test]
+fn oci_plans_the_vm_or_the_host() {
+    let w = Work::new("oci-plan");
+    let fw = w.firmware(true);
+    // Defaults: the builder's disk and tarball, <work>/oci.
+    let out = w.ok(&["--firmware", &fw, "oci"]);
+    let has = |line: String| assert!(out.contains(&line), "{line}\n{out}");
+    has(format!(
+        "+ ln {} {}",
+        w.path("builder/juanitos-dom0.txz"),
+        w.path("oci/context/juanitos-dom0.txz")
+    ));
+    has(format!(
+        "+ qemu-img create -f qcow2 -F raw -b {} {}",
+        w.path("builder/builder.raw"),
+        w.path("oci/oci.qcow2")
+    ));
+    has(format!(
+        "file={},if=virtio,format=qcow2",
+        w.path("oci/oci.qcow2")
+    ));
+    has("-smp 4 -m 4096".into());
+    has("guest: install podman and give it a ZFS dataset".into());
+    has("--build-arg TARBALL=juanitos-dom0.tar.zst -f /mnt/repo/release/oci/Containerfile".into());
+    has("guest: jos-install plans an install".into());
+
+    let out = w.ok(&["oci", "--on-host", "--out", &w.path("here")]);
+    assert!(
+        out.contains(&format!("+ ln {} ", w.path("juanitos-dom0.txz"))),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "+ sh -c podman rmi -i -f localhost/juanitos-dom0 >/dev/null && podman build \
+             --network none --build-arg TARBALL=juanitos-dom0.txz \
+             -f {}/release/oci/Containerfile -t localhost/juanitos-dom0 {}",
+            repo_root().canonicalize().unwrap().display(),
+            w.path("here/context")
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("==> oci: the rc scripts parse and order"),
+        "{out}"
+    );
+    assert!(!out.contains("qemu"), "{out}");
+
+    let (ok, text) = w.run(&["oci", "--on-host", "--keep"]);
+    assert!(!ok && text.contains("cannot be used with"), "{text}");
+    let (ok, text) = w.run(&["--firmware", &w.path("missing.fd"), "oci"]);
+    assert!(!ok && text.contains("OVMF firmware not found"), "{text}");
+}
+
+#[test]
+fn oci_drives_a_fake_vm_and_a_fake_podman() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = Work::new("oci-run");
+    let fw = w.firmware(true);
+    let vm = fake_path(&w.0.join("bin"), &[QEMU, QEMU_IMG], &[]);
+    let no_qemu = fake_path(&w.0.join("bin-img"), &[QEMU_IMG], &[]);
+    let host = fake_path(&w.0.join("bin-host"), &[PODMAN], &["sh"]);
+    std::fs::write(w.0.join("dom0.txz"), b"txz").unwrap();
+    std::fs::write(w.0.join("builder.raw"), b"raw").unwrap();
+    let oci = |out: &str, extra: &[&str], path: &Path, fail: &str| {
+        let (out, work) = (w.path(out), w.path(""));
+        let (tarball, image) = (w.path("dom0.txz"), w.path("builder.raw"));
+        let args = ["--work", &work, "--firmware", &fw, "oci", "--out", &out];
+        let mut more = vec!["--tarball", tarball.as_str()];
+        if !extra.iter().any(|a| *a == "--on-host" || *a == "--image") {
+            more.extend(["--image", image.as_str()]);
+        }
+        jos(
+            &repo_root(),
+            Some(path),
+            &[("FAKE_FAIL", fail)],
+            &[&args[..], &more, extra].concat(),
+        )
+    };
+    let passed = "The dom0 userland passed its checks under podman";
+
+    let (ok, out) = oci("vm", &[], &vm, "");
+    assert!(ok && out.contains(passed), "{out}");
+    assert!(
+        out.contains(&format!("+ rm {}", w.path("vm/oci.qcow2"))),
+        "{out}"
+    );
+    assert!(!w.0.join("vm/oci.qcow2").exists());
+    assert!(!w.0.join("vm/context/juanitos-dom0.txz").exists());
+    let log = std::fs::read_to_string(w.0.join("vm/console.log")).unwrap();
+    assert!(log.starts_with("login: # "), "{log}");
+    // Kept, then replaced by the next run.
+    let (ok, out) = oci("keep", &["--keep"], &vm, "");
+    assert!(ok, "{out}");
+    std::fs::write(w.0.join("keep/oci.qcow2"), b"stale").unwrap();
+    let (ok, out) = oci("keep", &["--keep"], &vm, "");
+    assert!(ok, "{out}");
+    assert!(std::fs::read(w.0.join("keep/oci.qcow2"))
+        .unwrap()
+        .is_empty());
+
+    let (ok, out) = oci("host", &["--on-host"], &host, "");
+    assert!(ok && out.contains(passed), "{out}");
+    assert!(out.contains("podman build\npodman image\n"), "{out}");
+
+    let failed = |out: &str, extra: &[&str], path: &Path, fail: &str, want: &str| {
+        let (ok, text) = oci(out, extra, path, fail);
+        assert!(!ok, "{out}: {text}");
+        assert!(text.contains(want), "{out}: {text}");
+    };
+    failed(
+        "build",
+        &["--on-host"],
+        &host,
+        "rmi",
+        "oci step failed: build the image",
+    );
+    failed(
+        "check",
+        &["--on-host"],
+        &host,
+        "run",
+        "oci step failed: the userland is",
+    );
+    failed(
+        "dead",
+        &[],
+        &vm,
+        "qemu-system-x86_64",
+        "the guest's console closed",
+    );
+    failed("noqemu", &[], &no_qemu, "", "running qemu-system-x86_64");
+    failed(
+        "create",
+        &[],
+        &vm,
+        "create",
+        "qemu-img exited with exit status: 1",
+    );
+    w.dangling("vars/OVMF_VARS.fd");
+    failed("vars", &[], &vm, "", "No such file or directory");
+    std::fs::create_dir_all(w.0.join("rm/oci.qcow2")).unwrap();
+    failed("rm", &[], &vm, "", "Is a directory");
+    failed(
+        "gone",
+        &[],
+        &vm,
+        "rm-disk",
+        &format!("removing {}", w.path("gone/oci.qcow2")),
+    );
+    let ro = w.0.join("ro/context");
+    std::fs::create_dir_all(&ro).unwrap();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    failed(
+        "ro",
+        &[],
+        &vm,
+        "",
+        "--out must be on the tarball's file system",
+    );
+    std::fs::write(w.0.join("file"), b"").unwrap();
+    failed("file/out", &[], &vm, "", "Not a directory");
+    failed(
+        "noimage",
+        &["--image", &w.path("missing.raw")],
+        &vm,
+        "",
+        "`jos-release builder --auto` makes it",
+    );
+    let (ok, text) = jos(
+        &repo_root(),
+        Some(&vm),
+        &[],
+        &["--work", &w.path(""), "oci", "--on-host"],
+    );
+    assert!(
+        !ok && text.contains("juanitos-dom0.txz does not exist; build it first"),
+        "{text}"
+    );
 }
 
 #[test]

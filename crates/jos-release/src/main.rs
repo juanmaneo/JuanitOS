@@ -8,6 +8,7 @@ mod builder;
 mod compare;
 mod console;
 mod disk;
+mod oci;
 mod profile;
 mod qemu;
 #[cfg(test)]
@@ -86,6 +87,36 @@ enum Cmd {
     /// graphical boot, the installer, the login screen and a clean
     /// power-off, driven over the VM's serial port.
     Vbox(VboxArgs),
+    /// Test the dom0 userland as an OCI image under podman on FreeBSD: in
+    /// a FreeBSD VM under QEMU (the builder's disk, under an overlay), or
+    /// on this FreeBSD host with --on-host.
+    Oci(OciArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct OciArgs {
+    /// The dom0 tarball (default: <work>/builder/juanitos-dom0.txz, the
+    /// builder's, or <work>/juanitos-dom0.txz with --on-host).
+    #[arg(long)]
+    tarball: Option<PathBuf>,
+    /// FreeBSD VM disk with its serial console on (default
+    /// <work>/builder/builder.raw); only read.
+    #[arg(long, conflicts_with = "on_host")]
+    image: Option<PathBuf>,
+    /// Run podman on this host (FreeBSD, as root, podman installed).
+    #[arg(long)]
+    on_host: bool,
+    /// Build context, console.log and the VM's overlay disk (default
+    /// <work>/oci).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    #[arg(long, default_value_t = 4096)]
+    memory_mb: u64,
+    #[arg(long, default_value_t = 4)]
+    cpus: u32,
+    /// Leave the VM's overlay disk, with the image in it, afterwards.
+    #[arg(long, conflicts_with = "on_host")]
+    keep: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -360,6 +391,33 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             runner,
             cli.dry_run,
         ),
+        Cmd::Oci(a) => {
+            let builder = work.join("builder");
+            let vm = if a.on_host {
+                None
+            } else {
+                Some(oci::Vm {
+                    image: a.image.unwrap_or_else(|| builder.join("builder.raw")),
+                    firmware: firmware(cli.firmware)?,
+                    memory_mb: a.memory_mb,
+                    cpus: a.cpus,
+                    keep: a.keep,
+                })
+            };
+            let dist = if a.on_host { &work } else { &builder };
+            oci::run_oci(
+                &oci::Oci {
+                    tarball: a
+                        .tarball
+                        .unwrap_or_else(|| dist.join(juanitos_core::dom0::DIST_TARBALL)),
+                    out: a.out.unwrap_or_else(|| work.join("oci")),
+                    freebsd_version: profile.freebsd_version.clone(),
+                    repo,
+                    vm,
+                },
+                cli.dry_run,
+            )
+        }
         Cmd::Compare(a) => {
             let report = compare::compare_tarballs(
                 runner,

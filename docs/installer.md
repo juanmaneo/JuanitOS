@@ -369,6 +369,58 @@ VMSVGA, `freebsd/jos_vmsvga`, which the installer selects
 (`jos_kms_module="jos_vmsvga"`) so that `cosmic-comp` finds a KMS device
 and renders with Mesa's software rasteriser.
 
+## The container test
+
+`jos-release oci` tests the dom0 userland one level further in: as an
+OCI image under podman on FreeBSD, where a container is a jail
+(`ocijail`). The dom0 tarball is a complete FreeBSD root, so it is the
+whole image: `release/oci/Containerfile` is `FROM scratch` plus
+`ADD juanitos-dom0.txz /`. On Linux the chain is Linux → QEMU → FreeBSD →
+podman → JuanitOS. The FreeBSD VM is the builder's (`jos-release builder
+--auto` leaves its disk in `<work>/builder/builder.raw`, serial console
+already on); it runs on a qcow2 overlay, so the builder's disk is only
+read and stays usable for the next ISO build. In the VM the harness
+mounts the repository and `<work>/oci` over 9p, installs `podman-suite`
+with a zstd-compressed ZFS dataset for its storage, builds the image,
+then runs each check in a fresh container (`--network none`):
+
+- `freebsd-version -u` is the profile's release;
+- the dom0 packages are installed and `pkg check -d` finds no missing
+  dependency;
+- no program in the base or `/usr/local` misses a shared library;
+- `jos doctor` runs its host checks (a jail has no `/dev/vmm`, so it
+  fails, as expected);
+- `jos --dry-run` creates a template and an app qube and plans the
+  `bhyve` command line;
+- `jos-install --dry-run --non-interactive` plans an install onto the
+  VM's first disk;
+- alice is created and logs in through PAM with `jos-greet try-login`;
+- `jos-splash` renders the boot card;
+- every rc script parses and `rcorder` orders them without a complaint.
+
+```sh
+jos-release oci                    # the builder's disk and tarball, results in <work>/oci
+jos-release oci --keep             # leave <work>/oci/oci.qcow2 with the image in it
+jos-release oci --on-host          # on FreeBSD, as root, with podman installed
+jos-release oci --dry-run          # the VM, its steps and the podman commands
+```
+
+The build context does not stay on the 9p share: buildah reads it there
+at a few hundred kilobytes a second, and it unpacks xz in about an hour
+where zstd takes six minutes. The VM recompresses the tarball into its
+own disk (`xz -dc | zstd`, about three minutes) and passes it with
+`--build-arg TARBALL=juanitos-dom0.tar.zst`; the Containerfile's default
+is the `.txz`, which is what a build by hand uses. buildah's scratch
+files go to the same compressed dataset (`TMPDIR`), not to `/var/tmp`.
+Everything the VM writes grows the overlay, which peaks around 13 GB on
+the host and is deleted at the end unless `--keep`.
+
+A jail shares its host's kernel: bhyve, KMS, pool creation and the boot
+chain are out of its reach and stay with the QEMU, `selfhost` and
+VirtualBox tests. What the container adds is a quick, disposable dom0
+userland to poke at (`podman run --rm -it localhost/juanitos-dom0` in
+the kept VM).
+
 ## Building on a Linux box
 
 The build steps call FreeBSD's `tar`, `pkg` and `makefs`, so they run on
