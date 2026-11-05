@@ -115,14 +115,15 @@ out like Calamares: steps on the left, the current page on the right.
 ![installer](docs/images/installer-3-disk.png)
 
 Welcome → **Hardware** (the `jos doctor` checks: VT-x/AMD-V, IOMMU, bhyve
-modules, passthrough devices) → **Disk** → **System** (hostname, swap,
+modules, passthrough devices) → **Disk** (install next to the systems
+already there, or erase the disk) → **System** (hostname, swap,
 COSMIC at boot) → **Passthrough** (GPUs and NICs reserved for qubes via
 `pptdevs`; the NVIDIA card is proposed for CUDA) → **Users** → **Summary** (nothing is written before you
-tick "erase the disk" here) → **Install** (progress) → **Finish**
-(reboot). The whole disk becomes GPT + EFI + swap + a ZFS pool laid out
+tick the confirmation here) → **Install** (progress) → **Finish**
+(reboot). Erasing makes the disk GPT + EFI + swap + a ZFS pool laid out
 like `bsdinstall zfsboot`; on a UEFI disk with an existing Linux, the
-installer can instead take the free space (shrink a partition first),
-share the EFI system partition and add a firmware boot entry after the
+installer instead proposes the free space (shrink a partition first),
+shares the EFI system partition and adds a firmware boot entry after the
 existing ones, erasing nothing. Serial consoles get the same steps as text
 prompts, and `jos-install --non-interactive --disk nda0 ...` installs
 unattended (`--alongside` for the free-space install). Details and all

@@ -202,10 +202,13 @@ The flow borrows from the two installers QubesOS users know:
 
 - **Calamares**: a sidebar of steps walked in order (Welcome, Hardware,
   Disk, System, Passthrough, Users, Summary, Install, Finish), with
-  Back/Next at the bottom and Next disabled until the page is valid;
+  Back/Next at the bottom and Next disabled until the page is valid; the
+  Disk page's "install alongside / erase disk" choice under a bar that
+  shows the disk to scale as the install leaves it;
 - **Anaconda**: nothing is written to disk before the Summary page, where
-  the erase has to be confirmed explicitly; the hardware check comes first,
-  so you learn whether the machine can run qubes before choosing a disk.
+  what happens to the disk has to be confirmed explicitly; the hardware
+  check comes first, so you learn whether the machine can run qubes before
+  choosing a disk.
 
 | | |
 |---|---|
@@ -214,6 +217,22 @@ The flow borrows from the two installers QubesOS users know:
 | ![passthrough](images/installer-5-passthrough.png) | ![users](images/installer-6-users.png) |
 | ![summary](images/installer-7-summary.png) | ![install](images/installer-8-install.png) |
 | ![finish](images/installer-9-finish.png) | |
+
+The **Disk** page lists the disks (the boot medium excluded), then the
+selected disk as a bar: the partitions that stay in grey, free space
+dark, and what JuanitOS creates (EFI, swap, the pool) in the accent
+colour. Below it, two choices:
+
+- **Install next to the systems on the disk**: the largest free area,
+  sharing the EFI system partition (see "Next to another system"). It is
+  preselected whenever the disk allows it; otherwise it is greyed out
+  with the reason (no GPT table, no ESP, less than 16 GiB free, an earlier
+  install's labels).
+- **Erase the whole disk**: GPT, EFI, BIOS boot, swap and the pool.
+
+The Summary page then says either "Nothing on /dev/X is erased" (green)
+or "ALL DATA ON /dev/X WILL BE ERASED" (red), and its checkbox names
+the same thing.
 
 The **Passthrough** page lists the GPUs, the NICs (Wi-Fi included) and
 the other functions of each GPU's slot (its HDMI audio), as `pciconf`
@@ -227,7 +246,7 @@ of its own. NICs are never ticked by default: until `sys-net` exists the
 dom0 needs one to download templates.
 
 Keyboard: `Tab`/`Shift-Tab` or `Up`/`Down` move between fields,
-`Up`/`Down` pick a disk or a device in a list, `Space` ticks a device,
+`Up`/`Down` pick a disk, a method or a device in a list, `Space` ticks a device,
 `Enter`/`Space` press buttons and tick boxes, `Esc` goes back. Fields
 filter what they accept (digits for the swap size, host-name and
 user-name characters), passwords are masked.
@@ -241,7 +260,7 @@ cold, so a PS/2 mouse or touchpad never got its own `moused` (seen under
 QEMU). On the live medium `rc.local` starts it before the installer:
 `rc.d/local` comes before `rc.d/moused` in the boot order, so the mouse
 would otherwise only work once the installer exits. A left click focuses and activates what it lands on: it
-presses a button, ticks a box, selects a disk, ticks a device, or puts
+presses a button, ticks a box, selects a disk or a method, ticks a device, or puts
 the caret in a field (at the nearest character, counted in average
 character widths). Without `moused` the installer says so on the console
 and stays keyboard-only.
@@ -281,7 +300,8 @@ jos-install --non-interactive --disk nda0 --alongside ...   # next to the Linux 
 ## Next to another system
 
 On a UEFI disk that already holds a system, JuanitOS can go into the
-free space instead of taking the disk: the text installer asks (yes by
+free space instead of taking the disk: the graphical installer
+preselects it on the Disk page, the text installer asks (yes by
 default) once the disk has what that needs, `--alongside` asks for it.
 The installer never resizes anything, so make room first with the other
 system's tools (GParted on Linux; the free space must be at least 16 GiB

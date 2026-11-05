@@ -16,7 +16,7 @@ use jos_gfx::image::{Image, Rect};
 use jos_gfx::Rgba;
 use juanitos_core::doctor::Status;
 
-use crate::wizard::{InstallState, Page, Target, Widget, Wizard, PAGES};
+use crate::wizard::{InstallState, Method, Page, Stretch, Target, Widget, Wizard, METHODS, PAGES};
 
 pub const LOGICAL_W: i32 = 1280;
 pub const LOGICAL_H: i32 = 800;
@@ -390,11 +390,52 @@ fn hardware(c: &mut Canvas, w: &Wizard) {
     }
 }
 
+/// Border of a list row: the selection stands out, more so with focus.
+fn row_border(selected: bool, focused: bool) -> Rgba {
+    if selected && focused {
+        THEME.accent
+    } else if selected {
+        THEME.text_muted
+    } else {
+        THEME.highlight
+    }
+}
+
+/// A radio button: a dot when `on`, a ring otherwise.
+fn radio(c: &mut Canvas, cx: i32, cy: i32, on: bool) {
+    if on {
+        c.circle(cx, cy, 8, THEME.accent);
+    } else {
+        c.ring(cx, cy, 8, THEME.text_muted);
+    }
+}
+
+/// A two-line row of the Disk page (a disk, a method): a radio button, a
+/// heading and a muted detail line.
+fn radio_row(c: &mut Canvas, y: i32, selected: bool, focused: bool, hit: Hit) {
+    c.boxed(
+        CONTENT_X,
+        y,
+        CONTENT_W,
+        54,
+        row_border(selected, focused),
+        THEME.highlight,
+    );
+    c.hit(CONTENT_X, y, CONTENT_W, 54, hit);
+    radio(c, CONTENT_X + 28, y + 27, selected);
+}
+
+/// Rows of the disk list shown at once; the list scrolls past that.
+const DISK_ROWS: usize = 4;
+const ROW_PITCH: i32 = 64;
+/// Height of the partition bar.
+const BAR_H: i32 = 34;
+
 fn disk(c: &mut Canvas, w: &Wizard) {
     title(
         c,
         "Installation disk",
-        "The whole disk is used: GPT (UEFI + BIOS boot), swap and a ZFS pool.",
+        "Pick a disk, then whether JuanitOS takes it whole or its free space.",
     );
     if w.disks.is_empty() {
         c.text(
@@ -407,23 +448,16 @@ fn disk(c: &mut Canvas, w: &Wizard) {
         return;
     }
     let focused = w.focused() == Some(Widget::Disks);
-    for (i, d) in w.disks.iter().enumerate().take(8) {
-        let y = BODY_Y + i as i32 * 64;
-        let selected = i == w.disk_index;
-        let border = if selected && focused {
-            THEME.accent
-        } else if selected {
-            THEME.text_muted
-        } else {
-            THEME.highlight
-        };
-        c.boxed(CONTENT_X, y, CONTENT_W, 54, border, THEME.highlight);
-        c.hit(CONTENT_X, y, CONTENT_W, 54, Hit::Target(Target::Disk(i)));
-        if selected {
-            c.circle(CONTENT_X + 28, y + 27, 8, THEME.accent);
-        } else {
-            c.ring(CONTENT_X + 28, y + 27, 8, THEME.text_muted);
-        }
+    let first = w.disk_index.saturating_sub(DISK_ROWS - 1);
+    let mut y = BODY_Y;
+    for (i, d) in w.disks.iter().enumerate().skip(first).take(DISK_ROWS) {
+        radio_row(
+            c,
+            y,
+            i == w.disk_index,
+            focused,
+            Hit::Target(Target::Disk(i)),
+        );
         c.text(CONTENT_X + 54, y + 9, &d.name, 2, THEME.text);
         let size = format!("{:.1} GiB", d.size_gib());
         c.text(CONTENT_X + 180, y + 9, &size, 2, THEME.text);
@@ -440,13 +474,97 @@ fn disk(c: &mut Canvas, w: &Wizard) {
             CONTENT_W - 80,
             THEME.text_muted,
         );
+        y += ROW_PITCH;
     }
-    let y = BODY_Y + w.disks.len().min(8) as i32 * 64 + 20;
-    let warn = w
-        .selected_disk()
-        .map(|d| format!("Everything on /dev/{} will be erased.", d.name))
-        .unwrap_or_default();
-    c.text(CONTENT_X, y, &warn, 2, THEME.accent);
+    y += 10;
+    partition_bar(c, w, y);
+    method_rows(c, w, y + BAR_H + 44);
+}
+
+/// The selected disk to scale, as the install leaves it (Calamares's
+/// partition bar): what stays in greys, what the install creates in the
+/// accent colour. Stretches are labelled when the label fits.
+fn partition_bar(c: &mut Canvas, w: &Wizard, y: i32) {
+    let layout = w.layout();
+    let total = layout.iter().map(|(_, size)| size).sum::<u64>().max(1);
+    let mut x = CONTENT_X;
+    let mut kept = 0;
+    for (stretch, size) in &layout {
+        let (fill, ink) = match stretch {
+            Stretch::Kept(_) => {
+                kept += 1;
+                if kept % 2 == 1 {
+                    (THEME.dim, THEME.text)
+                } else {
+                    (THEME.text_muted, THEME.background)
+                }
+            }
+            Stretch::Free => (THEME.highlight, THEME.text_muted),
+            Stretch::New(_) => (THEME.accent, THEME.background),
+        };
+        // To scale, but never invisible; the last stretch absorbs the
+        // rounding (and the clamping) of the others.
+        let wanted = (CONTENT_W as u64 * size / total) as i32;
+        let width = wanted.max(6).min((CONTENT_R - x).max(0));
+        c.fill(x, y, width - 1, BAR_H, fill);
+        let label = stretch.label();
+        if font::text_width(label, 1) + 8 <= width {
+            c.text(x + 4, y + 10, label, 1, ink);
+        }
+        x += width;
+    }
+    let ly = y + BAR_H + 10;
+    let mut lx = CONTENT_X;
+    for (colour, what) in [
+        (THEME.dim, "kept"),
+        (THEME.highlight, "free"),
+        (THEME.accent, "JuanitOS"),
+    ] {
+        c.rounded(lx, ly, 12, 12, 3, colour);
+        c.text(lx + 18, ly, what, 1, THEME.text_muted);
+        lx += 18 + font::text_width(what, 1) + 24;
+    }
+}
+
+/// The choice between the [`Method`]s, as two radio rows. The one that
+/// keeps the disk's systems says what room it has, or why it cannot.
+fn method_rows(c: &mut Canvas, w: &Wizard, y: i32) {
+    let focused = w.focused() == Some(Widget::Method);
+    let space = w.alongside_space();
+    let dev = w.plan().dev();
+    for (i, m) in METHODS.iter().enumerate() {
+        let y = y + i as i32 * ROW_PITCH;
+        let (ink, detail) = match (m, &space) {
+            (Method::Alongside, Ok(s)) => (
+                THEME.text,
+                format!(
+                    "{:.1} GiB of free space, the EFI partition shared; nothing is erased",
+                    s.size_gib()
+                ),
+            ),
+            (Method::Alongside, Err(why)) => (THEME.dim, format!("not possible: {why}")),
+            (Method::Erase, _) => (
+                THEME.text,
+                format!("GPT, EFI, swap and a ZFS pool; everything on {dev} is lost"),
+            ),
+        };
+        radio_row(
+            c,
+            y,
+            w.method() == *m,
+            focused,
+            Hit::Target(Target::Method(*m)),
+        );
+        c.text(CONTENT_X + 54, y + 9, m.label(), 2, ink);
+        c.text_clip(
+            CONTENT_X + 54,
+            y + 31,
+            &detail,
+            2,
+            CONTENT_W - 80,
+            THEME.text_muted,
+        );
+    }
 }
 
 fn field(c: &mut Canvas, w: &Wizard, widget: Widget, x: i32, y: i32, label: &str, note: &str) {
@@ -595,13 +713,7 @@ fn passthrough(c: &mut Canvas, w: &Wizard) {
     let mut y = BODY_Y;
     for (i, d) in w.devices.iter().enumerate().skip(first).take(DEVICE_ROWS) {
         let selected = i == w.device_index;
-        let border = if selected && focused {
-            THEME.accent
-        } else if selected {
-            THEME.text_muted
-        } else {
-            THEME.highlight
-        };
+        let border = row_border(selected, focused);
         c.boxed(CONTENT_X, y, CONTENT_W, 44, border, THEME.highlight);
         c.hit(CONTENT_X, y, CONTENT_W, 44, Hit::Target(Target::Device(i)));
         c.boxed(
@@ -693,20 +805,27 @@ fn summary(c: &mut Canvas, w: &Wizard) {
         y += 34;
     }
     y += 20;
-    let disk = w
-        .selected_disk()
-        .map(|d| d.name.clone())
-        .unwrap_or_default();
-    c.boxed(CONTENT_X, y, CONTENT_W, 50, FAIL, THEME.highlight);
-    let warn = format!("ALL DATA ON /dev/{disk} WILL BE ERASED");
-    c.text_centered(CONTENT_X + CONTENT_W / 2, y + 18, &warn, 2, FAIL);
+    let plan = w.plan();
+    let dev = plan.dev();
+    let (colour, note) = match &plan.alongside {
+        Some(space) => (
+            OK,
+            format!(
+                "Nothing on {dev} is erased: JuanitOS takes {:.1} GiB of its free space",
+                space.size_gib()
+            ),
+        ),
+        None => (FAIL, format!("ALL DATA ON {dev} WILL BE ERASED")),
+    };
+    c.boxed(CONTENT_X, y, CONTENT_W, 50, colour, THEME.highlight);
+    c.text_centered(CONTENT_X + CONTENT_W / 2, y + 18, &note, 2, colour);
     checkbox(
         c,
         w,
-        Widget::ConfirmErase,
+        Widget::Confirm,
         CONTENT_X,
         y + 86,
-        "I understand: erase the disk and install JuanitOS",
+        w.method().confirmation(),
     );
 }
 
@@ -882,8 +1001,9 @@ fn sample_pages() -> Vec<(&'static str, Wizard)> {
     w.handle(Key::Enter);
     pages.push(("installer-2-hardware", w.clone()));
     w.handle(Key::Enter);
-    w.handle(Key::Down);
+    w.handle(Key::Down); // the disk with a Linux on it: a choice to make
     pages.push(("installer-3-disk", w.clone()));
+    w.handle(Key::Enter); // to the choice (keeping Linux is preselected)
     w.handle(Key::Enter);
     pages.push(("installer-4-system", w.clone()));
     for _ in 0..4 {
@@ -929,9 +1049,11 @@ fn sample_pages() -> Vec<(&'static str, Wizard)> {
     pages
 }
 
-/// A wizard filled with plausible hardware, for screenshots and tests.
+/// A wizard filled with plausible hardware, for screenshots and tests:
+/// a blank NVMe disk, and a hard disk with a Linux that was shrunk to
+/// leave room.
 pub fn sample_wizard() -> Wizard {
-    use crate::disks::Disk;
+    use crate::disks::{Disk, Partition};
     use juanitos_core::doctor::Check;
     use juanitos_core::pci::{self, PciAddr, PciDevice};
     let check = |name: &str, status, detail: &str| Check {
@@ -1020,7 +1142,22 @@ pub fn sample_wizard() -> Wizard {
                 name: "ada0".into(),
                 size_bytes: 2_000_398_934_016,
                 description: "WDC WD20EZBX-00AYRA0".into(),
-                ..Default::default()
+                scheme: Some("GPT".into()),
+                partitions: vec![
+                    Partition {
+                        name: "ada0p1".into(),
+                        kind: "efi".into(),
+                        offset: 1 << 20,
+                        size: 300 << 20,
+                    },
+                    Partition {
+                        name: "ada0p2".into(),
+                        kind: "linux-data".into(),
+                        offset: 301 << 20,
+                        size: 900 << 30,
+                    },
+                ],
+                labels: vec!["root".into()],
             },
         ],
         devices,
@@ -1185,6 +1322,24 @@ mod tests {
         w.page = Page::Disk;
         let (_, hits) = render_page(&w, 1280, 800);
         assert_eq!(hits.target(500, BODY_Y + 64 + 20), Some(Target::Disk(1)));
+        // The method rows come after the two disks and the bar.
+        let rows_y = BODY_Y + 2 * ROW_PITCH + 10 + BAR_H + 44;
+        assert_eq!(
+            hits.target(500, rows_y + 20),
+            Some(Target::Method(Method::Alongside))
+        );
+        assert_eq!(
+            hits.target(500, rows_y + ROW_PITCH + 20),
+            Some(Target::Method(Method::Erase))
+        );
+        // More disks than rows: the window follows the selection.
+        let extra = w.disks[0].clone();
+        w.disks.extend(std::iter::repeat_n(extra, 5));
+        let (_, top) = render_page(&w, 1280, 800);
+        assert_eq!(top.target(500, BODY_Y + 20), Some(Target::Disk(0)));
+        w.click(Target::Disk(6));
+        let (_, scrolled) = render_page(&w, 1280, 800);
+        assert_eq!(scrolled.target(500, BODY_Y + 20), Some(Target::Disk(3)));
         w.page = Page::Passthrough;
         let extra = w.devices[1].clone();
         w.devices.extend(std::iter::repeat_n(extra, 10));
@@ -1218,6 +1373,53 @@ mod tests {
         assert!(screenshots(&dir, 640, 400).is_err());
         assert!(screenshots(&dir.join("installer-2-hardware.png"), 640, 400).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_disk_page_shows_the_choice_and_the_layout() {
+        let mut w = sample_wizard();
+        w.page = Page::Disk;
+        w.focus = 0;
+        // The blank disk: only erasing, the other row greyed with why.
+        assert_eq!(w.method(), Method::Erase);
+        let erase = render(&w, 1280, 800);
+        // The Linux disk: keeping it is preselected; the bar shows its
+        // partitions, the free space and the new partitions.
+        w.handle(Key::Down);
+        assert_eq!(w.method(), Method::Alongside);
+        let alongside = render(&w, 1280, 800);
+        assert!(differs(&erase, &alongside));
+        // Picking the other row changes the bar and the selection.
+        w.handle(Key::Tab);
+        assert_eq!(w.focused(), Some(Widget::Method));
+        w.handle(Key::Down);
+        assert_eq!(w.method(), Method::Erase);
+        assert!(differs(&alongside, &render(&w, 1280, 800)));
+        // The Summary follows: a green note and a different confirmation.
+        w.page = Page::Summary;
+        w.focus = 0;
+        let erase_summary = render(&w, 1280, 800);
+        w.page = Page::Disk;
+        w.focus = 1;
+        w.handle(Key::Up);
+        w.page = Page::Summary;
+        w.focus = 0;
+        assert!(differs(&erase_summary, &render(&w, 1280, 800)));
+        // Many tiny partitions: the bar clamps instead of overflowing.
+        let tiny = crate::disks::Partition {
+            kind: "linux-data".into(),
+            size: 1 << 20,
+            ..Default::default()
+        };
+        w.disks[1].partitions = (0..200)
+            .map(|i| crate::disks::Partition {
+                name: format!("ada0p{i}"),
+                offset: (2 + 2 * i) << 20,
+                ..tiny.clone()
+            })
+            .collect();
+        w.page = Page::Disk;
+        let _ = render(&w, 1280, 800);
     }
 
     #[test]

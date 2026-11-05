@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! The graphical installer's model: pages, fields, focus, validation.
 //!
-//! Inspired by Calamares (a sidebar of steps walked in order) and by
-//! Anaconda's "nothing is written until you confirm" rule: every page
-//! before **Summary** only edits this struct; the disk is touched once the
-//! user ticks the erase confirmation and presses **Install**.
+//! Inspired by Calamares (a sidebar of steps walked in order, and its
+//! "erase disk / install alongside" choice) and by Anaconda's "nothing is
+//! written until you confirm" rule: every page before **Summary** only
+//! edits this struct; the disk is touched once the user ticks the
+//! confirmation and presses **Install**.
 //!
 //! The wizard is pure: it consumes [`Key`]s and installer [`Progress`]
 //! and returns [`Action`]s. Drawing is in `ui.rs`, the event loop in
@@ -14,7 +15,7 @@ use jos_fb::keys::Key;
 use juanitos_core::doctor::{self, Check, Status};
 use juanitos_core::pci::{PciAddr, PciDevice};
 
-use crate::disks::Disk;
+use crate::disks::{Disk, FreeSpace};
 use crate::install::{InstallPlan, Progress};
 
 /// Pages, in order (the sidebar).
@@ -81,6 +82,9 @@ impl Page {
 pub enum Widget {
     AcceptChecks,
     Disks,
+    /// The Disk page's choice between the [`Method`]s (Up/Down pick one);
+    /// only focusable when both are possible.
+    Method,
     /// The Passthrough page's device list (Space ticks a device).
     Devices,
     Hostname,
@@ -91,7 +95,7 @@ pub enum Widget {
     UserName,
     UserPw,
     UserPw2,
-    ConfirmErase,
+    Confirm,
     Quit,
     Back,
     Next,
@@ -117,8 +121,51 @@ impl Widget {
     pub fn is_checkbox(self) -> bool {
         matches!(
             self,
-            Widget::AcceptChecks | Widget::Desktop | Widget::ConfirmErase
+            Widget::AcceptChecks | Widget::Desktop | Widget::Confirm
         )
+    }
+}
+
+/// How the selected disk is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    /// Its largest free area, next to the systems already on it.
+    Alongside,
+    /// The whole disk: GPT, EFI, swap and the pool.
+    Erase,
+}
+
+/// The rows of the Disk page's choice, in order.
+pub const METHODS: [Method; 2] = [Method::Alongside, Method::Erase];
+
+impl Method {
+    /// The radio row on the Disk page.
+    pub fn label(self) -> &'static str {
+        match self {
+            Method::Alongside => "Install next to the systems on the disk",
+            Method::Erase => "Erase the whole disk",
+        }
+    }
+
+    /// The box to tick on the Summary page.
+    pub fn confirmation(self) -> &'static str {
+        match self {
+            Method::Alongside => "I understand: partition the free space and install JuanitOS",
+            Method::Erase => "I understand: erase the disk and install JuanitOS",
+        }
+    }
+
+    /// What Install does to the disk, for the message when the box above
+    /// is not ticked.
+    fn consequence(self) -> &'static str {
+        match self {
+            Method::Alongside => "the free space of the disk will be partitioned",
+            Method::Erase => "the selected disk will be erased",
+        }
+    }
+
+    fn index(self) -> usize {
+        METHODS.iter().position(|m| *m == self).unwrap_or(0)
     }
 }
 
@@ -227,6 +274,27 @@ pub enum Action {
     Exit,
 }
 
+/// A stretch of the selected disk as the install leaves it, for the Disk
+/// page's partition bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stretch {
+    /// A partition that stays (its `gpart` type).
+    Kept(String),
+    /// Free space that stays free.
+    Free,
+    /// A partition the install creates (what goes in it).
+    New(String),
+}
+
+impl Stretch {
+    pub fn label(&self) -> &str {
+        match self {
+            Stretch::Kept(what) | Stretch::New(what) => what,
+            Stretch::Free => "free",
+        }
+    }
+}
+
 /// What a mouse click landed on (found by `ui::Hits::target`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -236,6 +304,8 @@ pub enum Target {
     Caret(Widget, usize),
     /// A row of the disk list.
     Disk(usize),
+    /// A row of the Disk page's choice of method.
+    Method(Method),
     /// A row of the passthrough list.
     Device(usize),
 }
@@ -249,6 +319,10 @@ pub struct Wizard {
     pub checks: Vec<Check>,
     pub disks: Vec<Disk>,
     pub disk_index: usize,
+    /// Never `Alongside` unless [`Wizard::alongside_space`] is `Ok`:
+    /// selecting a disk resets it, and it only changes through
+    /// [`Widget::Method`], which exists when both methods are possible.
+    method: Method,
     /// Passthrough candidates (`pci::passthrough_candidates`).
     pub devices: Vec<PciDevice>,
     pub device_index: usize,
@@ -264,7 +338,8 @@ pub struct Wizard {
     pub user_pw: TextField,
     pub user_pw2: TextField,
     pub accept_checks: bool,
-    pub confirm_erase: bool,
+    /// The Summary page's box: the disk may be written as planned.
+    pub confirm: bool,
     /// Validation message for the current page.
     pub error: Option<String>,
     pub install: InstallState,
@@ -288,6 +363,7 @@ impl Wizard {
             device_index: 0,
             page: Page::Welcome,
             focus: 0,
+            method: Method::Erase,
             hostname: TextField::new(&base.hostname),
             swap: TextField::new(&base.swap_gb.to_string()),
             desktop: base.gui,
@@ -301,11 +377,12 @@ impl Wizard {
             disks,
             disk_index,
             accept_checks: false,
-            confirm_erase: false,
+            confirm: false,
             error: None,
             install: InstallState::NotStarted,
             log: Vec::new(),
         };
+        w.select_disk(disk_index);
         w.focus = w.initial_focus();
         w
     }
@@ -322,12 +399,13 @@ impl Wizard {
             Page::Hardware if self.checks_passed() => vec![Back, Next],
             Page::Hardware => vec![AcceptChecks, Back, Next],
             Page::Disk if self.disks.is_empty() => vec![Back],
+            Page::Disk if self.alongside_space().is_ok() => vec![Disks, Method, Back, Next],
             Page::Disk => vec![Disks, Back, Next],
             Page::System => vec![Hostname, Swap, Desktop, Back, Next],
             Page::Passthrough if self.devices.is_empty() => vec![Back, Next],
             Page::Passthrough => vec![Devices, Back, Next],
             Page::Users => vec![RootPw, RootPw2, UserName, UserPw, UserPw2, Back, Next],
-            Page::Summary => vec![ConfirmErase, Back, Next],
+            Page::Summary => vec![Confirm, Back, Next],
             Page::Install => vec![],
             Page::Finish if self.install == InstallState::Succeeded => vec![Console, Reboot],
             Page::Finish => vec![Console],
@@ -389,7 +467,7 @@ impl Wizard {
         match w {
             Widget::AcceptChecks => self.accept_checks,
             Widget::Desktop => self.desktop,
-            Widget::ConfirmErase => self.confirm_erase,
+            Widget::Confirm => self.confirm,
             _ => false,
         }
     }
@@ -408,6 +486,30 @@ impl Wizard {
 
     pub fn selected_disk(&self) -> Option<&Disk> {
         self.disks.get(self.disk_index)
+    }
+
+    /// Select a disk. The method defaults to the one that keeps what is
+    /// on the disk whenever that is possible.
+    fn select_disk(&mut self, index: usize) {
+        self.disk_index = index;
+        self.method = if self.alongside_space().is_ok() {
+            Method::Alongside
+        } else {
+            Method::Erase
+        };
+    }
+
+    pub fn method(&self) -> Method {
+        self.method
+    }
+
+    /// Where an install next to the systems on the selected disk would
+    /// go, or why there is no such place.
+    pub fn alongside_space(&self) -> Result<FreeSpace, String> {
+        match self.selected_disk() {
+            Some(d) => d.free_space(&self.disks),
+            None => Err("no disk".into()),
+        }
     }
 
     pub fn is_reserved(&self, addr: PciAddr) -> bool {
@@ -456,9 +558,10 @@ impl Wizard {
                 &self.user_pw2.value,
             )
             .err(),
-            Page::Summary if !self.confirm_erase => {
-                Some("Tick the confirmation: the selected disk will be erased.".into())
-            }
+            Page::Summary if !self.confirm => Some(format!(
+                "Tick the confirmation: {}.",
+                self.method.consequence()
+            )),
             _ => None,
         }
     }
@@ -476,6 +579,10 @@ impl Wizard {
                 .selected_disk()
                 .map(|d| d.name.clone())
                 .unwrap_or_default(),
+            alongside: match self.method {
+                Method::Alongside => self.alongside_space().ok(),
+                Method::Erase => None,
+            },
             hostname: self.hostname.value.clone(),
             swap_gb: self.swap.value.parse().unwrap_or(0),
             gui: self.desktop,
@@ -484,6 +591,58 @@ impl Wizard {
             pptdevs: self.reserved_sorted(),
             ..self.base.clone()
         }
+    }
+
+    /// The selected disk from its first MiB to its last, as the install
+    /// leaves it: `(what, bytes)`. An erase makes it the EFI, swap and
+    /// pool partitions; the other method keeps every partition and puts
+    /// swap and pool in the chosen free area.
+    pub fn layout(&self) -> Vec<(Stretch, u64)> {
+        const MIB: u64 = 1 << 20;
+        let Some(d) = self.selected_disk() else {
+            return Vec::new();
+        };
+        let p = self.plan();
+        let swap = p.swap_gb << 30;
+        // (offset, size, what) of the partitions the disk ends up with.
+        let mut items: Vec<(u64, u64, Stretch)> = Vec::new();
+        let (mut at, room) = match &p.alongside {
+            Some(space) => {
+                items.extend(
+                    d.partitions
+                        .iter()
+                        .map(|q| (q.offset, q.size, Stretch::Kept(q.kind.clone()))),
+                );
+                (space.start_mib * MIB, space.size_mib * MIB)
+            }
+            None => {
+                let esp = p.esp_mb * MIB;
+                items.push((MIB, esp, Stretch::New("efi".into())));
+                (MIB + esp, d.size_bytes.saturating_sub(MIB + esp + MIB))
+            }
+        };
+        if swap > 0 {
+            items.push((at, swap, Stretch::New("swap".into())));
+            at += swap;
+        }
+        items.push((at, room.saturating_sub(swap), Stretch::New(p.pool.clone())));
+        items.sort_by_key(|i| i.0);
+        // The first and the last MiB belong to the GPT headers, as in
+        // `Disk::free_areas`.
+        let mut v = Vec::new();
+        let mut cursor = MIB;
+        for (offset, size, what) in items {
+            if offset > cursor {
+                v.push((Stretch::Free, offset - cursor));
+            }
+            v.push((what, size));
+            cursor = cursor.max(offset + size);
+        }
+        let end = d.size_bytes.saturating_sub(MIB);
+        if end > cursor {
+            v.push((Stretch::Free, end - cursor));
+        }
+        v
     }
 
     /// Label of the forward button on this page.
@@ -536,9 +695,9 @@ impl Wizard {
             Widget::Reboot => Action::Reboot,
             Widget::AcceptChecks => toggled(&mut self.accept_checks),
             Widget::Desktop => toggled(&mut self.desktop),
-            Widget::ConfirmErase => toggled(&mut self.confirm_erase),
-            // Enter in a field or the disk list: on to the next widget, or
-            // the next page from the last input.
+            Widget::Confirm => toggled(&mut self.confirm),
+            // Enter in a field or a list: on to the next widget, or the
+            // next page from the last input.
             _ => {
                 let next_is_button = self
                     .widgets()
@@ -570,7 +729,11 @@ impl Wizard {
             Key::Esc => self.back(),
             Key::Enter => return self.activate(w),
             Key::Up | Key::Down if w == Widget::Disks => {
-                self.disk_index = list_step(self.disk_index, self.disks.len(), key == Key::Up);
+                self.select_disk(list_step(self.disk_index, self.disks.len(), key == Key::Up));
+            }
+            Key::Up | Key::Down if w == Widget::Method => {
+                let i = list_step(self.method.index(), METHODS.len(), key == Key::Up);
+                self.method = METHODS.get(i).copied().unwrap_or(self.method);
             }
             Key::Up | Key::Down if w == Widget::Devices => {
                 self.device_index =
@@ -610,6 +773,7 @@ impl Wizard {
         let widget = match target {
             Target::Widget(w) | Target::Caret(w, _) => w,
             Target::Disk(_) => Widget::Disks,
+            Target::Method(_) => Widget::Method,
             Target::Device(_) => Widget::Devices,
         };
         let Some(focus) = self.widgets().iter().position(|&w| w == widget) else {
@@ -624,7 +788,8 @@ impl Wizard {
                     f.cursor = at.min(f.len());
                 }
             }
-            Target::Disk(i) => self.disk_index = i,
+            Target::Disk(i) => self.select_disk(i),
+            Target::Method(m) => self.method = m,
             Target::Device(i) => {
                 self.device_index = i;
                 self.toggle_device();
@@ -692,21 +857,23 @@ impl Wizard {
             ),
             None => "(none)".into(),
         };
+        let swap = if p.swap_gb > 0 {
+            format!("{} GiB swap,", p.swap_gb)
+        } else {
+            "no swap,".into()
+        };
+        let layout = match &p.alongside {
+            Some(space) => format!(
+                "{:.1} GiB free: {swap} ZFS pool \"{}\", EFI on {}",
+                space.size_gib(),
+                p.pool,
+                space.esp
+            ),
+            None => format!("GPT: {} MiB EFI, {swap} ZFS pool \"{}\"", p.esp_mb, p.pool),
+        };
         vec![
             ("Disk", disk),
-            (
-                "Layout",
-                format!(
-                    "GPT: {} MiB EFI, {} ZFS pool \"{}\"",
-                    p.esp_mb,
-                    if p.swap_gb > 0 {
-                        format!("{} GiB swap,", p.swap_gb)
-                    } else {
-                        "no swap,".into()
-                    },
-                    p.pool
-                ),
-            ),
+            ("Layout", layout),
             ("Hostname", p.hostname.clone()),
             (
                 "Desktop",
@@ -933,7 +1100,7 @@ mod tests {
     fn walk_to_install_and_finish() {
         let mut w = wizard();
         to_summary(&mut w);
-        assert_eq!(w.focused(), Some(Widget::ConfirmErase));
+        assert_eq!(w.focused(), Some(Widget::Confirm));
         assert_eq!(w.next_label(), "Install");
         // Install without confirming: refused with a message.
         w.handle(Key::Tab);
@@ -945,7 +1112,7 @@ mod tests {
         w.handle(Key::BackTab);
         w.handle(Key::BackTab);
         w.handle(Key::Char(' '));
-        assert!(w.confirm_erase);
+        assert!(w.confirm);
         assert!(w.can_advance());
         w.handle(Key::Tab);
         w.handle(Key::Tab);
@@ -953,6 +1120,7 @@ mod tests {
         let plan = w.plan();
         assert_eq!(action, Action::Start(Box::new(plan.clone())));
         assert_eq!(plan.disk, "nda0");
+        assert_eq!(plan.alongside, None);
         assert_eq!(plan.root_password.as_deref(), Some("rootpw"));
         assert_eq!(plan.user, Some(("alice".into(), "pw".into())));
         assert_eq!(w.page, Page::Install);
@@ -1081,6 +1249,51 @@ mod tests {
         assert!(w.selected_disk().is_none());
         assert!(w.summary_rows()[0].1.contains("none"));
         assert_eq!(w.plan().disk, "");
+        assert_eq!(w.alongside_space().unwrap_err(), "no disk");
+        assert!(w.layout().is_empty());
+    }
+
+    #[test]
+    fn the_layout_is_the_disk_after_the_install() {
+        const MIB: u64 = 1 << 20;
+        let kept = |kind: &str, mib: u64| (Stretch::Kept(kind.into()), mib * MIB);
+        let new = |what: &str, mib: u64| (Stretch::New(what.into()), mib * MIB);
+        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
+        w.goto(Page::Disk);
+        // Erasing the 500 GiB disk: EFI, swap, the rest is the pool.
+        assert_eq!(
+            w.layout(),
+            [
+                new("efi", 260),
+                new("swap", 4096),
+                new("zroot", 500 * 1024 - 2 - 260 - 4096)
+            ]
+        );
+        w.swap = TextField::new("0");
+        assert_eq!(
+            w.layout(),
+            [new("efi", 260), new("zroot", 500 * 1024 - 2 - 260)]
+        );
+        // Next to Linux: its partitions stay, the largest gap gets swap
+        // and pool, the small gap at the end stays free.
+        w.swap = TextField::new("4");
+        w.handle(Key::Down);
+        assert_eq!(
+            w.layout(),
+            [
+                kept("efi", 300),
+                kept("linux-data", 200 * 1024),
+                new("swap", 4096),
+                new("zroot", 306_899 - 4096),
+                kept("linux-swap", 8192),
+                (Stretch::Free, 4095 * MIB),
+            ]
+        );
+        // A gap before the first partition stays free.
+        w.disks[1].partitions[0].offset = 2 * MIB;
+        assert_eq!(w.layout().first(), Some(&(Stretch::Free, MIB)));
+        assert_eq!(Stretch::Free.label(), "free");
+        assert_eq!(Stretch::Kept("efi".into()).label(), "efi");
     }
 
     #[test]
@@ -1100,6 +1313,95 @@ mod tests {
         w.handle(Key::Up);
         assert_eq!(w.disk_index, 0);
         assert_eq!(w.selected_disk().map(|d| d.name.as_str()), Some("ada0"));
+    }
+
+    /// A blank disk and one with a Linux install and free space.
+    fn mixed_disks() -> Vec<Disk> {
+        vec![
+            Disk {
+                name: "ada0".into(),
+                size_bytes: 500 << 30,
+                ..Default::default()
+            },
+            crate::disks::tests::linux_disk(),
+        ]
+    }
+
+    #[test]
+    fn the_method_follows_the_disk() {
+        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
+        w.goto(Page::Disk);
+        // A blank disk can only be erased: no choice to make.
+        assert_eq!(w.method(), Method::Erase);
+        assert_eq!(w.widgets(), [Widget::Disks, Widget::Back, Widget::Next]);
+        assert_eq!(
+            w.alongside_space().unwrap_err(),
+            "the disk has no GPT partition table"
+        );
+        assert_eq!(w.click(Target::Method(Method::Alongside)), Action::None);
+        assert_eq!(w.method(), Method::Erase, "not on this page");
+        // The Linux disk defaults to keeping what is on it.
+        w.handle(Key::Down);
+        assert_eq!(w.method(), Method::Alongside);
+        assert_eq!(
+            w.widgets(),
+            [Widget::Disks, Widget::Method, Widget::Back, Widget::Next]
+        );
+        let space = w.alongside_space().unwrap();
+        assert_eq!((space.start_mib, space.size_mib), (205_101, 306_899));
+        assert_eq!(w.plan().alongside.as_ref(), Some(&space));
+        // Up/Down on the choice pick a row, clamped at both ends.
+        w.handle(Key::Enter);
+        assert_eq!(w.focused(), Some(Widget::Method));
+        w.handle(Key::Up);
+        assert_eq!(w.method(), Method::Alongside);
+        w.handle(Key::Down);
+        w.handle(Key::Down);
+        assert_eq!(w.method(), Method::Erase);
+        assert_eq!(w.plan().alongside, None);
+        w.handle(Key::Up);
+        assert_eq!(w.method(), Method::Alongside);
+        // Enter on the choice, the last input of the page, moves on.
+        w.handle(Key::Enter);
+        assert_eq!(w.page, Page::System);
+        w.handle(Key::Esc);
+        // Clicks pick a row; picking a disk again resets the choice.
+        w.click(Target::Method(Method::Erase));
+        assert_eq!(
+            (w.method(), w.focused()),
+            (Method::Erase, Some(Widget::Method))
+        );
+        w.click(Target::Disk(1));
+        assert_eq!(w.method(), Method::Alongside);
+        w.click(Target::Disk(0));
+        assert_eq!(w.method(), Method::Erase);
+        assert_eq!(w.focused(), Some(Widget::Disks));
+    }
+
+    #[test]
+    fn the_summary_confirms_what_the_method_does() {
+        let base = InstallPlan {
+            disk: "nda0".into(),
+            ..Default::default()
+        };
+        let mut w = Wizard::new(base, ok_checks(), mixed_disks(), vec![]);
+        assert_eq!(w.method(), Method::Alongside, "preselected disk");
+        w.goto(Page::Summary);
+        assert!(w.page_error().unwrap().contains("free space"));
+        let rows = w.summary_rows();
+        let layout = &rows.iter().find(|(k, _)| *k == "Layout").unwrap().1;
+        assert_eq!(
+            layout,
+            "299.7 GiB free: 4 GiB swap, ZFS pool \"zroot\", EFI on nda0p1"
+        );
+        assert!(Method::Alongside.confirmation().contains("free space"));
+        assert!(Method::Erase.confirmation().contains("erase"));
+        assert_eq!(Method::Erase.label(), "Erase the whole disk");
+        w.confirm = true;
+        assert!(w.can_advance());
+        let plan = w.plan();
+        assert!(plan.validate().is_ok());
+        assert_eq!(plan.esp_device(), "/dev/nda0p1");
     }
 
     #[test]
@@ -1381,7 +1683,8 @@ mod tests {
         assert!(!Widget::Disks.is_button());
         assert!(Widget::RootPw.is_password());
         assert!(!Widget::UserName.is_password());
-        assert!(Widget::ConfirmErase.is_checkbox());
+        assert!(Widget::Confirm.is_checkbox());
+        assert!(!Widget::Method.is_checkbox() && !Widget::Method.is_button());
         let w = wizard();
         assert!(w.field(Widget::Next).is_none());
         assert!(w.field(Widget::UserPw2).is_some());
@@ -1396,7 +1699,7 @@ mod tests {
         };
         let mut w = Wizard::new(base, ok_checks(), disks(), vec![]);
         to_summary(&mut w);
-        w.confirm_erase = true;
+        w.confirm = true;
         w.focus = 2;
         assert_eq!(w.handle(Key::Enter), Action::None);
         assert!(w.error.as_deref().unwrap_or("").contains("pool"));

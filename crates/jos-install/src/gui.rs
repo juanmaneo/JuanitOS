@@ -349,6 +349,43 @@ mod tests {
     }
 
     #[test]
+    fn alongside_install_through_the_gui() {
+        // Down picks the disk with a Linux on it, where keeping it is
+        // preselected; Enter goes to the choice, Enter again moves on.
+        let mut d = script(&[
+            b"\r\r\x1b[B\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\r \t\t\r",
+            b"\r",
+        ]);
+        let mut w = sample_wizard();
+        let m = MockRunner::new().respond("zfs", &["list"], CmdOutput::failed(1, ""));
+        let dir = std::env::temp_dir().join(format!("jos-gui-alongside-{}", std::process::id()));
+        w = crate::wizard::Wizard::new(
+            crate::install::InstallPlan {
+                target: dir.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            w.checks.clone(),
+            w.disks.clone(),
+            w.devices.clone(),
+        );
+        let out = run(&mut d, &mut w, &m, true, "report", opts()).unwrap();
+        assert_eq!(out, Outcome::Reboot);
+        assert_eq!(w.install, InstallState::Succeeded);
+        let calls = m.calls();
+        assert!(
+            calls.iter().all(|c| !c.starts_with("gpart create")),
+            "{calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "gpart add -a 1m -b 921901m -s 4096m -t freebsd-swap -l swap0 ada0"),
+            "{calls:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn failed_install_exits_to_console() {
         let mut d = script(&[TO_INSTALL, b"\r"]);
         let mut w = sample_wizard();
