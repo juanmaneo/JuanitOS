@@ -54,6 +54,17 @@ impl VBox {
     fn serial(&self) -> PathBuf {
         self.out.join("serial.sock")
     }
+
+    /// The same VM with absolute paths: VirtualBox resolves relative ones
+    /// against its own directories, not ours (`createvm --basefolder`
+    /// against `~/.config/VirtualBox`).
+    fn absolute(&self) -> std::io::Result<VBox> {
+        Ok(VBox {
+            iso: std::path::absolute(&self.iso)?,
+            out: std::path::absolute(&self.out)?,
+            ..self.clone()
+        })
+    }
 }
 
 /// How long to wait for VirtualBox to serve the serial socket after
@@ -63,6 +74,11 @@ const SERIAL_PATIENCE: Duration = Duration::from_secs(60);
 /// How long a boot may take to reach its login (the live medium's
 /// installer, then its serial getty; the installed dom0's getty).
 const BOOT_PATIENCE: Duration = Duration::from_secs(20 * 60);
+
+/// How long to wait for the loader's banner on the serial port before
+/// quitting the installer anyway: VirtualBox sometimes loses it, and by
+/// then the firmware, whose setup screen Esc would open, is long past.
+const BANNER_PATIENCE: Duration = Duration::from_secs(3 * 60);
 
 /// The serial port stays silent from the loader's banner until the
 /// installer, on the screen, has been quit: the quit keys are pressed
@@ -360,6 +376,7 @@ fn discard(v: &VBox, runner: &dyn Runner) {
 }
 
 pub fn run_vbox(v: &VBox, runner: &dyn Runner, dry_run: bool) -> anyhow::Result<()> {
+    let v = &v.absolute()?;
     if !v.iso.is_file() && !dry_run {
         bail!("{} does not exist; build it first", v.iso.display());
     }
@@ -469,7 +486,13 @@ fn drive_vbox(
     println!("\n==> vbox: booting the live medium");
     // The loader's banner is the last thing the serial port shows before
     // the installer takes the screen (the kernel boots muted).
-    con.expect("Consoles:", patience)?;
+    let banner = BANNER_PATIENCE.min(patience);
+    if !con.expect_within("Consoles:", banner)? {
+        println!(
+            "note: no loader banner on the serial port after {}s",
+            banner.as_secs()
+        );
+    }
     println!("\n==> vbox: quitting the installer for the serial login");
     let deadline = std::time::Instant::now() + patience;
     loop {
@@ -677,6 +700,19 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.to_string(), "no keyboard");
         assert_eq!(screen.log.borrow().last().unwrap(), "login-screen.png");
+
+        // No loader banner on the serial port: the installer is quit once
+        // the wait for it is over.
+        let screen = FakeScreen::default();
+        drive_vbox(
+            &mut guest(&[REBOOT, POWEROFF, LOGIN, EVAL]),
+            "true",
+            [&checks, &desktop],
+            &screen,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(screen.log.borrow().last().unwrap(), "desktop.png");
         let screen = FakeScreen::default();
         let no_panel = [("panel", "false".to_string(), 1)];
         let err = drive_vbox(
@@ -843,6 +879,24 @@ mod tests {
             runner: &broken,
         };
         assert!(screen.press(QUIT_INSTALLER_KEYS).is_err());
+    }
+
+    #[test]
+    fn virtualbox_gets_absolute_paths() {
+        let v = vbox(std::path::Path::new("rel")).absolute().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(v.out, cwd.join("rel"));
+        assert_eq!(v.iso, cwd.join("rel/x.iso"));
+        assert_eq!(v.name, "jos-test");
+        // An empty path has no absolute form: nothing is created or run.
+        let m = MockRunner::new();
+        assert!(run_vbox(&vbox(std::path::Path::new("")), &m, true).is_err());
+        let no_iso = VBox {
+            iso: PathBuf::new(),
+            ..vbox(std::path::Path::new("rel"))
+        };
+        assert!(run_vbox(&no_iso, &m, true).is_err());
+        assert!(m.calls().is_empty());
     }
 
     #[test]
