@@ -16,6 +16,7 @@ use jos_gfx::image::{Image, Rect};
 use jos_gfx::Rgba;
 use juanitos_core::doctor::Status;
 
+use crate::partitions::{Row, KINDS};
 use crate::wizard::{InstallState, Method, Page, Stretch, Target, Widget, Wizard, METHODS, PAGES};
 
 pub const LOGICAL_W: i32 = 1280;
@@ -211,6 +212,7 @@ pub fn render_page(w: &Wizard, width: u32, height: u32) -> (Image, Hits) {
         Page::Welcome => welcome(&mut c),
         Page::Hardware => hardware(&mut c, w),
         Page::Disk => disk(&mut c, w),
+        Page::Partitions => partitions(&mut c, w),
         Page::System => system(&mut c, w),
         Page::Passthrough => passthrough(&mut c, w),
         Page::Users => users(&mut c, w),
@@ -230,7 +232,8 @@ fn sidebar(c: &mut Canvas, w: &Wizard) {
     for (i, page) in PAGES.iter().enumerate() {
         let y = 250 + i as i32 * 46;
         let current = *page == w.page;
-        let done = *page < w.page;
+        let skipped = !w.shows(*page);
+        let done = *page < w.page && !skipped;
         if current {
             c.rounded(22, y - 12, SIDEBAR_W - 44, 40, 8, THEME.highlight);
         }
@@ -246,6 +249,8 @@ fn sidebar(c: &mut Canvas, w: &Wizard) {
             THEME.accent
         } else if done {
             THEME.text
+        } else if skipped {
+            THEME.dim
         } else {
             THEME.text_muted
         };
@@ -426,7 +431,7 @@ fn radio_row(c: &mut Canvas, y: i32, selected: bool, focused: bool, hit: Hit) {
 }
 
 /// Rows of the disk list shown at once; the list scrolls past that.
-const DISK_ROWS: usize = 4;
+const DISK_ROWS: usize = 3;
 const ROW_PITCH: i32 = 64;
 /// Height of the partition bar.
 const BAR_H: i32 = 34;
@@ -526,26 +531,32 @@ fn partition_bar(c: &mut Canvas, w: &Wizard, y: i32) {
     }
 }
 
-/// The choice between the [`Method`]s, as two radio rows. The one that
-/// keeps the disk's systems says what room it has, or why it cannot.
+/// The choice between the [`Method`]s, as radio rows. Each says what it
+/// does to the disk, or why it is not possible.
 fn method_rows(c: &mut Canvas, w: &Wizard, y: i32) {
     let focused = w.focused() == Some(Widget::Method);
-    let space = w.alongside_space();
+    let free_gib = w
+        .alongside_space()
+        .map(|s| s.size_gib())
+        .unwrap_or_default();
     let dev = w.plan().dev();
     for (i, m) in METHODS.iter().enumerate() {
         let y = y + i as i32 * ROW_PITCH;
-        let (ink, detail) = match (m, &space) {
-            (Method::Alongside, Ok(s)) => (
+        let (ink, detail) = match (w.method_possible(*m), m) {
+            (Err(why), _) => (THEME.dim, format!("not possible: {why}")),
+            (Ok(()), Method::Alongside) => (
                 THEME.text,
                 format!(
-                    "{:.1} GiB of free space, the EFI partition shared; nothing is erased",
-                    s.size_gib()
+                    "{free_gib:.1} GiB of free space, the EFI partition shared; nothing is erased"
                 ),
             ),
-            (Method::Alongside, Err(why)) => (THEME.dim, format!("not possible: {why}")),
-            (Method::Erase, _) => (
+            (Ok(()), Method::Erase) => (
                 THEME.text,
                 format!("GPT, EFI, swap and a ZFS pool; everything on {dev} is lost"),
+            ),
+            (Ok(()), Method::Manual) => (
+                THEME.text,
+                "Delete, keep and add partitions yourself on the next page".into(),
             ),
         };
         radio_row(
@@ -564,6 +575,110 @@ fn method_rows(c: &mut Canvas, w: &Wizard, y: i32) {
             CONTENT_W - 80,
             THEME.text_muted,
         );
+    }
+}
+
+/// Rows of the partition list shown at once; the list scrolls past that.
+const PART_ROWS: usize = 6;
+const PART_PITCH: i32 = 40;
+
+/// Manual partitioning, after Anaconda's: the disk as it will be, a row
+/// per partition or free area (the deleted ones last, in red), and below
+/// it the button for the selected row; in free space, the type and size
+/// of the partition to add.
+fn partitions(c: &mut Canvas, w: &Wizard) {
+    title(
+        c,
+        "Manual partitioning",
+        "JuanitOS needs a ZFS pool partition and an EFI system partition.",
+    );
+    partition_bar(c, w, BODY_Y);
+    let focused = w.focused() == Some(Widget::Parts);
+    let rows = w.editor.rows();
+    let first = w.part_index.saturating_sub(PART_ROWS - 1);
+    let mut y = BODY_Y + BAR_H + 40;
+    for (i, row) in rows.iter().enumerate().skip(first).take(PART_ROWS) {
+        let selected = i == w.part_index;
+        let border = row_border(selected, focused);
+        c.boxed(CONTENT_X, y, CONTENT_W, 34, border, THEME.highlight);
+        c.hit(CONTENT_X, y, CONTENT_W, 34, Hit::Target(Target::Part(i)));
+        let (name, kind, mib, status, ink) = match row {
+            Row::Existing { part, deleted } => (
+                part.name.as_str(),
+                part.kind.as_str(),
+                part.size >> 20,
+                if *deleted { "delete" } else { "kept" },
+                if *deleted { FAIL } else { THEME.text },
+            ),
+            Row::Free(a) => ("", "free space", a.size_mib, "", THEME.text_muted),
+            Row::New { part, .. } => (
+                "new",
+                part.kind.label(),
+                part.area.size_mib,
+                "new",
+                THEME.accent,
+            ),
+        };
+        c.text(CONTENT_X + 16, y + 10, name, 2, ink);
+        c.text(CONTENT_X + 160, y + 10, kind, 2, ink);
+        c.text(CONTENT_X + 440, y + 10, &size_text(mib), 2, ink);
+        c.text(CONTENT_X + 640, y + 10, status, 2, ink);
+        y += PART_PITCH;
+    }
+    let y = BODY_Y + BAR_H + 40 + PART_ROWS as i32 * PART_PITCH + 10;
+    let selected = w.selected_row();
+    let action = match &selected {
+        Some(Row::Existing { deleted: false, .. }) => "Delete",
+        Some(Row::Existing { .. }) => "Keep",
+        Some(Row::New { .. }) => "Remove",
+        Some(Row::Free(_)) | None => "Add",
+    };
+    if let Some(Row::Free(_)) = selected {
+        kind_radios(c, w, y);
+        field(c, w, Widget::NewSize, CONTENT_X, y + 30, "Size", "");
+    }
+    let focused = w.focused() == Some(Widget::PartAction);
+    button(
+        c,
+        (CONTENT_X + FIELD_W + 20, y + 54),
+        Widget::PartAction,
+        action,
+        focused,
+        false,
+        true,
+    );
+}
+
+/// `260 MiB`, `8.0 GiB`.
+fn size_text(mib: u64) -> String {
+    if mib < 1024 {
+        format!("{mib} MiB")
+    } else {
+        format!("{:.1} GiB", mib as f64 / 1024.0)
+    }
+}
+
+/// The type of the partition to add, as a line of radio buttons.
+fn kind_radios(c: &mut Canvas, w: &Wizard, y: i32) {
+    let focused = w.focused() == Some(Widget::NewKind);
+    c.text(
+        CONTENT_X,
+        y,
+        "Type",
+        2,
+        if focused { THEME.accent } else { THEME.text },
+    );
+    for (i, k) in KINDS.iter().enumerate() {
+        let x = CONTENT_X + 90 + i as i32 * 190;
+        let on = *k == w.new_kind;
+        radio(c, x + 8, y + 8, on);
+        let ink = if on && focused {
+            THEME.accent
+        } else {
+            THEME.text
+        };
+        c.text(x + 24, y, k.label(), 2, ink);
+        c.hit(x - 4, y - 6, 180, 28, Hit::Target(Target::Kind(*k)));
     }
 }
 
@@ -660,15 +775,25 @@ fn system(c: &mut Canvas, w: &Wizard) {
         "Hostname",
         "letters, digits, - and .",
     );
-    field(
-        c,
-        w,
-        Widget::Swap,
-        CONTENT_X,
-        BODY_Y + 100,
-        "Swap (GiB)",
-        "0 for none",
-    );
+    if w.method() == Method::Manual {
+        c.text(
+            CONTENT_X,
+            BODY_Y + 124,
+            "Swap: the partition laid out on the Partitions page, if any.",
+            2,
+            THEME.text_muted,
+        );
+    } else {
+        field(
+            c,
+            w,
+            Widget::Swap,
+            CONTENT_X,
+            BODY_Y + 100,
+            "Swap (GiB)",
+            "0 for none",
+        );
+    }
     checkbox(
         c,
         w,
@@ -806,16 +931,11 @@ fn summary(c: &mut Canvas, w: &Wizard) {
     }
     y += 20;
     let plan = w.plan();
-    let dev = plan.dev();
-    let (colour, note) = match &plan.alongside {
-        Some(space) => (
-            OK,
-            format!(
-                "Nothing on {dev} is erased: JuanitOS takes {:.1} GiB of its free space",
-                space.size_gib()
-            ),
-        ),
-        None => (FAIL, format!("ALL DATA ON {dev} WILL BE ERASED")),
+    let note = format!("{}: {}", plan.dev(), plan.disk_note());
+    let colour = if plan.layout().is_some_and(|l| l.delete.is_empty()) {
+        OK
+    } else {
+        FAIL
     };
     c.boxed(CONTENT_X, y, CONTENT_W, 50, colour, THEME.highlight);
     c.text_centered(CONTENT_X + CONTENT_W / 2, y + 18, &note, 2, colour);
@@ -921,14 +1041,13 @@ fn finish(c: &mut Canvas, w: &Wizard) {
 
 fn button(
     c: &mut Canvas,
-    x: i32,
+    (x, y): (i32, i32),
     b: Widget,
     label: &str,
     focused: bool,
     primary: bool,
     enabled: bool,
 ) {
-    let y = BAR_Y + 24;
     c.hit(x, y, BUTTON_W, BUTTON_H, Hit::Target(Target::Widget(b)));
     let (fill, text) = match (focused, primary, enabled) {
         (_, _, false) => (THEME.highlight, THEME.dim),
@@ -965,7 +1084,15 @@ fn bottom_bar(c: &mut Canvas, w: &Wizard) {
     let n = buttons.len() as i32;
     for (i, (b, label, primary, enabled)) in buttons.into_iter().enumerate() {
         let x = CONTENT_R - (n - i as i32) * (BUTTON_W + 16) + 16;
-        button(c, x, b, label, w.focused() == Some(b), primary, enabled);
+        button(
+            c,
+            (x, BAR_Y + 24),
+            b,
+            label,
+            w.focused() == Some(b),
+            primary,
+            enabled,
+        );
     }
     if !widgets.is_empty() {
         c.text(
@@ -1003,6 +1130,7 @@ fn sample_pages() -> Vec<(&'static str, Wizard)> {
     w.handle(Key::Enter);
     w.handle(Key::Down); // the disk with a Linux on it: a choice to make
     pages.push(("installer-3-disk", w.clone()));
+    pages.push(("installer-3b-partitions", manual_sample(w.clone())));
     w.handle(Key::Enter); // to the choice (keeping Linux is preselected)
     w.handle(Key::Enter);
     pages.push(("installer-4-system", w.clone()));
@@ -1047,6 +1175,24 @@ fn sample_pages() -> Vec<(&'static str, Wizard)> {
     w.finished(Ok(()));
     pages.push(("installer-9-finish", w));
     pages
+}
+
+/// `w` on the Disk page, partitioned by hand: the Linux deleted, swap
+/// added in its place, the pool about to be.
+fn manual_sample(mut w: Wizard) -> Wizard {
+    use jos_fb::keys::Key;
+    w.click(Target::Method(Method::Manual));
+    w.handle(Key::Enter);
+    for row in [1, 1] {
+        w.click(Target::Part(row));
+        w.click(Target::Widget(Widget::PartAction));
+    }
+    w.click(Target::Part(2));
+    w.click(Target::Caret(Widget::NewSize, 0));
+    for ch in "1200G".chars() {
+        w.handle(Key::Char(ch));
+    }
+    w
 }
 
 /// A wizard filled with plausible hardware, for screenshots and tests:
@@ -1332,6 +1478,10 @@ mod tests {
             hits.target(500, rows_y + ROW_PITCH + 20),
             Some(Target::Method(Method::Erase))
         );
+        assert_eq!(
+            hits.target(500, rows_y + 2 * ROW_PITCH + 20),
+            Some(Target::Method(Method::Manual))
+        );
         // More disks than rows: the window follows the selection.
         let extra = w.disks[0].clone();
         w.disks.extend(std::iter::repeat_n(extra, 5));
@@ -1339,7 +1489,7 @@ mod tests {
         assert_eq!(top.target(500, BODY_Y + 20), Some(Target::Disk(0)));
         w.click(Target::Disk(6));
         let (_, scrolled) = render_page(&w, 1280, 800);
-        assert_eq!(scrolled.target(500, BODY_Y + 20), Some(Target::Disk(3)));
+        assert_eq!(scrolled.target(500, BODY_Y + 20), Some(Target::Disk(4)));
         w.page = Page::Passthrough;
         let extra = w.devices[1].clone();
         w.devices.extend(std::iter::repeat_n(extra, 10));
@@ -1436,6 +1586,78 @@ mod tests {
         let described = render(&w, 1280, 800);
         w.disks[0].description.clear();
         assert!(differs(&described, &render(&w, 1280, 800)));
+    }
+
+    #[test]
+    fn the_partitions_page_lists_rows_and_the_form() {
+        use crate::partitions::Kind;
+        let mut w = sample_wizard();
+        w.page = Page::Disk;
+        w.click(Target::Disk(1));
+        let mut w = manual_sample(w);
+        // ada0p1, the new swap, the free area (selected), ada0p2 deleted.
+        let (form, hits) = render_page(&w, 1280, 800);
+        let row_y = |i: i32| BODY_Y + BAR_H + 40 + i * PART_PITCH + 10;
+        assert_eq!(hits.target(500, row_y(3)), Some(Target::Part(3)));
+        let form_y = BODY_Y + BAR_H + 40 + PART_ROWS as i32 * PART_PITCH + 10;
+        let pool_x = CONTENT_X + 90 + 2 * 190 + 20;
+        assert_eq!(
+            hits.target(pool_x, form_y + 5),
+            Some(Target::Kind(Kind::Pool))
+        );
+        assert_eq!(
+            hits.target(CONTENT_X + 4, form_y + 70),
+            Some(Target::Caret(Widget::NewSize, 0))
+        );
+        let button = (CONTENT_X + FIELD_W + 120, form_y + 78);
+        assert_eq!(
+            hits.target(button.0, button.1),
+            Some(Target::Widget(Widget::PartAction))
+        );
+        // Each kind of row has its button: Delete, Remove, Keep.
+        let mut frames = vec![form];
+        for row in [0, 1, 3] {
+            w.click(Target::Part(row));
+            let frame = render(&w, 1280, 800);
+            assert!(frames.iter().all(|f| differs(f, &frame)));
+            frames.push(frame);
+        }
+        // The pool added, the Summary warns about the deletion; System
+        // says where swap went.
+        w.click(Target::Part(2));
+        w.click(Target::Kind(Kind::Pool));
+        assert!(differs(&frames[0], &render(&w, 1280, 800)));
+        w.click(Target::Widget(Widget::PartAction));
+        assert!(w.plan().manual.is_some());
+        for page in [Page::Summary, Page::System] {
+            w.page = page;
+            let _ = render(&w, 1280, 800);
+        }
+        // A blank disk laid out by hand: a green note.
+        let mut w = sample_wizard();
+        w.page = Page::Disk;
+        w.click(Target::Method(Method::Manual));
+        w.click(Target::Widget(Widget::Next));
+        w.click(Target::Widget(Widget::PartAction));
+        w.click(Target::Part(1));
+        w.click(Target::Kind(Kind::Pool));
+        w.click(Target::Widget(Widget::PartAction));
+        assert_eq!(w.page_error(), None);
+        w.page = Page::Summary;
+        let _ = render(&w, 1280, 800);
+        // A disk with no room lists nothing; an MBR disk cannot be
+        // partitioned by hand.
+        w.disks[0].size_bytes = 0;
+        w.disks[0].scheme = Some("MBR".into());
+        w.page = Page::Disk;
+        w.click(Target::Disk(0));
+        let _ = render(&w, 1280, 800);
+        w.disks[0].scheme = None;
+        w.click(Target::Disk(0));
+        w.click(Target::Method(Method::Manual));
+        w.click(Target::Widget(Widget::Next));
+        assert_eq!(w.selected_row(), None);
+        let _ = render(&w, 1280, 800);
     }
 
     #[test]

@@ -97,7 +97,7 @@ fn screenshots_of_every_page() {
     let out = jos_install(&dir, &["--screenshots", &shots.to_string_lossy()]);
     assert!(out.status.success(), "{}", stderr(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout.lines().count(), 9, "{stdout}");
+    assert_eq!(stdout.lines().count(), 10, "{stdout}");
     assert!(shots.join("installer-1-welcome.png").is_file());
     // Not into a file.
     let file = dir.join("a-file");

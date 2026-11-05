@@ -96,16 +96,7 @@ impl Disk {
         let Some(esp) = self.partitions.iter().find(|p| p.kind == "efi") else {
             return Err("the disk has no EFI system partition".into());
         };
-        if let Some((label, disk)) = all.iter().find_map(|d| {
-            d.labels
-                .iter()
-                .find(|l| [SWAP_LABEL, ZFS_LABEL].contains(&l.as_str()))
-                .map(|l| (l, &d.name))
-        }) {
-            return Err(format!(
-                "{disk} already has a partition labelled {label} (an earlier install?)"
-            ));
-        }
+        labels_free(all, &[SWAP_LABEL, ZFS_LABEL])?;
         let (start, size) = self
             .free_areas()
             .into_iter()
@@ -123,6 +114,28 @@ impl Disk {
             size_mib: size / MIB,
         })
     }
+}
+
+/// The install names its partitions with `labels`: they must not name
+/// partitions on any of the machine's disks already, or `/dev/gpt/<label>`
+/// would be ambiguous.
+pub fn labels_free(all: &[Disk], labels: &[&str]) -> std::result::Result<(), String> {
+    match all.iter().find_map(|d| {
+        d.labels
+            .iter()
+            .find(|l| labels.contains(&l.as_str()))
+            .map(|l| (l, &d.name))
+    }) {
+        Some((label, disk)) => Err(format!(
+            "{disk} already has a partition labelled {label} (an earlier install?)"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The GPT index of `part` on `disk` (`3` for `nda0p3` on `nda0`).
+pub fn partition_index(disk: &str, part: &str) -> Option<u32> {
+    part.strip_prefix(disk)?.strip_prefix('p')?.parse().ok()
 }
 
 /// Disk names from `sysctl -n kern.disks`, excluding optical drives
@@ -519,6 +532,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn partition_indexes() {
+        assert_eq!(partition_index("nda0", "nda0p3"), Some(3));
+        assert_eq!(partition_index("ada1", "ada1p12"), Some(12));
+        assert_eq!(partition_index("nda0", "nda1p3"), None);
+        assert_eq!(partition_index("nda0", "nda0s1"), None);
+        assert_eq!(partition_index("nda0", "nda0p"), None);
+    }
+
+    #[test]
     fn free_areas_are_aligned_gaps() {
         let d = linux_disk();
         assert_eq!(
@@ -585,7 +607,8 @@ pub(crate) mod tests {
             "ada0 already has a partition labelled zfs0 (an earlier install?)"
         );
         chuck.labels = vec![SWAP_LABEL.into()];
-        assert!(reason(&d, &[chuck]).contains("labelled swap0"));
+        assert!(reason(&d, std::slice::from_ref(&chuck)).contains("labelled swap0"));
+        assert!(labels_free(&[chuck], &[ZFS_LABEL, ESP_LABEL]).is_ok());
         // Too little room, or none at all.
         let mut small = d.clone();
         small.size_bytes = 216 << 30;

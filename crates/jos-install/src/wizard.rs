@@ -2,8 +2,8 @@
 //! The graphical installer's model: pages, fields, focus, validation.
 //!
 //! Inspired by Calamares (a sidebar of steps walked in order, and its
-//! "erase disk / install alongside" choice) and by Anaconda's "nothing is
-//! written until you confirm" rule: every page before **Summary** only
+//! "erase disk / install alongside" choice) and by Anaconda (its manual
+//! partitioning, and its "nothing is written until you confirm" rule): every page before **Summary** only
 //! edits this struct; the disk is touched once the user ticks the
 //! confirmation and presses **Install**.
 //!
@@ -16,7 +16,8 @@ use juanitos_core::doctor::{self, Check, Status};
 use juanitos_core::pci::{PciAddr, PciDevice};
 
 use crate::disks::{Disk, FreeSpace};
-use crate::install::{InstallPlan, Progress};
+use crate::install::{Esp, InstallPlan, Layout, Progress};
+use crate::partitions::{Editor, Kind, Row, KINDS};
 
 /// Pages, in order (the sidebar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -24,6 +25,8 @@ pub enum Page {
     Welcome,
     Hardware,
     Disk,
+    /// Only shown for [`Method::Manual`].
+    Partitions,
     System,
     Passthrough,
     Users,
@@ -32,10 +35,11 @@ pub enum Page {
     Finish,
 }
 
-pub const PAGES: [Page; 9] = [
+pub const PAGES: [Page; 10] = [
     Page::Welcome,
     Page::Hardware,
     Page::Disk,
+    Page::Partitions,
     Page::System,
     Page::Passthrough,
     Page::Users,
@@ -51,6 +55,7 @@ impl Page {
             Page::Welcome => "Welcome",
             Page::Hardware => "Hardware",
             Page::Disk => "Disk",
+            Page::Partitions => "Partitions",
             Page::System => "System",
             Page::Passthrough => "Passthrough",
             Page::Users => "Users",
@@ -83,8 +88,17 @@ pub enum Widget {
     AcceptChecks,
     Disks,
     /// The Disk page's choice between the [`Method`]s (Up/Down pick one);
-    /// only focusable when both are possible.
+    /// only focusable when more than one is possible.
     Method,
+    /// The Partitions page's list of partitions and free areas.
+    Parts,
+    /// The type of the partition to add (Up/Down pick one).
+    NewKind,
+    /// Its size.
+    NewSize,
+    /// The Partitions page's button: add, delete, keep or remove the
+    /// selected row.
+    PartAction,
     /// The Passthrough page's device list (Space ticks a device).
     Devices,
     Hostname,
@@ -133,10 +147,12 @@ pub enum Method {
     Alongside,
     /// The whole disk: GPT, EFI, swap and the pool.
     Erase,
+    /// Partitions deleted and added by hand on the Partitions page.
+    Manual,
 }
 
 /// The rows of the Disk page's choice, in order.
-pub const METHODS: [Method; 2] = [Method::Alongside, Method::Erase];
+pub const METHODS: [Method; 3] = [Method::Alongside, Method::Erase, Method::Manual];
 
 impl Method {
     /// The radio row on the Disk page.
@@ -144,6 +160,7 @@ impl Method {
         match self {
             Method::Alongside => "Install next to the systems on the disk",
             Method::Erase => "Erase the whole disk",
+            Method::Manual => "Partition the disk by hand",
         }
     }
 
@@ -152,6 +169,7 @@ impl Method {
         match self {
             Method::Alongside => "I understand: partition the free space and install JuanitOS",
             Method::Erase => "I understand: erase the disk and install JuanitOS",
+            Method::Manual => "I understand: apply these partition changes and install JuanitOS",
         }
     }
 
@@ -161,11 +179,8 @@ impl Method {
         match self {
             Method::Alongside => "the free space of the disk will be partitioned",
             Method::Erase => "the selected disk will be erased",
+            Method::Manual => "the partition changes will be written to the disk",
         }
-    }
-
-    fn index(self) -> usize {
-        METHODS.iter().position(|m| *m == self).unwrap_or(0)
     }
 }
 
@@ -308,6 +323,10 @@ pub enum Target {
     Method(Method),
     /// A row of the passthrough list.
     Device(usize),
+    /// A row of the partition list.
+    Part(usize),
+    /// A type for the partition to add.
+    Kind(Kind),
 }
 
 #[derive(Debug, Clone)]
@@ -319,10 +338,16 @@ pub struct Wizard {
     pub checks: Vec<Check>,
     pub disks: Vec<Disk>,
     pub disk_index: usize,
-    /// Never `Alongside` unless [`Wizard::alongside_space`] is `Ok`:
-    /// selecting a disk resets it, and it only changes through
-    /// [`Widget::Method`], which exists when both methods are possible.
+    /// Always possible ([`Wizard::method_possible`]): selecting a disk
+    /// resets it, and it only changes to a possible one.
     method: Method,
+    /// The selected disk's manual layout, reset with the disk.
+    pub editor: Editor,
+    /// The selected row of [`Editor::rows`].
+    pub part_index: usize,
+    /// The type and size of the partition to add in a free area.
+    pub new_kind: Kind,
+    pub new_size: TextField,
     /// Passthrough candidates (`pci::passthrough_candidates`).
     pub devices: Vec<PciDevice>,
     pub device_index: usize,
@@ -364,6 +389,10 @@ impl Wizard {
             page: Page::Welcome,
             focus: 0,
             method: Method::Erase,
+            editor: Editor::default(),
+            part_index: 0,
+            new_kind: Kind::Pool,
+            new_size: TextField::default(),
             hostname: TextField::new(&base.hostname),
             swap: TextField::new(&base.swap_gb.to_string()),
             desktop: base.gui,
@@ -399,8 +428,15 @@ impl Wizard {
             Page::Hardware if self.checks_passed() => vec![Back, Next],
             Page::Hardware => vec![AcceptChecks, Back, Next],
             Page::Disk if self.disks.is_empty() => vec![Back],
-            Page::Disk if self.alongside_space().is_ok() => vec![Disks, Method, Back, Next],
+            Page::Disk if self.methods().len() > 1 => vec![Disks, Method, Back, Next],
             Page::Disk => vec![Disks, Back, Next],
+            Page::Partitions if matches!(self.selected_row(), Some(Row::Free(_))) => {
+                vec![Parts, NewKind, NewSize, PartAction, Back, Next]
+            }
+            Page::Partitions => vec![Parts, PartAction, Back, Next],
+            Page::System if self.method == self::Method::Manual => {
+                vec![Hostname, Desktop, Back, Next]
+            }
             Page::System => vec![Hostname, Swap, Desktop, Back, Next],
             Page::Passthrough if self.devices.is_empty() => vec![Back, Next],
             Page::Passthrough => vec![Devices, Back, Next],
@@ -441,6 +477,7 @@ impl Wizard {
         Some(match w {
             Widget::Hostname => &self.hostname,
             Widget::Swap => &self.swap,
+            Widget::NewSize => &self.new_size,
             Widget::RootPw => &self.root_pw,
             Widget::RootPw2 => &self.root_pw2,
             Widget::UserName => &self.user_name,
@@ -454,6 +491,7 @@ impl Wizard {
         Some(match w {
             Widget::Hostname => &mut self.hostname,
             Widget::Swap => &mut self.swap,
+            Widget::NewSize => &mut self.new_size,
             Widget::RootPw => &mut self.root_pw,
             Widget::RootPw2 => &mut self.root_pw2,
             Widget::UserName => &mut self.user_name,
@@ -476,6 +514,7 @@ impl Wizard {
     fn accepts(w: Widget, c: char) -> bool {
         match w {
             Widget::Swap => c.is_ascii_digit(),
+            Widget::NewSize => c.is_ascii_digit() || "GgMm".contains(c),
             Widget::Hostname => c.is_ascii_alphanumeric() || c == '-' || c == '.',
             Widget::UserName => {
                 c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
@@ -497,10 +536,75 @@ impl Wizard {
         } else {
             Method::Erase
         };
+        self.editor = Editor::new(&self.selected_disk().cloned().unwrap_or_default());
+        self.select_part(0);
     }
 
     pub fn method(&self) -> Method {
         self.method
+    }
+
+    /// Whether `m` can be used on the selected disk, or why not.
+    pub fn method_possible(&self, m: Method) -> Result<(), String> {
+        match m {
+            Method::Alongside => self.alongside_space().map(|_| ()),
+            Method::Erase => Ok(()),
+            Method::Manual => self.selected_disk().map_or(Ok(()), Editor::editable),
+        }
+    }
+
+    fn methods(&self) -> Vec<Method> {
+        METHODS
+            .into_iter()
+            .filter(|m| self.method_possible(*m).is_ok())
+            .collect()
+    }
+
+    /// Is `page` part of the walk? The Partitions page only is for
+    /// [`Method::Manual`].
+    pub fn shows(&self, page: Page) -> bool {
+        page != Page::Partitions || self.method == Method::Manual
+    }
+
+    pub fn selected_row(&self) -> Option<Row> {
+        self.editor.rows().get(self.part_index).cloned()
+    }
+
+    /// Select a row of the partition list; the partition to add starts
+    /// as the one most likely needed.
+    fn select_part(&mut self, index: usize) {
+        self.part_index = index;
+        self.set_kind(self.editor.suggest());
+    }
+
+    fn set_kind(&mut self, kind: Kind) {
+        self.new_kind = kind;
+        self.new_size = TextField::new(kind.default_size());
+    }
+
+    /// [`Widget::PartAction`]: add the partition in the selected free
+    /// area, or delete, keep or remove the selected partition.
+    fn part_action(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let done = match row {
+            Row::Free(area) => self.editor.add(self.new_kind, area, &self.new_size.value),
+            _ => self.editor.toggle(&row),
+        };
+        let last = self.editor.rows().len().saturating_sub(1);
+        self.select_part(self.part_index.min(last));
+        self.error = done.err();
+        self.focus = self
+            .widgets()
+            .iter()
+            .position(|w| *w == Widget::PartAction)
+            .unwrap_or(0);
+    }
+
+    /// The manual layout, when that is the method, or what it lacks.
+    fn manual_layout(&self) -> Option<Result<Layout, String>> {
+        (self.method == Method::Manual).then(|| self.editor.layout(&self.disks))
     }
 
     /// Where an install next to the systems on the selected disk would
@@ -549,7 +653,15 @@ impl Wizard {
             Page::Disk if self.disks.is_empty() => {
                 Some("No disk found: JuanitOS needs a whole disk to install to.".into())
             }
-            Page::System => validate_system(&self.hostname.value, &self.swap.value).err(),
+            Page::Partitions => self.manual_layout().and_then(Result::err),
+            Page::System => {
+                // Manual layouts have their swap partition, or none.
+                let swap = match self.method {
+                    Method::Manual => "0",
+                    _ => &self.swap.value,
+                };
+                validate_system(&self.hostname.value, swap).err()
+            }
             Page::Users => validate_users(
                 &self.root_pw.value,
                 &self.root_pw2.value,
@@ -558,10 +670,10 @@ impl Wizard {
                 &self.user_pw2.value,
             )
             .err(),
-            Page::Summary if !self.confirm => Some(format!(
-                "Tick the confirmation: {}.",
-                self.method.consequence()
-            )),
+            Page::Summary => self.manual_layout().and_then(Result::err).or_else(|| {
+                (!self.confirm)
+                    .then(|| format!("Tick the confirmation: {}.", self.method.consequence()))
+            }),
             _ => None,
         }
     }
@@ -581,8 +693,9 @@ impl Wizard {
                 .unwrap_or_default(),
             alongside: match self.method {
                 Method::Alongside => self.alongside_space().ok(),
-                Method::Erase => None,
+                _ => None,
             },
+            manual: self.manual_layout().and_then(Result::ok),
             hostname: self.hostname.value.clone(),
             swap_gb: self.swap.value.parse().unwrap_or(0),
             gui: self.desktop,
@@ -603,6 +716,26 @@ impl Wizard {
             return Vec::new();
         };
         let p = self.plan();
+        if self.method == Method::Manual {
+            return self
+                .editor
+                .rows()
+                .into_iter()
+                .filter_map(|row| match row {
+                    Row::Existing { deleted: true, .. } => None,
+                    Row::Existing { part, .. } => Some((Stretch::Kept(part.kind), part.size)),
+                    Row::Free(a) => Some((Stretch::Free, a.size_mib * MIB)),
+                    Row::New { part, .. } => {
+                        let what = match part.kind {
+                            Kind::Efi => "efi",
+                            Kind::Swap => "swap",
+                            Kind::Pool => &p.pool,
+                        };
+                        Some((Stretch::New(what.into()), part.area.size_mib * MIB))
+                    }
+                })
+                .collect();
+        }
         let swap = p.swap_gb << 30;
         // (offset, size, what) of the partitions the disk ends up with.
         let mut items: Vec<(u64, u64, Stretch)> = Vec::new();
@@ -674,13 +807,21 @@ impl Wizard {
             self.goto(Page::Install);
             return Action::Start(Box::new(plan));
         }
-        self.goto(self.page.next());
+        let mut page = self.page.next();
+        if !self.shows(page) {
+            page = page.next();
+        }
+        self.goto(page);
         Action::None
     }
 
     fn back(&mut self) {
         if self.page > Page::Welcome && self.page < Page::Install {
-            self.goto(self.page.prev());
+            let mut page = self.page.prev();
+            if !self.shows(page) {
+                page = page.prev();
+            }
+            self.goto(page);
         }
     }
 
@@ -696,6 +837,10 @@ impl Wizard {
             Widget::AcceptChecks => toggled(&mut self.accept_checks),
             Widget::Desktop => toggled(&mut self.desktop),
             Widget::Confirm => toggled(&mut self.confirm),
+            Widget::PartAction => {
+                self.part_action();
+                Action::None
+            }
             // Enter in a field or a list: on to the next widget, or the
             // next page from the last input.
             _ => {
@@ -732,8 +877,18 @@ impl Wizard {
                 self.select_disk(list_step(self.disk_index, self.disks.len(), key == Key::Up));
             }
             Key::Up | Key::Down if w == Widget::Method => {
-                let i = list_step(self.method.index(), METHODS.len(), key == Key::Up);
-                self.method = METHODS.get(i).copied().unwrap_or(self.method);
+                let methods = self.methods();
+                let i = methods.iter().position(|m| *m == self.method).unwrap_or(0);
+                let i = list_step(i, methods.len(), key == Key::Up);
+                self.method = methods.get(i).copied().unwrap_or(self.method);
+            }
+            Key::Up | Key::Down if w == Widget::Parts => {
+                let len = self.editor.rows().len();
+                self.select_part(list_step(self.part_index, len, key == Key::Up));
+            }
+            Key::Up | Key::Down if w == Widget::NewKind => {
+                let i = list_step(self.new_kind.index(), KINDS.len(), key == Key::Up);
+                self.set_kind(KINDS.get(i).copied().unwrap_or(self.new_kind));
             }
             Key::Up | Key::Down if w == Widget::Devices => {
                 self.device_index =
@@ -743,7 +898,9 @@ impl Wizard {
             Key::Up => self.move_focus(false),
             Key::Down => self.move_focus(true),
             Key::Left | Key::Right if w.is_button() => self.move_focus(key == Key::Right),
-            Key::Char(' ') if w.is_checkbox() || w.is_button() => return self.activate(w),
+            Key::Char(' ') if w.is_checkbox() || w.is_button() || w == Widget::PartAction => {
+                return self.activate(w)
+            }
             Key::Char(c) if Self::accepts(w, c) => {
                 if let Some(f) = self.field_mut(w) {
                     f.insert(c);
@@ -775,6 +932,8 @@ impl Wizard {
             Target::Disk(_) => Widget::Disks,
             Target::Method(_) => Widget::Method,
             Target::Device(_) => Widget::Devices,
+            Target::Part(_) => Widget::Parts,
+            Target::Kind(_) => Widget::NewKind,
         };
         let Some(focus) = self.widgets().iter().position(|&w| w == widget) else {
             return Action::None;
@@ -789,11 +948,17 @@ impl Wizard {
                 }
             }
             Target::Disk(i) => self.select_disk(i),
-            Target::Method(m) => self.method = m,
+            Target::Method(m) => {
+                if self.method_possible(m).is_ok() {
+                    self.method = m;
+                }
+            }
             Target::Device(i) => {
                 self.device_index = i;
                 self.toggle_device();
             }
+            Target::Part(i) => self.select_part(i),
+            Target::Kind(k) => self.set_kind(k),
         }
         Action::None
     }
@@ -862,14 +1027,15 @@ impl Wizard {
         } else {
             "no swap,".into()
         };
-        let layout = match &p.alongside {
-            Some(space) => format!(
+        let layout = match (&p.manual, &p.alongside) {
+            (Some(l), _) => manual_summary(l, &p.pool),
+            (None, Some(space)) => format!(
                 "{:.1} GiB free: {swap} ZFS pool \"{}\", EFI on {}",
                 space.size_gib(),
                 p.pool,
                 space.esp
             ),
-            None => format!("GPT: {} MiB EFI, {swap} ZFS pool \"{}\"", p.esp_mb, p.pool),
+            (None, None) => format!("GPT: {} MiB EFI, {swap} ZFS pool \"{}\"", p.esp_mb, p.pool),
         };
         vec![
             ("Disk", disk),
@@ -896,6 +1062,26 @@ impl Wizard {
         let count = |s: Status| self.checks.iter().filter(|c| c.status == s).count();
         (count(Status::Fail), count(Status::Warn))
     }
+}
+
+/// The Summary's line for a manual layout: what is deleted, what is new.
+fn manual_summary(l: &Layout, pool: &str) -> String {
+    let mut parts = Vec::new();
+    let mut esp = String::new();
+    match &l.esp {
+        Esp::New { area, .. } => parts.push(format!("{} MiB EFI", area.size_mib)),
+        Esp::Shared(part) => esp = format!(", EFI on {part}"),
+    }
+    if let Some(swap) = l.swap {
+        parts.push(format!("{:.1} GiB swap", swap.size_gib()));
+    }
+    parts.push(format!("{:.1} GiB ZFS pool \"{pool}\"", l.pool.size_gib()));
+    let delete = if l.delete.is_empty() {
+        String::new()
+    } else {
+        format!("delete {}; ", l.delete.join(", "))
+    };
+    format!("{delete}new {}{esp}", parts.join(", "))
 }
 
 /// Flip a checkbox.
@@ -1046,7 +1232,8 @@ mod tests {
         w.handle(Key::Enter); // Welcome -> Hardware
         w.handle(Key::Enter); // Hardware -> Disk
         w.handle(Key::Down); // nda0
-        w.handle(Key::Enter); // Disk -> System (Enter in the list = next)
+        w.handle(Key::Enter); // to the choice: erase, preselected
+        w.handle(Key::Enter); // Disk -> System (Enter in the last input = next)
         assert_eq!(w.page, Page::System);
         for _ in 0..4 {
             w.handle(Key::Tab); // Swap, Desktop, Back, Next
@@ -1157,6 +1344,7 @@ mod tests {
     #[test]
     fn keys_that_do_little() {
         let mut w = wizard();
+        w.handle(Key::Enter);
         w.handle(Key::Enter);
         w.handle(Key::Enter);
         w.handle(Key::Enter); // Disk -> System, on the hostname
@@ -1331,22 +1519,26 @@ mod tests {
     fn the_method_follows_the_disk() {
         let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
         w.goto(Page::Disk);
-        // A blank disk can only be erased: no choice to make.
+        // A blank disk is erased, or partitioned by hand.
+        let choice = [Widget::Disks, Widget::Method, Widget::Back, Widget::Next];
         assert_eq!(w.method(), Method::Erase);
-        assert_eq!(w.widgets(), [Widget::Disks, Widget::Back, Widget::Next]);
+        assert_eq!(w.widgets(), choice);
         assert_eq!(
-            w.alongside_space().unwrap_err(),
+            w.method_possible(Method::Alongside).unwrap_err(),
             "the disk has no GPT partition table"
         );
+        assert_eq!(w.methods(), [Method::Erase, Method::Manual]);
         assert_eq!(w.click(Target::Method(Method::Alongside)), Action::None);
-        assert_eq!(w.method(), Method::Erase, "not on this page");
+        assert_eq!(w.method(), Method::Erase, "not possible");
+        w.handle(Key::Up);
+        assert_eq!(w.method(), Method::Erase, "Alongside is skipped");
+        // An MBR disk can only be erased: no choice to make.
+        w.disks[0].scheme = Some("MBR".into());
+        assert_eq!(w.widgets(), [Widget::Disks, Widget::Back, Widget::Next]);
         // The Linux disk defaults to keeping what is on it.
-        w.handle(Key::Down);
+        w.click(Target::Disk(1));
         assert_eq!(w.method(), Method::Alongside);
-        assert_eq!(
-            w.widgets(),
-            [Widget::Disks, Widget::Method, Widget::Back, Widget::Next]
-        );
+        assert_eq!(w.widgets(), choice);
         let space = w.alongside_space().unwrap();
         assert_eq!((space.start_mib, space.size_mib), (205_101, 306_899));
         assert_eq!(w.plan().alongside.as_ref(), Some(&space));
@@ -1356,9 +1548,12 @@ mod tests {
         w.handle(Key::Up);
         assert_eq!(w.method(), Method::Alongside);
         w.handle(Key::Down);
-        w.handle(Key::Down);
         assert_eq!(w.method(), Method::Erase);
         assert_eq!(w.plan().alongside, None);
+        w.handle(Key::Down);
+        w.handle(Key::Down);
+        assert_eq!(w.method(), Method::Manual);
+        w.handle(Key::Up);
         w.handle(Key::Up);
         assert_eq!(w.method(), Method::Alongside);
         // Enter on the choice, the last input of the page, moves on.
@@ -1376,6 +1571,210 @@ mod tests {
         w.click(Target::Disk(0));
         assert_eq!(w.method(), Method::Erase);
         assert_eq!(w.focused(), Some(Widget::Disks));
+    }
+
+    /// `w`'s Partitions page, for the selected disk.
+    fn to_partitions(w: &mut Wizard) {
+        w.goto(Page::Disk);
+        w.click(Target::Method(Method::Manual));
+        w.click(Target::Widget(Widget::Next));
+        assert_eq!(w.page, Page::Partitions);
+    }
+
+    #[test]
+    fn a_blank_disk_partitioned_by_hand() {
+        const MIB: u64 = 1 << 20;
+        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
+        assert!(!w.shows(Page::Partitions));
+        to_partitions(&mut w);
+        assert!(w.shows(Page::Partitions));
+        // One free area; the type suggested is the missing ESP.
+        let free = [
+            Widget::Parts,
+            Widget::NewKind,
+            Widget::NewSize,
+            Widget::PartAction,
+        ];
+        assert_eq!(w.widgets()[..4], free);
+        assert_eq!((w.new_kind, w.new_size.value.as_str()), (Kind::Efi, "260M"));
+        assert_eq!(
+            w.page_error().unwrap(),
+            "Add a ZFS pool partition in free space."
+        );
+        w.click(Target::Widget(Widget::Next));
+        assert_eq!(w.page, Page::Partitions);
+        w.click(Target::Part(0));
+        // Enter walks the form; Up/Down pick the type and its size.
+        w.handle(Key::Enter);
+        assert_eq!(w.focused(), Some(Widget::NewKind));
+        w.handle(Key::Down);
+        assert_eq!((w.new_kind, w.new_size.value.as_str()), (Kind::Swap, "4G"));
+        w.handle(Key::Up);
+        w.handle(Key::Enter);
+        assert_eq!(w.focused(), Some(Widget::NewSize));
+        typ(&mut w, "x");
+        assert_eq!(w.new_size.value, "260M");
+        w.handle(Key::Enter);
+        w.handle(Key::Char(' '));
+        // The ESP is added and selected, the button still focused.
+        let esp = crate::partitions::NewPart {
+            kind: Kind::Efi,
+            area: crate::install::Area {
+                start_mib: 1,
+                size_mib: 260,
+            },
+        };
+        assert_eq!(
+            w.selected_row(),
+            Some(Row::New {
+                index: 0,
+                part: esp
+            })
+        );
+        assert_eq!(
+            w.widgets(),
+            [
+                Widget::Parts,
+                Widget::PartAction,
+                Widget::Back,
+                Widget::Next
+            ]
+        );
+        assert_eq!(w.focused(), Some(Widget::PartAction));
+        // The pool in the rest, by clicks.
+        w.click(Target::Part(1));
+        assert_eq!(w.new_kind, Kind::Swap);
+        w.click(Target::Kind(Kind::Pool));
+        assert_eq!((w.new_kind, w.new_size.value.as_str()), (Kind::Pool, ""));
+        w.click(Target::Widget(Widget::PartAction));
+        assert_eq!(w.page_error(), None);
+        let pool = 500 * 1024 - 2 - 260;
+        assert_eq!(
+            w.layout(),
+            [
+                (Stretch::New("efi".into()), 260 * MIB),
+                (Stretch::New("zroot".into()), pool * MIB)
+            ]
+        );
+        let plan = w.plan();
+        let l = plan.manual.clone().unwrap();
+        assert!(l.create_table && l.delete.is_empty() && l.swap.is_none());
+        assert_eq!(plan.alongside, None);
+        assert_eq!(
+            w.summary_rows()[1].1,
+            "new 260 MiB EFI, 499.7 GiB ZFS pool \"zroot\""
+        );
+        // System has no swap field, and ignores the one typed earlier.
+        w.swap = TextField::new("x");
+        w.handle(Key::Tab);
+        w.handle(Key::Tab);
+        w.handle(Key::Enter);
+        assert_eq!(w.page, Page::System);
+        assert_eq!(
+            w.widgets(),
+            [
+                Widget::Hostname,
+                Widget::Desktop,
+                Widget::Back,
+                Widget::Next
+            ]
+        );
+        assert_eq!(w.page_error(), None);
+        w.handle(Key::Esc);
+        assert_eq!(w.page, Page::Partitions);
+        w.handle(Key::Esc);
+        assert_eq!(w.page, Page::Disk);
+    }
+
+    #[test]
+    fn partitions_deleted_and_errors_shown() {
+        const MIB: u64 = 1 << 20;
+        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
+        w.goto(Page::Disk);
+        w.click(Target::Disk(1));
+        to_partitions(&mut w);
+        // nda0p1, nda0p2, free, nda0p3, free: delete the Linux root.
+        w.handle(Key::Down);
+        w.handle(Key::Enter);
+        assert_eq!(w.focused(), Some(Widget::PartAction));
+        w.handle(Key::Enter);
+        // Its space joined the free area after it, now selected.
+        assert_eq!(
+            w.selected_row(),
+            Some(Row::Free(crate::install::Area {
+                start_mib: 301,
+                size_mib: 512_000 - 301,
+            }))
+        );
+        assert_eq!(w.new_kind, Kind::Swap, "the disk has an ESP");
+        w.new_size = TextField::new("G");
+        w.handle(Key::Enter);
+        assert!(w.error.as_deref().unwrap_or("").contains("whole number"));
+        w.new_size = TextField::new("4G");
+        w.handle(Key::Enter);
+        assert_eq!(w.error, None);
+        w.click(Target::Part(2));
+        w.click(Target::Widget(Widget::PartAction));
+        // Summary: the deletion, the new partitions, the shared ESP.
+        w.goto(Page::Summary);
+        let rows = w.summary_rows();
+        assert_eq!(
+            rows[1].1,
+            "delete nda0p2; new 4.0 GiB swap, 495.7 GiB ZFS pool \"zroot\", EFI on nda0p1"
+        );
+        assert!(w
+            .page_error()
+            .unwrap()
+            .contains("partition changes will be written"));
+        assert!(w.plan().validate().is_ok());
+        // The bar leaves the deleted partition out.
+        let what: Vec<Stretch> = w.layout().into_iter().map(|s| s.0).collect();
+        assert_eq!(
+            what,
+            [
+                Stretch::Kept("efi".into()),
+                Stretch::New("swap".into()),
+                Stretch::New("zroot".into()),
+                Stretch::Kept("linux-swap".into()),
+                Stretch::Free
+            ]
+        );
+        assert_eq!(w.layout()[4].1, 4095 * MIB);
+        // The deleted root cannot come back while its space is used.
+        w.goto(Page::Partitions);
+        w.click(Target::Part(5));
+        w.click(Target::Widget(Widget::PartAction));
+        assert!(w.error.as_deref().unwrap_or("").contains("nda0p2 first"));
+        // Removing the pool makes the Summary refuse again.
+        w.click(Target::Part(2));
+        w.click(Target::Widget(Widget::PartAction));
+        w.goto(Page::Summary);
+        w.confirm = true;
+        assert!(w.page_error().unwrap().contains("ZFS pool"));
+        assert_eq!(w.plan().manual, None);
+        // An MBR disk cannot be partitioned by hand.
+        w.disks[1].scheme = Some("MBR".into());
+        assert_eq!(
+            w.method_possible(Method::Manual).unwrap_err(),
+            "the disk has an MBR partition table, not GPT"
+        );
+    }
+
+    #[test]
+    fn a_disk_without_room_has_nothing_to_list() {
+        let tiny = Disk {
+            name: "md0".into(),
+            ..Default::default()
+        };
+        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), vec![tiny], vec![]);
+        to_partitions(&mut w);
+        assert_eq!(w.selected_row(), None);
+        w.handle(Key::Down);
+        w.handle(Key::Up);
+        assert_eq!(w.part_index, 0);
+        w.click(Target::Widget(Widget::PartAction));
+        assert_eq!(w.error, None);
+        assert!(w.layout().is_empty());
     }
 
     #[test]

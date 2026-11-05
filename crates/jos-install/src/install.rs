@@ -7,11 +7,13 @@
 //! to other systems ([`InstallPlan::alongside`]) only the free space of
 //! the disk is partitioned, swap and pool get the same labels, and the
 //! boot loader goes to a directory of its own on the EFI system
-//! partition already there.
+//! partition already there. Manual partitioning ([`InstallPlan::manual`])
+//! is the general case of that: partitions deleted, a table or an ESP
+//! created when the disk has none, swap and pool where the user put them.
 
 use std::path::{Path, PathBuf};
 
-use crate::disks::{FreeSpace, ESP_LABEL, MIN_POOL_GIB, SWAP_LABEL, ZFS_LABEL};
+use crate::disks::{partition_index, FreeSpace, ESP_LABEL, MIN_POOL_GIB, SWAP_LABEL, ZFS_LABEL};
 use juanitos_core::dom0::{self, Dom0Options, Flavor};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::pci::{self, PciAddr};
@@ -29,6 +31,9 @@ pub struct InstallPlan {
     /// Install into this free space of the disk, next to the systems
     /// already there; `None` erases the whole disk.
     pub alongside: Option<FreeSpace>,
+    /// Partition the disk as the user laid it out; takes precedence over
+    /// `alongside`.
+    pub manual: Option<Layout>,
     pub pool: String,
     pub hostname: String,
     pub swap_gb: u64,
@@ -54,6 +59,7 @@ impl Default for InstallPlan {
         InstallPlan {
             disk: String::new(),
             alongside: None,
+            manual: None,
             pool: "zroot".into(),
             hostname: "juanitos".into(),
             swap_gb: 4,
@@ -70,7 +76,72 @@ impl Default for InstallPlan {
     }
 }
 
+/// A stretch of a disk, in MiB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Area {
+    pub start_mib: u64,
+    pub size_mib: u64,
+}
+
+impl Area {
+    pub fn size_gib(&self) -> f64 {
+        self.size_mib as f64 / 1024.0
+    }
+}
+
+/// The EFI system partition of a [`Layout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Esp {
+    /// One already on the disk (its provider, `nda0p1`), shared with the
+    /// systems there.
+    Shared(String),
+    /// A new one, at this GPT index (given to `gpart add -i`, so the boot
+    /// entry can name it).
+    New { area: Area, index: u32 },
+}
+
+/// Partition changes on a disk whose other partitions stay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    /// The disk has no partition table: create a GPT one first.
+    pub create_table: bool,
+    /// Partitions deleted first (providers, `nda0p2`).
+    pub delete: Vec<String>,
+    pub esp: Esp,
+    pub swap: Option<Area>,
+    pub pool: Area,
+}
+
+impl Layout {
+    /// The install into `space`: swap at its start, the pool in the rest.
+    pub fn alongside(space: &FreeSpace, swap_gb: u64) -> Layout {
+        let swap_mib = swap_gb * 1024;
+        Layout {
+            create_table: false,
+            delete: Vec::new(),
+            esp: Esp::Shared(space.esp.clone()),
+            swap: (swap_gb > 0).then_some(Area {
+                start_mib: space.start_mib,
+                size_mib: swap_mib,
+            }),
+            pool: Area {
+                start_mib: space.start_mib + swap_mib,
+                size_mib: space.size_mib.saturating_sub(swap_mib),
+            },
+        }
+    }
+}
+
 impl InstallPlan {
+    /// The partition changes, unless the whole disk is erased.
+    pub fn layout(&self) -> Option<Layout> {
+        self.manual.clone().or_else(|| {
+            self.alongside
+                .as_ref()
+                .map(|space| Layout::alongside(space, self.swap_gb))
+        })
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.disk.is_empty() || self.disk.contains('/') {
             return Err(Error::Other(format!(
@@ -98,6 +169,23 @@ impl InstallPlan {
                 )));
             }
         }
+        if let Some(l) = &self.manual {
+            if l.pool.size_mib < MIN_POOL_GIB * 1024 {
+                return Err(Error::Other(format!(
+                    "the ZFS pool partition needs {MIN_POOL_GIB} GiB at least"
+                )));
+            }
+            if let Some(bad) = l
+                .delete
+                .iter()
+                .find(|n| partition_index(&self.disk, n).is_none())
+            {
+                return Err(Error::Other(format!(
+                    "{bad} is not a partition of {}",
+                    self.disk
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -109,21 +197,30 @@ impl InstallPlan {
     /// mounts on `/boot/efi`: the one it shares with the other systems,
     /// or its own.
     pub fn esp_device(&self) -> String {
-        match &self.alongside {
-            Some(space) => format!("/dev/{}", space.esp),
-            None => format!("/dev/gpt/{ESP_LABEL}"),
+        match self.layout().map(|l| l.esp) {
+            Some(Esp::Shared(part)) => format!("/dev/{part}"),
+            _ => format!("/dev/gpt/{ESP_LABEL}"),
         }
     }
 
+    /// Does the installed system swap?
+    pub fn has_swap(&self) -> bool {
+        self.layout().map_or(self.swap_gb > 0, |l| l.swap.is_some())
+    }
+
     /// What happens to the disk, for the summaries: the warning before
-    /// an erase, the free space used next to other systems.
+    /// an erase or a deletion, the free space used next to other systems.
     pub fn disk_note(&self) -> String {
-        match &self.alongside {
-            Some(space) => format!(
+        match (&self.manual, &self.alongside) {
+            (Some(l), _) if !l.delete.is_empty() => {
+                format!("{} WILL BE DELETED", l.delete.join(", "))
+            }
+            (Some(_), _) => "partitions are added, nothing is erased".into(),
+            (None, Some(space)) => format!(
                 "next to the systems there: {:.1} GiB free, nothing is erased",
                 space.size_gib()
             ),
-            None => "ALL DATA WILL BE ERASED".into(),
+            (None, None) => "ALL DATA WILL BE ERASED".into(),
         }
     }
 
@@ -314,17 +411,20 @@ impl<'a> Installer<'a> {
     }
 
     /// `gpart add` on the plan's disk, aligned to `align`, at `start`
-    /// (in MiB, where the free space is) and of `size` (`4G`, `300m`),
-    /// each when given, with `gpart`'s type `kind` and the GPT label.
+    /// (in MiB, where the free space is), of `size` (`4G`, `300m`) and at
+    /// GPT `index`, each when given, with `gpart`'s type `kind` and the
+    /// GPT label.
     fn gpart_add(
         &self,
         align: &str,
         start_mib: Option<u64>,
         size: Option<&str>,
+        index: Option<u32>,
         kind: &str,
         label: &str,
     ) -> Result<()> {
         let start = start_mib.map(|mib| format!("{mib}m"));
+        let index = index.map(|i| i.to_string());
         let mut args = vec!["add", "-a", align];
         if let Some(start) = &start {
             args.extend(["-b", start]);
@@ -332,41 +432,67 @@ impl<'a> Installer<'a> {
         if let Some(size) = size {
             args.extend(["-s", size]);
         }
+        if let Some(index) = &index {
+            args.extend(["-i", index]);
+        }
         args.extend(["-t", kind, "-l", label, &self.plan.disk]);
         self.runner.run_checked("gpart", &args).map(drop)
+    }
+
+    /// `gpart add` of exactly `area`.
+    fn gpart_add_area(
+        &self,
+        area: Area,
+        index: Option<u32>,
+        kind: &str,
+        label: &str,
+    ) -> Result<()> {
+        let size = format!("{}m", area.size_mib);
+        self.gpart_add("1m", Some(area.start_mib), Some(&size), index, kind, label)
+    }
+
+    /// Apply a [`Layout`]: only what it names is touched. There is no
+    /// BIOS boot partition (the other systems' loaders stay in charge of
+    /// legacy boot).
+    fn apply_layout(&self, l: &Layout) -> Result<()> {
+        let p = self.plan;
+        if l.create_table {
+            self.runner
+                .run_checked("gpart", &["create", "-s", "gpt", &p.disk])?;
+        }
+        for part in &l.delete {
+            let index = partition_index(&p.disk, part)
+                .ok_or_else(|| Error::Other(format!("{part} is not a partition of {}", p.disk)))?
+                .to_string();
+            self.runner
+                .run_checked("gpart", &["delete", "-i", &index, &p.disk])?;
+        }
+        if let Esp::New { area, index } = &l.esp {
+            self.gpart_add_area(*area, Some(*index), "efi", ESP_LABEL)?;
+        }
+        if let Some(swap) = l.swap {
+            self.gpart_add_area(swap, None, "freebsd-swap", SWAP_LABEL)?;
+        }
+        self.gpart_add_area(l.pool, None, "freebsd-zfs", ZFS_LABEL)?;
+        if let Esp::New { .. } = &l.esp {
+            self.runner
+                .run_checked("newfs_msdos", &["-F", "32", "-c", "1", &p.esp_device()])?;
+        }
+        Ok(())
     }
 
     pub fn partition(&self) -> Result<()> {
         let p = self.plan;
         let dev = p.dev();
-        if let Some(space) = &p.alongside {
-            self.step(&format!(
-                "Partitioning the free space of {dev} ({:.1} GiB)",
-                space.size_gib()
-            ));
-            // Only the free area is touched: no table, no ESP, no BIOS
-            // boot partition (the other systems' loaders stay in charge
-            // of legacy boot).
-            let swap_mib = p.swap_gb * 1024;
-            let pool_mib = space.size_mib - swap_mib;
-            if p.swap_gb > 0 {
-                let swap = format!("{swap_mib}m");
-                self.gpart_add(
-                    "1m",
-                    Some(space.start_mib),
-                    Some(&swap),
-                    "freebsd-swap",
-                    SWAP_LABEL,
-                )?;
+        if let Some(l) = p.layout() {
+            match &p.alongside {
+                Some(space) if p.manual.is_none() => self.step(&format!(
+                    "Partitioning the free space of {dev} ({:.1} GiB)",
+                    space.size_gib()
+                )),
+                _ => self.step(&format!("Changing the partitions of {dev}")),
             }
-            let pool = format!("{pool_mib}m");
-            return self.gpart_add(
-                "1m",
-                Some(space.start_mib + swap_mib),
-                Some(&pool),
-                "freebsd-zfs",
-                ZFS_LABEL,
-            );
+            return self.apply_layout(&l);
         }
         self.step(&format!("Partitioning {dev} (GPT, UEFI + BIOS)"));
         // Fails when there is no partition table yet; that is fine.
@@ -374,15 +500,22 @@ impl<'a> Installer<'a> {
         self.runner
             .run_checked("gpart", &["create", "-s", "gpt", &p.disk])?;
         let esp = format!("{}M", p.esp_mb);
-        self.gpart_add("4k", None, Some(&esp), "efi", ESP_LABEL)?;
+        self.gpart_add("4k", None, Some(&esp), None, "efi", ESP_LABEL)?;
         // Index 2, after the ESP so the ESP stays p1: legacy BIOS boot
         // (firmware without UEFI, or 32-bit EFI Macs booting via CSM).
-        self.gpart_add("4k", None, Some(BIOS_BOOT_SIZE), "freebsd-boot", "gptboot0")?;
+        self.gpart_add(
+            "4k",
+            None,
+            Some(BIOS_BOOT_SIZE),
+            None,
+            "freebsd-boot",
+            "gptboot0",
+        )?;
         if p.swap_gb > 0 {
             let swap = format!("{}G", p.swap_gb);
-            self.gpart_add("1m", None, Some(&swap), "freebsd-swap", SWAP_LABEL)?;
+            self.gpart_add("1m", None, Some(&swap), None, "freebsd-swap", SWAP_LABEL)?;
         }
-        self.gpart_add("1m", None, None, "freebsd-zfs", ZFS_LABEL)?;
+        self.gpart_add("1m", None, None, None, "freebsd-zfs", ZFS_LABEL)?;
         self.runner
             .run_checked("newfs_msdos", &["-F", "32", "-c", "1", &p.esp_device()])?;
         Ok(())
@@ -490,11 +623,15 @@ impl<'a> Installer<'a> {
 
     pub fn install_bootloader(&self) -> Result<()> {
         let p = self.plan;
-        let shared = p.alongside.is_some();
+        let layout = p.layout();
+        let shared = matches!(layout.as_ref().map(|l| &l.esp), Some(Esp::Shared(_)));
         if shared {
             // The BIOS boot code would go into partition index 2, which
             // here belongs to another system.
             self.step("Installing the boot loader (UEFI, on the shared system partition)");
+        } else if layout.is_some() {
+            // Partition index 2 may be another system's here too.
+            self.step("Installing the boot loader (UEFI)");
         } else {
             self.step("Installing boot loaders (UEFI and BIOS)");
             self.runner.run_checked(
@@ -551,11 +688,14 @@ impl<'a> Installer<'a> {
     /// JuanitOS is one firmware menu choice (or GRUB entry) away.
     fn boot_entry(&self) {
         let p = self.plan;
-        let (part, file) = match &p.alongside {
-            Some(space) => (space.esp.clone(), dom0::ESP_SHARED),
-            None => (format!("{}p1", p.disk), dom0::ESP_DEFAULT),
+        let (part, file, last) = match p.layout().map(|l| l.esp) {
+            Some(Esp::Shared(part)) => (part, dom0::ESP_SHARED, true),
+            Some(Esp::New { index, .. }) => {
+                (format!("{}p{index}", p.disk), dom0::ESP_DEFAULT, false)
+            }
+            None => (format!("{}p1", p.disk), dom0::ESP_DEFAULT, false),
         };
-        let before = p.alongside.as_ref().and_then(|_| self.boot_order(&[]));
+        let before = if last { self.boot_order(&[]) } else { None };
         let loader = format!("{part}:/{file}");
         let after = self.boot_order(&["-c", "-a", "-l", &loader, "-L", "JuanitOS"]);
         let new = after.and_then(|order| order.into_iter().next());
@@ -643,7 +783,7 @@ pub fn parse_boot_order(report: &str) -> Vec<String> {
 /// keeps it mounted at `/boot/efi`).
 pub fn fstab(p: &InstallPlan) -> String {
     let mut s = String::from("# Device\t\tMountpoint\tFStype\tOptions\tDump\tPass#\n");
-    if p.swap_gb > 0 {
+    if p.has_swap() {
         s.push_str(&format!(
             "/dev/gpt/{SWAP_LABEL}\t\tnone\t\tswap\tsw\t0\t0\n"
         ));
@@ -686,6 +826,118 @@ mod tests {
             alongside: Some(d.free_space(std::slice::from_ref(&d)).unwrap()),
             ..p
         }
+    }
+
+    /// `plan()` on `disks::tests::linux_disk` laid out by hand: Linux
+    /// deleted, a new ESP, swap and the pool in its place (and a table
+    /// created, which a disk with partitions never needs, to go through
+    /// every change at once).
+    fn manual(p: InstallPlan) -> InstallPlan {
+        let area = |start_mib, size_mib| Area {
+            start_mib,
+            size_mib,
+        };
+        InstallPlan {
+            disk: "nda0".into(),
+            manual: Some(Layout {
+                create_table: true,
+                delete: vec!["nda0p2".into(), "nda0p3".into()],
+                esp: Esp::New {
+                    area: area(301, 260),
+                    index: 2,
+                },
+                swap: Some(area(561, 4096)),
+                pool: area(4657, 100 * 1024),
+            }),
+            ..p
+        }
+    }
+
+    #[test]
+    fn manual_layouts_change_only_what_they_name() {
+        let p = manual(plan());
+        assert!(p.validate().is_ok());
+        let m = MockRunner::new();
+        Installer::new(&m, true, &p).partition().unwrap();
+        assert_eq!(
+            m.calls(),
+            [
+                "gpart create -s gpt nda0",
+                "gpart delete -i 2 nda0",
+                "gpart delete -i 3 nda0",
+                "gpart add -a 1m -b 301m -s 260m -i 2 -t efi -l efiboot0 nda0",
+                "gpart add -a 1m -b 561m -s 4096m -t freebsd-swap -l swap0 nda0",
+                "gpart add -a 1m -b 4657m -s 102400m -t freebsd-zfs -l zfs0 nda0",
+                "newfs_msdos -F 32 -c 1 /dev/gpt/efiboot0",
+            ]
+        );
+        assert_eq!(p.esp_device(), "/dev/gpt/efiboot0");
+        assert!(p.has_swap());
+        assert_eq!(p.disk_note(), "nda0p2, nda0p3 WILL BE DELETED");
+
+        // Added next to what is there: only the pool is created.
+        let mut p = plan();
+        p.disk = "nda0".into();
+        p.manual = Some(Layout {
+            create_table: false,
+            delete: vec![],
+            esp: Esp::Shared("nda0p1".into()),
+            swap: None,
+            pool: Area {
+                start_mib: 205_101,
+                size_mib: 306_899,
+            },
+        });
+        let m = MockRunner::new();
+        Installer::new(&m, true, &p).partition().unwrap();
+        assert_eq!(
+            m.calls(),
+            ["gpart add -a 1m -b 205101m -s 306899m -t freebsd-zfs -l zfs0 nda0"]
+        );
+        assert_eq!(p.esp_device(), "/dev/nda0p1");
+        assert!(!p.has_swap());
+        assert!(!fstab(&p).contains("swap"));
+        assert_eq!(p.disk_note(), "partitions are added, nothing is erased");
+    }
+
+    #[test]
+    fn manual_layouts_are_checked() {
+        let mut p = manual(plan());
+        p.manual.as_mut().unwrap().pool.size_mib = 1024;
+        assert!(p.validate().unwrap_err().to_string().contains("16 GiB"));
+        let mut p = manual(plan());
+        p.manual.as_mut().unwrap().delete = vec!["ada1p2".into()];
+        let err = "ada1p2 is not a partition of nda0";
+        assert_eq!(p.validate().unwrap_err().to_string(), err);
+        // Nothing is deleted with a partition that is not the disk's.
+        let m = MockRunner::new();
+        let r = Installer::new(&m, true, &p).partition();
+        assert_eq!(r.unwrap_err().to_string(), err);
+        assert_eq!(m.calls(), ["gpart create -s gpt nda0"]);
+    }
+
+    #[test]
+    fn a_new_esp_boots_first_without_bios_boot_code() {
+        let dir = scratch("manual-esp");
+        let p = manual(real_plan(&dir));
+        let m = MockRunner::new();
+        Installer::new(&m, false, &p).install_bootloader().unwrap();
+        let calls = m.calls();
+        assert!(!calls.iter().any(|c| c.starts_with("gpart")));
+        assert!(calls.contains(&format!(
+            "mount -t msdosfs /dev/gpt/efiboot0 {}/boot/efi",
+            p.target
+        )));
+        assert!(dir
+            .join("target/boot/efi")
+            .join(dom0::ESP_DEFAULT)
+            .is_file());
+        let entry = format!(
+            "efibootmgr -c -a -l nda0p2:/{} -L JuanitOS",
+            dom0::ESP_DEFAULT
+        );
+        assert_eq!(calls.last(), Some(&entry));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -999,7 +1251,11 @@ mod tests {
                 .iter()
                 .any(|t| c.starts_with(t))
         };
-        for p in [real_plan(&dir), alongside(real_plan(&dir))] {
+        for p in [
+            real_plan(&dir),
+            alongside(real_plan(&dir)),
+            manual(real_plan(&dir)),
+        ] {
             let m = mock();
             Installer::new(&m, false, &p).run("").unwrap();
             let calls = m.calls();

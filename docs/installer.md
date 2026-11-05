@@ -201,11 +201,14 @@ frame. The text front end asks for the console back instead
 The flow borrows from the two installers QubesOS users know:
 
 - **Calamares**: a sidebar of steps walked in order (Welcome, Hardware,
-  Disk, System, Passthrough, Users, Summary, Install, Finish), with
+  Disk, Partitions, System, Passthrough, Users, Summary, Install, Finish), with
   Back/Next at the bottom and Next disabled until the page is valid; the
   Disk page's "install alongside / erase disk" choice under a bar that
   shows the disk to scale as the install leaves it;
-- **Anaconda**: nothing is written to disk before the Summary page, where
+- **Anaconda**: manual partitioning as a list of the disk's partitions
+  and free areas, where partitions are deleted (and kept again) and new
+  ones added with a type and a size; nothing is written to disk before
+  the Summary page, where
   what happens to the disk has to be confirmed explicitly; the hardware
   check comes first, so you learn whether the machine can run qubes before
   choosing a disk.
@@ -213,15 +216,15 @@ The flow borrows from the two installers QubesOS users know:
 | | |
 |---|---|
 | ![welcome](images/installer-1-welcome.png) | ![hardware](images/installer-2-hardware.png) |
-| ![disk](images/installer-3-disk.png) | ![system](images/installer-4-system.png) |
-| ![passthrough](images/installer-5-passthrough.png) | ![users](images/installer-6-users.png) |
-| ![summary](images/installer-7-summary.png) | ![install](images/installer-8-install.png) |
-| ![finish](images/installer-9-finish.png) | |
+| ![disk](images/installer-3-disk.png) | ![partitions](images/installer-3b-partitions.png) |
+| ![system](images/installer-4-system.png) | ![passthrough](images/installer-5-passthrough.png) |
+| ![users](images/installer-6-users.png) | ![summary](images/installer-7-summary.png) |
+| ![install](images/installer-8-install.png) | ![finish](images/installer-9-finish.png) |
 
 The **Disk** page lists the disks (the boot medium excluded), then the
 selected disk as a bar: the partitions that stay in grey, free space
 dark, and what JuanitOS creates (EFI, swap, the pool) in the accent
-colour. Below it, two choices:
+colour. Below it, three choices:
 
 - **Install next to the systems on the disk**: the largest free area,
   sharing the EFI system partition (see "Next to another system"). It is
@@ -229,10 +232,48 @@ colour. Below it, two choices:
   with the reason (no GPT table, no ESP, less than 16 GiB free, an earlier
   install's labels).
 - **Erase the whole disk**: GPT, EFI, BIOS boot, swap and the pool.
+- **Partition the disk by hand**: the **Partitions** page, which the
+  walk skips otherwise (see "Manual partitioning"). Greyed out on a disk
+  whose partition table is not GPT (MBR): erase it instead.
 
-The Summary page then says either "Nothing on /dev/X is erased" (green)
-or "ALL DATA ON /dev/X WILL BE ERASED" (red), and its checkbox names
-the same thing.
+The Summary page then says what happens to the disk: "next to the
+systems there: N GiB free, nothing is erased" or "partitions are added,
+nothing is erased" (green), "ALL DATA WILL BE ERASED" or "nda0p2, nda0p3
+WILL BE DELETED" (red), and its checkbox names the same thing.
+
+### Manual partitioning
+
+The **Partitions** page lists the selected disk in offset order: its
+partitions (device, type, size, "kept"), its free areas, the partitions
+to create ("new", in the accent colour) and, last and in red, the
+partitions to delete. The bar above it shows the disk as it will be. The
+button under the list acts on the selected row:
+
+- a partition: **Delete** it, or **Keep** it again once deleted (refused
+  while new partitions use its space: remove those first);
+- a new partition: **Remove** it;
+- a free area: **Add** a partition at its start, of the type (EFI
+  system, swap or ZFS pool, as radio buttons) and size given (`260M`,
+  `4G`, or a bare number of GiB; empty for the whole area). The type
+  starts as the one most likely missing: EFI when the disk keeps no
+  ESP, then swap, then the pool.
+
+Next is enabled once the layout has a ZFS pool partition of at least
+16 GiB and an EFI system partition, kept (shared with the other
+systems, as in "Next to another system") or new. Nothing is resized, and
+the labels are the other methods' (`efiboot0`, `swap0`, `zfs0`, none
+already on any disk), so the installed system is the same whichever way
+the disk was laid out. The **System** page has no swap field then: the
+swap partition, if any, is the one added here.
+
+The install deletes (`gpart delete -i N`), then creates the new
+partitions at the exact offsets shown (`gpart add -b -s`, the new ESP
+with `-i` at the lowest free index so the boot entry can name it), and
+formats a new ESP; a disk without a partition table gets a GPT one
+first. A new ESP gets the default boot file `EFI/BOOT/BOOTX64.EFI` and
+a boot entry put first; a kept one is shared as described below. As
+next to another system, there is no `freebsd-boot` partition and no
+`gpart bootcode`: the disk boots through UEFI only.
 
 The **Passthrough** page lists the GPUs, the NICs (Wi-Fi included) and
 the other functions of each GPU's slot (its HDMI audio), as `pciconf`
@@ -246,9 +287,10 @@ of its own. NICs are never ticked by default: until `sys-net` exists the
 dom0 needs one to download templates.
 
 Keyboard: `Tab`/`Shift-Tab` or `Up`/`Down` move between fields,
-`Up`/`Down` pick a disk, a method or a device in a list, `Space` ticks a device,
+`Up`/`Down` pick a disk, a method, a partition, its type or a device in a list, `Space` ticks a device,
 `Enter`/`Space` press buttons and tick boxes, `Esc` goes back. Fields
-filter what they accept (digits for the swap size, host-name and
+filter what they accept (digits for the swap size, digits and `G`/`M`
+for a partition size, host-name and
 user-name characters), passwords are masked.
 
 Mouse and touchpad: the installer reads `/dev/sysmouse`, where `moused`
@@ -260,7 +302,8 @@ cold, so a PS/2 mouse or touchpad never got its own `moused` (seen under
 QEMU). On the live medium `rc.local` starts it before the installer:
 `rc.d/local` comes before `rc.d/moused` in the boot order, so the mouse
 would otherwise only work once the installer exits. A left click focuses and activates what it lands on: it
-presses a button, ticks a box, selects a disk or a method, ticks a device, or puts
+presses a button, ticks a box, selects a disk, a method, a partition or
+its type, ticks a device, or puts
 the caret in a field (at the nearest character, counted in average
 character widths). Without `moused` the installer says so on the console
 and stays keyboard-only.
@@ -356,7 +399,8 @@ free space rather than erasing the disk.
    under Ventoy's `ventoy/IMAGE` provider.
 3. `gpart`: GPT with `efiboot0` (260 MiB FAT32, p1), `gptboot0`
    (512 KiB `freebsd-boot`, p2), `swap0`, `zfs0`; next to another
-   system, only `swap0` and `zfs0` in the free area (above).
+   system, only `swap0` and `zfs0` in the free area (above); laid out by
+   hand, the deletions and additions of the Partitions page.
 4. `zpool create` with `altroot=/mnt`, `compression=lz4`, `atime=off`;
    datasets as `bsdinstall zfsboot` makes them, `bootfs=zroot/ROOT/default`,
    and `zroot/juanitos/{templates,qubes}` via the same code as `jos init`.

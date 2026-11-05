@@ -320,7 +320,7 @@ mod tests {
     }
 
     // Welcome -> ... -> Summary, ticking the confirmation, then Install.
-    const TO_INSTALL: &[u8] = b"\r\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\r \t\t\r";
+    const TO_INSTALL: &[u8] = b"\r\r\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\r \t\t\r";
 
     #[test]
     fn full_install_then_reboot() {
@@ -381,6 +381,48 @@ mod tests {
                 .iter()
                 .any(|c| c == "gpart add -a 1m -b 921901m -s 4096m -t freebsd-swap -l swap0 ada0"),
             "{calls:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manual_install_through_the_gui() {
+        let mut d = script(&[
+            // The Linux disk, partitioned by hand.
+            b"\r\r\x1b[B\r\x1b[B\x1b[B\r",
+            // Delete the Linux root, add swap in its place (the type
+            // suggested is swap), then the pool in the rest.
+            b"\x1b[B\r\r",
+            b"\r",
+            b"\x1b[Z\x1b[B\r\r\r\r",
+            // On through System (no swap field) and the other pages.
+            b"\t\t\r\t\t\t\r\rsecret\rsecret\r\t\t\t\t\r \t\t\r",
+            b"\r",
+        ]);
+        let mut w = sample_wizard();
+        let m = MockRunner::new().respond("zfs", &["list"], CmdOutput::failed(1, ""));
+        let dir = std::env::temp_dir().join(format!("jos-gui-manual-{}", std::process::id()));
+        w = crate::wizard::Wizard::new(
+            crate::install::InstallPlan {
+                target: dir.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            w.checks.clone(),
+            w.disks.clone(),
+            w.devices.clone(),
+        );
+        let out = run(&mut d, &mut w, &m, true, "report", opts()).unwrap();
+        assert_eq!(out, Outcome::Reboot);
+        assert_eq!(w.install, InstallState::Succeeded);
+        let calls = m.calls();
+        let gpart: Vec<&String> = calls.iter().filter(|c| c.starts_with("gpart")).collect();
+        assert_eq!(
+            gpart,
+            [
+                "gpart delete -i 2 ada0",
+                "gpart add -a 1m -b 301m -s 4096m -t freebsd-swap -l swap0 ada0",
+                "gpart add -a 1m -b 4397m -s 1903331m -t freebsd-zfs -l zfs0 ada0",
+            ]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

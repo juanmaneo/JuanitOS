@@ -18,6 +18,7 @@
 mod disks;
 mod gui;
 mod install;
+mod partitions;
 mod prompt;
 mod ui;
 mod wizard;

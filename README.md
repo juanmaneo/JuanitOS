@@ -116,7 +116,9 @@ out like Calamares: steps on the left, the current page on the right.
 
 Welcome → **Hardware** (the `jos doctor` checks: VT-x/AMD-V, IOMMU, bhyve
 modules, passthrough devices) → **Disk** (install next to the systems
-already there, or erase the disk) → **System** (hostname, swap,
+already there, erase the disk, or partition it by hand) → **Partitions**
+(only for the last: delete and keep partitions, add EFI, swap and the
+ZFS pool in free space, as in Anaconda) → **System** (hostname, swap,
 COSMIC at boot) → **Passthrough** (GPUs and NICs reserved for qubes via
 `pptdevs`; the NVIDIA card is proposed for CUDA) → **Users** → **Summary** (nothing is written before you
 tick the confirmation here) → **Install** (progress) → **Finish**
