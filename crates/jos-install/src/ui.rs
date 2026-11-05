@@ -1014,11 +1014,13 @@ pub fn sample_wizard() -> Wizard {
                 name: "nda0".into(),
                 size_bytes: 1_000_204_886_016,
                 description: "Samsung SSD 980 PRO 1TB".into(),
+                ..Default::default()
             },
             Disk {
                 name: "ada0".into(),
                 size_bytes: 2_000_398_934_016,
                 description: "WDC WD20EZBX-00AYRA0".into(),
+                ..Default::default()
             },
         ],
         devices,

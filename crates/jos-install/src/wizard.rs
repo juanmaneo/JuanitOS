@@ -809,11 +809,13 @@ mod tests {
                 name: "ada0".into(),
                 size_bytes: 500 << 30,
                 description: "Samsung SSD".into(),
+                ..Default::default()
             },
             Disk {
                 name: "nda0".into(),
                 size_bytes: 1 << 40,
                 description: "WD NVMe".into(),
+                ..Default::default()
             },
         ]
     }

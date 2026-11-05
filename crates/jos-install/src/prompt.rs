@@ -305,6 +305,7 @@ pub(crate) mod tests {
             name: "ada0".into(),
             size_bytes: 1 << 30,
             description: "A".into(),
+            ..Default::default()
         }];
         let nics = [PciDevice {
             addr: PciAddr::new(0, 20, 3),
@@ -333,11 +334,13 @@ pub(crate) mod tests {
                 name: "ada0".into(),
                 size_bytes: 1 << 30,
                 description: "A".into(),
+                ..Default::default()
             },
             Disk {
                 name: "nda0".into(),
                 size_bytes: 2 << 30,
                 description: "B".into(),
+                ..Default::default()
             },
         ];
         let (r, out, _) = with("7\nzz\n2\n", |p| p.choose_disk(&disks).unwrap());
