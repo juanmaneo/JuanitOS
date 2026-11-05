@@ -360,8 +360,6 @@ once they have switched terminals, which covers the pointer drawn at boot.
   `jos-boot` reports it. `loader-only` is the control: the same loader
   booted directly prints its full banner and countdown.
 
-![boot card under OVMF](images/boot-loader-14.png)
-
 ## Known limits
 
 - **One black gap (accepted).** The loader's console initialisation
