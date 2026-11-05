@@ -275,7 +275,56 @@ install is:
 jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
     --root-password '...' --user alice --user-password '...' \
     --pci 1/0/0 --pci 1/0/1     # or --no-pci; default: as on the Passthrough page
+jos-install --non-interactive --disk nda0 --alongside ...   # next to the Linux on nda0
 ```
+
+## Next to another system
+
+On a UEFI disk that already holds a system, JuanitOS can go into the
+free space instead of taking the disk: the text installer asks (yes by
+default) once the disk has what that needs, `--alongside` asks for it.
+The installer never resizes anything, so make room first with the other
+system's tools (GParted on Linux; the free space must be at least 16 GiB
+plus the swap, which covers the dom0 and a first template). What the
+disk must have, read from `kern.geom.conftxt`:
+
+- a GPT partition table with an EFI system partition (`efi` type): the
+  new system shares it;
+- no `swap0` or `zfs0` GPT label on any disk, since the new partitions
+  get those names (an earlier JuanitOS install has to be removed first);
+- a free area of at least 16 GiB, 1 MiB aligned; the largest one is used.
+
+The install then differs from the whole-disk one in three places:
+
+- `gpart add -b <start> -s <size>` creates `swap0` and `zfs0` in the
+  free area and nothing else: no partition table, no ESP, no
+  `freebsd-boot` partition, no `gpart bootcode` (which writes into
+  partition index 2, another system's here). The disk boots through UEFI
+  only.
+- The existing ESP is mounted by its device (`/dev/nda0p1`, in `fstab`
+  too) and gets `EFI/JUANITOS/BOOTX64.EFI` (jos-boot, or FreeBSD's
+  loader) next to `EFI/FREEBSD/LOADER.EFI`; `EFI/BOOT` and the other
+  systems' directories are left alone.
+- The `efibootmgr` entry points at `EFI/JUANITOS/BOOTX64.EFI` and is
+  put *last* in the boot order (`efibootmgr -c` puts a new entry first;
+  the installer restores the order and appends), so the machine keeps
+  booting what it did. JuanitOS is then one firmware boot-menu choice
+  away (the key the firmware shows at power-on, F12 on many machines),
+  or a GRUB entry on the Linux side:
+
+  ```sh
+  # /etc/grub.d/40_custom on the Linux, then update-grub / grub-mkconfig
+  menuentry "JuanitOS" {
+      insmod part_gpt
+      insmod fat
+      search --no-floppy --file --set=root /EFI/JUANITOS/BOOTX64.EFI
+      chainloader /EFI/JUANITOS/BOOTX64.EFI
+  }
+  ```
+
+The summary says "next to the systems there: N GiB free, nothing is
+erased" in that mode, and the confirmation asks about partitioning the
+free space rather than erasing the disk.
 
 ## What it does
 
@@ -286,7 +335,8 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
    (`kern.geom.conftxt`) to the disk under it, which also finds the stick
    under Ventoy's `ventoy/IMAGE` provider.
 3. `gpart`: GPT with `efiboot0` (260 MiB FAT32, p1), `gptboot0`
-   (512 KiB `freebsd-boot`, p2), `swap0`, `zfs0`.
+   (512 KiB `freebsd-boot`, p2), `swap0`, `zfs0`; next to another
+   system, only `swap0` and `zfs0` in the free area (above).
 4. `zpool create` with `altroot=/mnt`, `compression=lz4`, `atime=off`;
    datasets as `bsdinstall zfsboot` makes them, `bootfs=zroot/ROOT/default`,
    and `zroot/juanitos/{templates,qubes}` via the same code as `jos init`.
@@ -306,12 +356,14 @@ jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
    pre-loader, plus `EFI/BOOT/BOOTIA32.EFI` from `/boot/loader_ia32.efi`;
    `efibootmgr` entry on `BOOTX64.EFI` (best effort). BIOS:
    `gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 2`, so the disk
-   also boots on firmware without UEFI.
+   also boots on firmware without UEFI. Next to another system: its ESP,
+   `EFI/JUANITOS/BOOTX64.EFI`, the boot entry last, no BIOS boot code.
 8. Root password and first user through `chroot /mnt pw ... -h 0` (the
    password goes over stdin, never argv).
 
 UEFI only; legacy-BIOS disks are out of scope (bhyve-capable machines are
-UEFI machines).
+UEFI machines). Installing next to another system needs that system's
+disk to be GPT with an ESP, which every UEFI install is.
 
 ## Trying it under QEMU
 

@@ -73,9 +73,16 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     screenshots: Option<PathBuf>,
 
-    /// Target disk (e.g. ada0, nda0, vtbd0). Erased completely.
+    /// Target disk (e.g. ada0, nda0, vtbd0). Erased completely, unless
+    /// --alongside.
     #[arg(long)]
     disk: Option<String>,
+
+    /// Install into the largest free area of the disk, next to the
+    /// systems already there (a GPT disk with an EFI system partition and
+    /// at least 16 GiB free; shrink a partition first to make room).
+    #[arg(long, requires = "disk")]
+    alongside: bool,
 
     #[arg(long, default_value = "zroot")]
     pool: String,
@@ -415,6 +422,26 @@ fn text_install(
                 .join(", ")
         );
     }
+    let free = disks
+        .iter()
+        .find(|d| d.name == plan.disk)
+        .map(|d| d.free_space(disks));
+    if cli.alongside {
+        plan.alongside = Some(match free {
+            Some(Ok(space)) => space,
+            Some(Err(why)) => bail!("cannot install next to the systems on {}: {why}", plan.disk),
+            None => bail!("--alongside needs a disk the live medium sees"),
+        });
+    } else if let (true, Some(Ok(space))) = (interactive, free) {
+        let question = format!(
+            "Install next to the systems on {} ({:.1} GiB free, nothing erased)?",
+            plan.disk,
+            space.size_gib()
+        );
+        if p.ask_yes_no(&question, true)? {
+            plan.alongside = Some(space);
+        }
+    }
 
     if interactive {
         plan.hostname = p.prompt_default("Hostname", &plan.hostname)?;
@@ -446,7 +473,12 @@ fn text_install(
 
     plan.validate()?;
     p.say(&format!("\nInstallation plan:\n{}\n", plan.summary()))?;
-    if interactive && !p.ask_yes_no("Proceed? This erases the disk.", false)? {
+    let proceed = if plan.alongside.is_some() {
+        "Proceed? This partitions the free space of the disk."
+    } else {
+        "Proceed? This erases the disk."
+    };
+    if interactive && !p.ask_yes_no(proceed, false)? {
         bail!("aborted");
     }
 
@@ -497,6 +529,7 @@ mod tests {
             name: "vtbd0".into(),
             size_bytes: 20 << 30,
             description: "VirtIO".into(),
+            ..Default::default()
         }]
     }
 
@@ -616,6 +649,94 @@ mod tests {
         r.unwrap();
         assert!(out.contains("[1 2]: "), "NVIDIA proposed by default: {out}");
         assert!(out.contains("passthru  5/0/0\n"), "{out}");
+    }
+
+    /// Checks passed, one disk with a Linux on it and room next to it.
+    fn hw_linux() -> Detected {
+        Detected {
+            disks: vec![crate::disks::tests::linux_disk()],
+            ..hw(checks(Status::Ok), vec![])
+        }
+    }
+
+    #[test]
+    fn installing_next_to_other_systems() {
+        // `--alongside`: into the largest free area of `--disk`.
+        let c = cli(&[
+            "--dry-run",
+            "--non-interactive",
+            "--disk",
+            "nda0",
+            "--root-password",
+            "pw",
+            "--alongside",
+        ]);
+        let m = MockRunner::new();
+        let (r, out) = text_with(&c, &m, plan_for(&c), &hw_linux(), "");
+        r.unwrap();
+        assert!(out.contains("299.7 GiB free, nothing is erased"), "{out}");
+        let calls = m.calls();
+        assert!(calls
+            .iter()
+            .any(|c| c.starts_with("gpart add -a 1m -b 205101m")));
+        assert!(!calls.iter().any(|c| c.starts_with("gpart create")));
+        // Asked when possible, yes by default; declined, the disk is erased.
+        let c = cli(&["--dry-run"]);
+        // disk 1; next to Linux; hostname; swap; desktop; root password
+        // twice; no user; proceed.
+        let (r, out) = text_with(
+            &c,
+            &m,
+            plan_for(&c),
+            &hw_linux(),
+            "1\n\n\n\n\npw\npw\n\ny\n",
+        );
+        r.unwrap();
+        assert!(
+            out.contains("next to the systems on nda0 (299.7 GiB free, nothing erased)? [Y/n]"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Proceed? This partitions the free space of the disk."),
+            "{out}"
+        );
+        let m = MockRunner::new();
+        let (r, out) = text_with(
+            &c,
+            &m,
+            plan_for(&c),
+            &hw_linux(),
+            "1\nn\n\n\n\npw\npw\n\ny\n",
+        );
+        r.unwrap();
+        assert!(out.contains("ALL DATA WILL BE ERASED"), "{out}");
+        assert!(out.contains("Proceed? This erases the disk."), "{out}");
+        assert!(m.calls().iter().any(|c| c == "gpart create -s gpt nda0"));
+        // Impossible on a blank disk: refused with the reason, and not
+        // proposed (`interactive_text_install` and the others never see
+        // the question).
+        let flags = [
+            "--dry-run",
+            "--non-interactive",
+            "--root-password",
+            "pw",
+            "--alongside",
+            "--disk",
+        ];
+        let c = cli(&[&flags[..], &["vtbd0"]].concat());
+        let (r, _) = text(&c, &m, &checks(Status::Ok), "");
+        let err = r.unwrap_err().to_string();
+        assert!(
+            err.contains("next to the systems on vtbd0: the disk has no GPT"),
+            "{err}"
+        );
+        let c = cli(&[&flags[..], &["ada9"]].concat());
+        let (r, _) = text(&c, &m, &checks(Status::Ok), "");
+        assert!(r.unwrap_err().to_string().contains("live medium sees"));
+        assert!(
+            Cli::try_parse_from(["jos-install", "--alongside"]).is_err(),
+            "needs --disk"
+        );
     }
 
     #[test]
@@ -904,6 +1025,12 @@ mod tests {
         let passed = hw(checks(Status::Ok), vec![]);
         prompt::tests::fails_on_every_io_error("\n\n\nsecret\nsecret\ny\n", &|p| {
             text_install(&c, &m, plan.clone(), &passed, p)
+        });
+        // A disk with room next to its Linux: one more question.
+        let c = cli(&["--dry-run"]);
+        let linux = hw_linux();
+        prompt::tests::fails_on_every_io_error("1\ny\n\n\n\npw\npw\n\ny\n", &|p| {
+            text_install(&c, &m, plan_for(&c), &linux, p)
         });
     }
 

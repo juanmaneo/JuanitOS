@@ -254,6 +254,22 @@ pub fn esp_files(has_jos_boot: bool, has_ia32: bool) -> Vec<(&'static str, &'sta
     files
 }
 
+/// Where the default boot file goes on an EFI system partition shared with
+/// other systems: a directory of JuanitOS's own, reached through a
+/// firmware boot entry, so the removable-media default and the other
+/// systems' directories stay as they are.
+pub const ESP_SHARED: &str = "EFI/JUANITOS/BOOTX64.EFI";
+
+/// [`esp_files`] for a shared ESP: the default boot file in
+/// [`ESP_SHARED`], and no 32-bit loader (firmware that old has no other
+/// system to share with).
+pub fn esp_files_shared(has_jos_boot: bool) -> Vec<(&'static str, &'static str)> {
+    esp_files(has_jos_boot, false)
+        .into_iter()
+        .map(|(src, dst)| (src, if dst == ESP_DEFAULT { ESP_SHARED } else { dst }))
+        .collect()
+}
+
 /// Reference `loader.conf`, installed as
 /// `/usr/local/share/juanitos/loader.conf.sample`.
 pub const LOADER_CONF_SAMPLE: &str = include_str!("../../../freebsd/loader.conf.sample");
@@ -722,6 +738,18 @@ mod tests {
         assert!(without.contains(&("/boot/loader.efi", "EFI/BOOT/BOOTX64.EFI")));
         assert!(!without.iter().any(|(src, _)| *src == JOS_BOOT_EFI));
         assert_eq!(without.len(), 2);
+        // Shared with other systems: nothing under EFI/BOOT.
+        assert_eq!(
+            esp_files_shared(true),
+            [
+                (LOADER_EFI, ESP_LOADER),
+                (JOS_BOOT_EFI, "EFI/JUANITOS/BOOTX64.EFI")
+            ]
+        );
+        assert_eq!(
+            esp_files_shared(false),
+            [(LOADER_EFI, ESP_LOADER), (LOADER_EFI, ESP_SHARED)]
+        );
     }
 
     #[test]

@@ -120,9 +120,13 @@ COSMIC at boot) → **Passthrough** (GPUs and NICs reserved for qubes via
 `pptdevs`; the NVIDIA card is proposed for CUDA) → **Users** → **Summary** (nothing is written before you
 tick "erase the disk" here) → **Install** (progress) → **Finish**
 (reboot). The whole disk becomes GPT + EFI + swap + a ZFS pool laid out
-like `bsdinstall zfsboot`. Serial consoles get the same steps as text
+like `bsdinstall zfsboot`; on a UEFI disk with an existing Linux, the
+installer can instead take the free space (shrink a partition first),
+share the EFI system partition and add a firmware boot entry after the
+existing ones, erasing nothing. Serial consoles get the same steps as text
 prompts, and `jos-install --non-interactive --disk nda0 ...` installs
-unattended. Details and all screens: `docs/installer.md`. Trying it on a
+unattended (`--alongside` for the free-space install). Details and all
+screens: `docs/installer.md`. Trying it on a
 new machine: `docs/hardware-testing.md` (what each boot icon means, and
 `jos doctor --report FILE` to bring back what the hardware looks like).
 

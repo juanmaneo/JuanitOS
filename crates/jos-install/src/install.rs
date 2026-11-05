@@ -3,10 +3,15 @@
 //! the live medium booted from, configure, done.
 //!
 //! The layout follows what FreeBSD's `bsdinstall zfsboot` produces so that
-//! the result is a boring, well-understood FreeBSD-on-ZFS system.
+//! the result is a boring, well-understood FreeBSD-on-ZFS system. Next
+//! to other systems ([`InstallPlan::alongside`]) only the free space of
+//! the disk is partitioned, swap and pool get the same labels, and the
+//! boot loader goes to a directory of its own on the EFI system
+//! partition already there.
 
 use std::path::{Path, PathBuf};
 
+use crate::disks::{FreeSpace, ESP_LABEL, MIN_POOL_GIB, SWAP_LABEL, ZFS_LABEL};
 use juanitos_core::dom0::{self, Dom0Options, Flavor};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::pci::{self, PciAddr};
@@ -21,6 +26,9 @@ use juanitos_core::{Error, GlobalConfig, Result};
 pub struct InstallPlan {
     /// Target disk without `/dev/`.
     pub disk: String,
+    /// Install into this free space of the disk, next to the systems
+    /// already there; `None` erases the whole disk.
+    pub alongside: Option<FreeSpace>,
     pub pool: String,
     pub hostname: String,
     pub swap_gb: u64,
@@ -45,6 +53,7 @@ impl Default for InstallPlan {
     fn default() -> Self {
         InstallPlan {
             disk: String::new(),
+            alongside: None,
             pool: "zroot".into(),
             hostname: "juanitos".into(),
             swap_gb: 4,
@@ -79,11 +88,43 @@ impl InstallPlan {
                 return Err(Error::Other(format!("invalid user name {name:?}")));
             }
         }
+        if let Some(space) = &self.alongside {
+            if (self.swap_gb + MIN_POOL_GIB) * 1024 > space.size_mib {
+                return Err(Error::Other(format!(
+                    "{:.1} GiB of free space is too little for {} GiB of swap and a \
+                     {MIN_POOL_GIB} GiB pool",
+                    space.size_gib(),
+                    self.swap_gb
+                )));
+            }
+        }
         Ok(())
     }
 
     pub fn dev(&self) -> String {
         format!("/dev/{}", self.disk)
+    }
+
+    /// The EFI system partition the installed system boots from and
+    /// mounts on `/boot/efi`: the one it shares with the other systems,
+    /// or its own.
+    pub fn esp_device(&self) -> String {
+        match &self.alongside {
+            Some(space) => format!("/dev/{}", space.esp),
+            None => format!("/dev/gpt/{ESP_LABEL}"),
+        }
+    }
+
+    /// What happens to the disk, for the summaries: the warning before
+    /// an erase, the free space used next to other systems.
+    pub fn disk_note(&self) -> String {
+        match &self.alongside {
+            Some(space) => format!(
+                "next to the systems there: {:.1} GiB free, nothing is erased",
+                space.size_gib()
+            ),
+            None => "ALL DATA WILL BE ERASED".into(),
+        }
     }
 
     pub fn global_config(&self) -> GlobalConfig {
@@ -120,7 +161,7 @@ impl InstallPlan {
             .map(|(n, _)| n.as_str())
             .unwrap_or("(none)");
         format!(
-            "  disk      {dev}  (ALL DATA WILL BE ERASED)\n  \
+            "  disk      {dev}  ({note})\n  \
              pool      {pool}\n  \
              hostname  {host}\n  \
              swap      {swap} GiB\n  \
@@ -129,6 +170,7 @@ impl InstallPlan {
              user      {user}\n  \
              dist      {dist}\n",
             dev = self.dev(),
+            note = self.disk_note(),
             pool = self.pool,
             host = self.hostname,
             swap = self.swap_gb,
@@ -271,71 +313,78 @@ impl<'a> Installer<'a> {
         Ok(())
     }
 
+    /// `gpart add` on the plan's disk, aligned to `align`, at `start`
+    /// (in MiB, where the free space is) and of `size` (`4G`, `300m`),
+    /// each when given, with `gpart`'s type `kind` and the GPT label.
+    fn gpart_add(
+        &self,
+        align: &str,
+        start_mib: Option<u64>,
+        size: Option<&str>,
+        kind: &str,
+        label: &str,
+    ) -> Result<()> {
+        let start = start_mib.map(|mib| format!("{mib}m"));
+        let mut args = vec!["add", "-a", align];
+        if let Some(start) = &start {
+            args.extend(["-b", start]);
+        }
+        if let Some(size) = size {
+            args.extend(["-s", size]);
+        }
+        args.extend(["-t", kind, "-l", label, &self.plan.disk]);
+        self.runner.run_checked("gpart", &args).map(drop)
+    }
+
     pub fn partition(&self) -> Result<()> {
         let p = self.plan;
         let dev = p.dev();
+        if let Some(space) = &p.alongside {
+            self.step(&format!(
+                "Partitioning the free space of {dev} ({:.1} GiB)",
+                space.size_gib()
+            ));
+            // Only the free area is touched: no table, no ESP, no BIOS
+            // boot partition (the other systems' loaders stay in charge
+            // of legacy boot).
+            let swap_mib = p.swap_gb * 1024;
+            let pool_mib = space.size_mib - swap_mib;
+            if p.swap_gb > 0 {
+                let swap = format!("{swap_mib}m");
+                self.gpart_add(
+                    "1m",
+                    Some(space.start_mib),
+                    Some(&swap),
+                    "freebsd-swap",
+                    SWAP_LABEL,
+                )?;
+            }
+            let pool = format!("{pool_mib}m");
+            return self.gpart_add(
+                "1m",
+                Some(space.start_mib + swap_mib),
+                Some(&pool),
+                "freebsd-zfs",
+                ZFS_LABEL,
+            );
+        }
         self.step(&format!("Partitioning {dev} (GPT, UEFI + BIOS)"));
         // Fails when there is no partition table yet; that is fine.
         let _ = self.runner.run("gpart", &["destroy", "-F", &p.disk]);
         self.runner
             .run_checked("gpart", &["create", "-s", "gpt", &p.disk])?;
         let esp = format!("{}M", p.esp_mb);
-        self.runner.run_checked(
-            "gpart",
-            &[
-                "add", "-a", "4k", "-s", &esp, "-t", "efi", "-l", "efiboot0", &p.disk,
-            ],
-        )?;
+        self.gpart_add("4k", None, Some(&esp), "efi", ESP_LABEL)?;
         // Index 2, after the ESP so the ESP stays p1: legacy BIOS boot
         // (firmware without UEFI, or 32-bit EFI Macs booting via CSM).
-        self.runner.run_checked(
-            "gpart",
-            &[
-                "add",
-                "-a",
-                "4k",
-                "-s",
-                BIOS_BOOT_SIZE,
-                "-t",
-                "freebsd-boot",
-                "-l",
-                "gptboot0",
-                &p.disk,
-            ],
-        )?;
+        self.gpart_add("4k", None, Some(BIOS_BOOT_SIZE), "freebsd-boot", "gptboot0")?;
         if p.swap_gb > 0 {
             let swap = format!("{}G", p.swap_gb);
-            self.runner.run_checked(
-                "gpart",
-                &[
-                    "add",
-                    "-a",
-                    "1m",
-                    "-s",
-                    &swap,
-                    "-t",
-                    "freebsd-swap",
-                    "-l",
-                    "swap0",
-                    &p.disk,
-                ],
-            )?;
+            self.gpart_add("1m", None, Some(&swap), "freebsd-swap", SWAP_LABEL)?;
         }
-        self.runner.run_checked(
-            "gpart",
-            &[
-                "add",
-                "-a",
-                "1m",
-                "-t",
-                "freebsd-zfs",
-                "-l",
-                "zfs0",
-                &p.disk,
-            ],
-        )?;
+        self.gpart_add("1m", None, None, "freebsd-zfs", ZFS_LABEL)?;
         self.runner
-            .run_checked("newfs_msdos", &["-F", "32", "-c", "1", "/dev/gpt/efiboot0"])?;
+            .run_checked("newfs_msdos", &["-F", "32", "-c", "1", &p.esp_device()])?;
         Ok(())
     }
 
@@ -361,7 +410,7 @@ impl<'a> Installer<'a> {
                 "-m",
                 "none",
                 &p.pool,
-                "/dev/gpt/zfs0",
+                &format!("/dev/gpt/{ZFS_LABEL}"),
             ],
         )?;
         let root = format!("{}/ROOT", p.pool);
@@ -440,34 +489,48 @@ impl<'a> Installer<'a> {
     }
 
     pub fn install_bootloader(&self) -> Result<()> {
-        self.step("Installing boot loaders (UEFI and BIOS)");
-        self.runner.run_checked(
-            "gpart",
-            &[
-                "bootcode",
-                "-b",
-                dom0::PMBR,
-                "-p",
-                dom0::GPTZFSBOOT,
-                "-i",
-                BIOS_BOOT_INDEX,
-                &self.plan.disk,
-            ],
-        )?;
+        let p = self.plan;
+        let shared = p.alongside.is_some();
+        if shared {
+            // The BIOS boot code would go into partition index 2, which
+            // here belongs to another system.
+            self.step("Installing the boot loader (UEFI, on the shared system partition)");
+        } else {
+            self.step("Installing boot loaders (UEFI and BIOS)");
+            self.runner.run_checked(
+                "gpart",
+                &[
+                    "bootcode",
+                    "-b",
+                    dom0::PMBR,
+                    "-p",
+                    dom0::GPTZFSBOOT,
+                    "-i",
+                    BIOS_BOOT_INDEX,
+                    &p.disk,
+                ],
+            )?;
+        }
         let esp_s = self.target("boot/efi");
         self.runner
-            .run_checked("mount", &["-t", "msdosfs", "/dev/gpt/efiboot0", &esp_s])?;
+            .run_checked("mount", &["-t", "msdosfs", &p.esp_device(), &esp_s])?;
         // Same layout as the live medium's ESP: the graphical pre-loader
         // (when the release ships it) as the default boot file, FreeBSD's
-        // loader in EFI/FREEBSD for it to chain-load.
+        // loader in EFI/FREEBSD for it to chain-load. On a shared ESP the
+        // default boot file is the other systems' and stays theirs.
         let has_jos_boot = self
             .target_path(dom0::JOS_BOOT_EFI.trim_start_matches('/'))
             .is_file();
         let has_ia32 = self
             .target_path(dom0::LOADER_IA32_EFI.trim_start_matches('/'))
             .is_file();
+        let files = if shared {
+            dom0::esp_files_shared(has_jos_boot)
+        } else {
+            dom0::esp_files(has_jos_boot, has_ia32)
+        };
         let result = (|| {
-            for (src, dst) in dom0::esp_files(has_jos_boot, has_ia32) {
+            for (src, dst) in files {
                 self.fs.copy(
                     &self.target_path(src.trim_start_matches('/')),
                     &self.target_path(&format!("boot/efi/{dst}")),
@@ -477,13 +540,37 @@ impl<'a> Installer<'a> {
         })();
         let _ = self.runner.run("umount", &[&esp_s]);
         result?;
-        // Register a boot entry; harmless if the firmware/efivars are not
-        // available (e.g. under some hypervisors).
-        let part = format!("{}p1:/{}", self.plan.disk, dom0::ESP_DEFAULT);
-        let _ = self
-            .runner
-            .run("efibootmgr", &["-c", "-a", "-l", &part, "-L", "JuanitOS"]);
+        self.boot_entry();
         Ok(())
+    }
+
+    /// Register a firmware boot entry for the new system; harmless if the
+    /// firmware/efivars are not available (e.g. under some hypervisors).
+    /// `efibootmgr -c` puts the entry first; next to other systems it
+    /// goes last instead, so the machine keeps booting what it did and
+    /// JuanitOS is one firmware menu choice (or GRUB entry) away.
+    fn boot_entry(&self) {
+        let p = self.plan;
+        let (part, file) = match &p.alongside {
+            Some(space) => (space.esp.clone(), dom0::ESP_SHARED),
+            None => (format!("{}p1", p.disk), dom0::ESP_DEFAULT),
+        };
+        let before = p.alongside.as_ref().and_then(|_| self.boot_order(&[]));
+        let loader = format!("{part}:/{file}");
+        let after = self.boot_order(&["-c", "-a", "-l", &loader, "-L", "JuanitOS"]);
+        let new = after.and_then(|order| order.into_iter().next());
+        if let (Some(before), Some(new)) = (before, new) {
+            if !before.is_empty() && !before.contains(&new) {
+                let order = [&before[..], &[new]].concat().join(",");
+                let _ = self.runner.run("efibootmgr", &["-o", &order]);
+            }
+        }
+    }
+
+    /// `efibootmgr args`, and the `BootOrder` it prints afterwards.
+    fn boot_order(&self, args: &[&str]) -> Option<Vec<String>> {
+        let out = self.runner.run("efibootmgr", args).ok()?;
+        out.success().then(|| parse_boot_order(&out.stdout))
     }
 
     pub fn accounts(&self) -> Result<()> {
@@ -535,14 +622,36 @@ fn toml_pretty(cfg: &GlobalConfig) -> Result<String> {
     toml::to_string_pretty(cfg).map_err(Error::from)
 }
 
+/// The boot entries in `efibootmgr`'s report, from its
+/// `BootOrder  : 0001, 0003, 0000` line.
+pub fn parse_boot_order(report: &str) -> Vec<String> {
+    report
+        .lines()
+        .find_map(|l| l.strip_prefix("BootOrder")?.split_once(':'))
+        .map(|(_, order)| {
+            order
+                .split(',')
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `/etc/fstab` for the installed system: swap and the ESP (FreeBSD 14
 /// keeps it mounted at `/boot/efi`).
 pub fn fstab(p: &InstallPlan) -> String {
     let mut s = String::from("# Device\t\tMountpoint\tFStype\tOptions\tDump\tPass#\n");
     if p.swap_gb > 0 {
-        s.push_str("/dev/gpt/swap0\t\tnone\t\tswap\tsw\t0\t0\n");
+        s.push_str(&format!(
+            "/dev/gpt/{SWAP_LABEL}\t\tnone\t\tswap\tsw\t0\t0\n"
+        ));
     }
-    s.push_str("/dev/gpt/efiboot0\t/boot/efi\tmsdosfs\trw\t2\t2\n");
+    s.push_str(&format!(
+        "{}\t/boot/efi\tmsdosfs\trw\t2\t2\n",
+        p.esp_device()
+    ));
     s
 }
 
@@ -569,6 +678,16 @@ mod tests {
         }
     }
 
+    /// `plan()` next to the Linux of `disks::tests::linux_disk`.
+    fn alongside(p: InstallPlan) -> InstallPlan {
+        let d = crate::disks::tests::linux_disk();
+        InstallPlan {
+            disk: d.name.clone(),
+            alongside: Some(d.free_space(std::slice::from_ref(&d)).unwrap()),
+            ..p
+        }
+    }
+
     #[test]
     fn validation() {
         assert!(plan().validate().is_ok());
@@ -581,6 +700,124 @@ mod tests {
         let mut p = plan();
         p.pool = "Bad Pool".into();
         assert!(p.validate().is_err());
+        // Next to other systems the swap and the pool must fit the free
+        // space.
+        let mut p = alongside(plan());
+        assert!(p.validate().is_ok());
+        p.swap_gb = 300;
+        let err = p.validate().unwrap_err().to_string();
+        assert!(err.contains("299.7 GiB of free space"), "{err}");
+        assert!(err.contains("300 GiB of swap"), "{err}");
+    }
+
+    #[test]
+    fn alongside_partitions_only_the_free_space() {
+        let p = alongside(plan());
+        let m = MockRunner::new();
+        Installer::new(&m, true, &p).partition().unwrap();
+        assert_eq!(
+            m.calls(),
+            [
+                "gpart add -a 1m -b 205101m -s 4096m -t freebsd-swap -l swap0 nda0",
+                "gpart add -a 1m -b 209197m -s 302803m -t freebsd-zfs -l zfs0 nda0",
+            ]
+        );
+        let p = InstallPlan { swap_gb: 0, ..p };
+        let m = MockRunner::new();
+        Installer::new(&m, true, &p).partition().unwrap();
+        assert_eq!(
+            m.calls(),
+            ["gpart add -a 1m -b 205101m -s 306899m -t freebsd-zfs -l zfs0 nda0"]
+        );
+        // The shared ESP is mounted by its device, in fstab too.
+        assert_eq!(p.esp_device(), "/dev/nda0p1");
+        assert!(fstab(&p).contains("/dev/nda0p1\t/boot/efi"));
+        assert!(p.summary().contains("299.7 GiB free, nothing is erased"));
+    }
+
+    #[test]
+    fn alongside_shares_the_esp_and_keeps_the_boot_order() {
+        let dir = scratch("alongside");
+        let p = alongside(real_plan(&dir));
+        std::fs::write(dir.join("target/boot/jos-boot.efi"), b"boot").unwrap();
+        std::fs::write(dir.join("target/boot/loader_ia32.efi"), b"ia32").unwrap();
+        let m = MockRunner::new()
+            .respond(
+                "efibootmgr",
+                &[],
+                CmdOutput::ok("BootCurrent: 0001\nBootOrder  : 0001, 0003\n"),
+            )
+            .respond(
+                "efibootmgr",
+                &["-c"],
+                CmdOutput::ok("BootCurrent: 0001\nBootOrder  : 0005, 0001, 0003\n"),
+            );
+        Installer::new(&m, false, &p).install_bootloader().unwrap();
+        let calls = m.calls();
+        assert!(!calls.iter().any(|c| c.starts_with("gpart")), "{calls:?}");
+        assert!(calls.contains(&format!(
+            "mount -t msdosfs /dev/nda0p1 {}/boot/efi",
+            p.target
+        )));
+        let esp = dir.join("target/boot/efi");
+        assert!(esp.join(dom0::ESP_SHARED).is_file());
+        assert!(esp.join(dom0::ESP_LOADER).is_file());
+        assert!(!esp.join("EFI/BOOT").exists(), "the other systems' default");
+        let tail = &calls[calls.len() - 3..];
+        assert_eq!(
+            tail,
+            [
+                "efibootmgr",
+                "efibootmgr -c -a -l nda0p1:/EFI/JUANITOS/BOOTX64.EFI -L JuanitOS",
+                "efibootmgr -o 0001,0003,0005",
+            ]
+        );
+
+        // No reorder when the firmware has no variables (two ways), when
+        // there was no order to keep, or when the entry did not move.
+        let orders = |m: MockRunner| {
+            Installer::new(&m, false, &p).install_bootloader().unwrap();
+            let calls = m.calls();
+            assert!(
+                !calls.iter().any(|c| c.starts_with("efibootmgr -o")),
+                "{calls:?}"
+            );
+            calls.iter().filter(|c| c.starts_with("efibootmgr")).count()
+        };
+        assert_eq!(orders(MockRunner::new().missing("efibootmgr")), 2);
+        assert_eq!(
+            orders(MockRunner::new().respond(
+                "efibootmgr",
+                &[],
+                CmdOutput::failed(1, "no efivars")
+            )),
+            2
+        );
+        assert_eq!(orders(MockRunner::new()), 2);
+        let same = MockRunner::new().respond(
+            "efibootmgr",
+            &[],
+            CmdOutput::ok("BootOrder  : 0001, 0003\n"),
+        );
+        assert_eq!(orders(same), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn boot_order_parsing() {
+        assert_eq!(
+            parse_boot_order(
+                "BootCurrent: 0001\nTimeout    : 2 seconds\nBootOrder  : 0001, 0003, 0000\n"
+            ),
+            ["0001", "0003", "0000"]
+        );
+        assert_eq!(parse_boot_order("BootOrder: 0001,0003\n"), ["0001", "0003"]);
+        assert_eq!(parse_boot_order("BootOrder  : \n"), Vec::<String>::new());
+        assert_eq!(
+            parse_boot_order("BootCurrent: 0001\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(parse_boot_order("BootOrder\n"), Vec::<String>::new());
     }
 
     #[test]
@@ -752,12 +989,8 @@ mod tests {
     #[test]
     fn every_failing_command_stops_the_install() {
         let dir = scratch("fail-each");
-        let p = real_plan(&dir);
         // No dataset exists yet, so every one is created.
         let mock = || MockRunner::new().respond("zfs", &["list"], CmdOutput::failed(1, ""));
-        let m = mock();
-        Installer::new(&m, false, &p).run("").unwrap();
-        let calls = m.calls();
         // Failures the installer shrugs off: no partition table to destroy
         // yet, the ESP already unmounted, no EFI variables, and existence
         // queries answering "not there".
@@ -766,15 +999,20 @@ mod tests {
                 .iter()
                 .any(|t| c.starts_with(t))
         };
-        for (n, call) in calls.iter().enumerate() {
-            let m = mock().fail_call(n);
-            let r = Installer::new(&m, false, &p).run("");
-            if tolerated(call) {
-                assert!(r.is_ok(), "{call}: {r:?}");
-            } else {
-                let err = r.unwrap_err().to_string();
-                assert!(err.contains("mock failure"), "{call}: {err}");
-                assert_eq!(m.calls().len(), n + 1, "{call}: nothing runs after it");
+        for p in [real_plan(&dir), alongside(real_plan(&dir))] {
+            let m = mock();
+            Installer::new(&m, false, &p).run("").unwrap();
+            let calls = m.calls();
+            for (n, call) in calls.iter().enumerate() {
+                let m = mock().fail_call(n);
+                let r = Installer::new(&m, false, &p).run("");
+                if tolerated(call) {
+                    assert!(r.is_ok(), "{call}: {r:?}");
+                } else {
+                    let err = r.unwrap_err().to_string();
+                    assert!(err.contains("mock failure"), "{call}: {err}");
+                    assert_eq!(m.calls().len(), n + 1, "{call}: nothing runs after it");
+                }
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
