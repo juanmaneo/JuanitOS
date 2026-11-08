@@ -115,7 +115,7 @@ pub fn checks(freebsd_version: &str) -> Vec<(&'static str, String)> {
         ),
         (
             "jos-install plans an install",
-            "d=$(sysctl -n kern.disks | tr ' ' '\n' | grep -v '^cd' | head -n 1) && echo disk $d && \
+            "d=$(sysctl -n kern.disks | tr ' ' '\\n' | grep -v '^cd' | head -n 1) && echo disk $d && \
              jos-install --dry-run --non-interactive --ignore-doctor --disk $d --no-pci \
              --root-password jos --user alice --user-password jos | grep 'zpool create'"
                 .to_string(),
