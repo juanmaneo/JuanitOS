@@ -2,6 +2,7 @@
 # JuanitOS
 
 [![CI](https://github.com/juanmaneo/JuanitOS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/juanmaneo/JuanitOS/actions/workflows/ci.yml)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 
 A FreeBSD distribution with bhyve aiming at beeing like QubesOS for FreeBSD
 
