@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: BSD-3-Clause -->
 # JuanitOS
 
+[![CI](https://github.com/juanmaneo/JuanitOS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/juanmaneo/JuanitOS/actions/workflows/ci.yml)
+
 A FreeBSD distribution with bhyve aiming at beeing like QubesOS for FreeBSD
 
 Inspired by TrueNAS Core, Hellfire and HardenedBSD
