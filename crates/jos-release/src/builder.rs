@@ -596,25 +596,26 @@ impl<'a> Builder<'a> {
     fn install_splash(&self) -> anyhow::Result<()> {
         static PNGS: std::sync::OnceLock<Result<Vec<Vec<u8>>, jos_gfx::png::PngError>> =
             std::sync::OnceLock::new();
-        let pngs = PNGS
-            .get_or_init(|| {
-                [kernel_splash_card(), kernel_shutdown_card()]
-                    .iter()
-                    .map(jos_gfx::png::encode)
-                    .collect()
-            })
-            .as_ref()
-            .map_err(ToString::to_string)
-            .map_err(anyhow::Error::msg)?;
         let root = self.rootfs();
-        for (path, png) in [dom0::BOOT_SPLASH_PNG, dom0::SHUTDOWN_SPLASH_PNG]
-            .iter()
-            .zip(pngs)
-        {
-            self.fs
-                .write_bytes(&root.join(path.trim_start_matches('/')), png)?;
-        }
-        Ok(())
+        PNGS.get_or_init(|| {
+            [kernel_splash_card(), kernel_shutdown_card()]
+                .iter()
+                .map(jos_gfx::png::encode)
+                .collect()
+        })
+        .as_ref()
+        .map_err(ToString::to_string)
+        .map_err(anyhow::Error::msg)
+        .and_then(|pngs| {
+            [dom0::BOOT_SPLASH_PNG, dom0::SHUTDOWN_SPLASH_PNG]
+                .iter()
+                .zip(pngs)
+                .try_for_each(|(path, png)| {
+                    self.fs
+                        .write_bytes(&root.join(path.trim_start_matches('/')), png)
+                })
+                .map_err(Into::into)
+        })
     }
 
     /// Copy this repository into the root (for stage 2: building JuanitOS
