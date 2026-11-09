@@ -589,20 +589,32 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The kernel splash: the boot card with the first two stages lit,
-    /// which is exactly what `jos-boot` left on the screen. The picture
-    /// never changes, so it is rendered once per process.
+    /// The kernel splashes: the boot card with the first two stages lit,
+    /// which is exactly what `jos-boot` left on the screen, and the same
+    /// card on its way down for the end of the shutdown. The pictures
+    /// never change, so they are rendered once per process.
     fn install_splash(&self) -> anyhow::Result<()> {
-        static PNG: std::sync::OnceLock<Result<Vec<u8>, jos_gfx::png::PngError>> =
+        static PNGS: std::sync::OnceLock<Result<Vec<Vec<u8>>, jos_gfx::png::PngError>> =
             std::sync::OnceLock::new();
-        let dst = self
-            .rootfs()
-            .join(dom0::BOOT_SPLASH_PNG.trim_start_matches('/'));
-        PNG.get_or_init(|| jos_gfx::png::encode(&kernel_splash_card()))
+        let pngs = PNGS
+            .get_or_init(|| {
+                [kernel_splash_card(), kernel_shutdown_card()]
+                    .iter()
+                    .map(jos_gfx::png::encode)
+                    .collect()
+            })
             .as_ref()
             .map_err(ToString::to_string)
-            .map_err(anyhow::Error::msg)
-            .and_then(|png| self.fs.write_bytes(&dst, png).map_err(Into::into))
+            .map_err(anyhow::Error::msg)?;
+        let root = self.rootfs();
+        for (path, png) in [dom0::BOOT_SPLASH_PNG, dom0::SHUTDOWN_SPLASH_PNG]
+            .iter()
+            .zip(pngs)
+        {
+            self.fs
+                .write_bytes(&root.join(path.trim_start_matches('/')), png)?;
+        }
+        Ok(())
     }
 
     /// Copy this repository into the root (for stage 2: building JuanitOS
@@ -1257,6 +1269,17 @@ pub fn kernel_splash_card() -> jos_gfx::Image {
     scene.render_card()
 }
 
+/// The kernel's shutdown splash: what the daemon's last frame leaves
+/// once storage is gone too, boot and kernel lit and the status line
+/// saying "SHUTTING DOWN" (the boot picture at that point would say
+/// "STARTING STORAGE").
+pub fn kernel_shutdown_card() -> jos_gfx::Image {
+    let mut scene = jos_gfx::Scene::new();
+    scene.reach(jos_gfx::Stage::Kernel);
+    scene.shutting_down = true;
+    scene.render_card()
+}
+
 /// Render a path with forward slashes: these are FreeBSD paths even when
 /// a dry run happens on Windows.
 pub fn unix(p: &Path) -> String {
@@ -1571,6 +1594,34 @@ mod tests {
         assert_eq!(card.width(), jos_gfx::CARD_WIDTH);
         let png = jos_gfx::png::encode(&card).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn the_shutdown_splash_is_the_same_card_going_down() {
+        let boot = kernel_splash_card();
+        let down = kernel_shutdown_card();
+        assert_eq!((down.width(), down.height()), (boot.width(), boot.height()));
+        // Same icons lit, but the status line reads SHUTTING DOWN instead
+        // of STARTING STORAGE.
+        assert_ne!(down.pixels(), boot.pixels());
+    }
+
+    #[test]
+    fn both_kernel_splashes_are_installed() {
+        let s = Scratch::new("splash");
+        let profile = Profile::default();
+        let m = MockRunner::new();
+        let b = real_builder(&m, &profile, &s.0);
+        b.install_splash().unwrap();
+        let boot = b
+            .rootfs()
+            .join(dom0::BOOT_SPLASH_PNG.trim_start_matches('/'));
+        let down = b
+            .rootfs()
+            .join(dom0::SHUTDOWN_SPLASH_PNG.trim_start_matches('/'));
+        let (boot, down) = (std::fs::read(boot).unwrap(), std::fs::read(down).unwrap());
+        assert!(boot.starts_with(b"\x89PNG") && down.starts_with(b"\x89PNG"));
+        assert_ne!(boot, down);
     }
 
     #[test]

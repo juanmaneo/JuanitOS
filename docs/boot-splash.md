@@ -224,10 +224,12 @@ in reverse boot order, and the icons go out from right to left:
 | `jos`                 | before the system services  | stops the qubes, `leave qubes`          |
 | `jos-splash-network`  | before the network goes down | `leave network`                         |
 
-The kernel's own `shutdown_splash` (the boot PNG: boot and kernel lit)
-replaces the frame when the disks are synced, which turns the storage
-icon off. `rc.d/jos-splash` itself has no `shutdown` keyword: its stop
-(`finish --console`) would end the shutdown splash. Leaving a COSMIC
+The kernel's own `shutdown_splash` (`juanitos-shutdown.png`: boot and
+kernel lit, the status line reading *SHUTTING DOWN* — the boot PNG at
+that point would say *STARTING STORAGE*) replaces the frame when the
+disks are synced, which turns the storage icon off. `rc.d/jos-splash`
+itself has no `shutdown` keyword: its stop (`finish --console`) would end
+the shutdown splash. Leaving a COSMIC
 session for the shutdown splash (compositor and seat released by stopping
 `jos-login`) is not verified on hardware yet.
 

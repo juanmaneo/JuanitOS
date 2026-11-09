@@ -33,7 +33,7 @@ zfs_load="YES"
 # direct loader.efi boot stays verbose. Do not set console= here either:
 # it would override the pre-loader's console=nullconsole.
 splash="/boot/images/juanitos-splash.png"
-shutdown_splash="/boot/images/juanitos-splash.png"
+shutdown_splash="/boot/images/juanitos-shutdown.png"
 kern.vt.splash_cpu="0"
 # Power off with ACPI S5 like every other OS. FreeBSD tries the firmware's
 # EFI ResetSystem(Shutdown) first, which never returns on some firmware
