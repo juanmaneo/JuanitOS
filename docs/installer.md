@@ -261,10 +261,15 @@ button under the list acts on the selected row:
 Next is enabled once the layout has a ZFS pool partition of at least
 16 GiB and an EFI system partition, kept (shared with the other
 systems, as in "Next to another system") or new. Nothing is resized, and
-the labels are the other methods' (`efiboot0`, `swap0`, `zfs0`, none
-already on any disk), so the installed system is the same whichever way
-the disk was laid out. The **System** page has no swap field then: the
-swap partition, if any, is the one added here.
+the labels are the other methods' (`efiboot0`, `swap0`, `zfs0`), so the
+installed system is the same whichever way the disk was laid out. Those
+labels must not be in use already: an earlier JuanitOS install on the
+same disk is replaced by deleting its partitions (a deleted partition
+takes its label with it, so its pool can be deleted and a smaller one
+added in its place), a kept one that carries a label the layout needs
+must go first ("Delete da0p2 first: it is labelled swap0"), and labels
+on another disk block the layout. The **System** page has no swap field
+then: the swap partition, if any, is the one added here.
 
 The install deletes (`gpart delete -i N`), then creates the new
 partitions at the exact offsets shown (`gpart add -b -s`, the new ESP

@@ -244,7 +244,10 @@ impl Editor {
     }
 
     /// The installer's changes, or what is still missing. `all` are the
-    /// machine's disks, whose GPT labels must not clash with the new ones.
+    /// machine's disks, whose GPT labels must not clash with the new ones;
+    /// on this disk only the partitions kept count, a deleted one takes
+    /// its label with it (so an earlier install is replaced by deleting
+    /// its partitions, nothing more).
     pub fn layout(&self, all: &[Disk]) -> Result<Layout, String> {
         let Some(pool) = self.added(Kind::Pool) else {
             return Err("Add a ZFS pool partition in free space.".into());
@@ -274,7 +277,17 @@ impl Editor {
         if let Esp::New { .. } = esp {
             labels.push(ESP_LABEL);
         }
-        labels_free(all, &labels).map_err(|e| format!("Cannot partition: {e}."))?;
+        let kept_label = self.kept().find_map(|p| {
+            let label = p.label.as_deref().filter(|l| labels.contains(l))?;
+            Some((p.name.as_str(), label))
+        });
+        if let Some((name, label)) = kept_label {
+            return Err(format!(
+                "Delete {name} first: it is labelled {label} (an earlier install?)."
+            ));
+        }
+        let others = all.iter().filter(|d| d.name != self.disk.name);
+        labels_free(others, &labels).map_err(|e| format!("Cannot partition: {e}."))?;
         Ok(Layout {
             create_table: self.disk.scheme.is_none(),
             delete: self
@@ -327,7 +340,7 @@ pub fn parse_size_mib(text: &str, max_mib: u64) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disks::tests::linux_disk;
+    use crate::disks::tests::{labelled, linux_disk};
 
     fn area(start_mib: u64, size_mib: u64) -> Area {
         Area {
@@ -564,12 +577,72 @@ mod tests {
         // The labels of an earlier install on another disk get in the way.
         let old = Disk {
             name: "ada1".into(),
-            labels: vec![ESP_LABEL.into()],
+            partitions: vec![labelled("ada1p1", ESP_LABEL)],
             ..Default::default()
         };
         assert_eq!(
             e.layout(&[d.clone(), old]).unwrap_err(),
             "Cannot partition: ada1 already has a partition labelled efiboot0 (an earlier install?)."
         );
+    }
+
+    #[test]
+    fn replacing_an_earlier_install() {
+        // A disk JuanitOS filled: ESP, swap and a pool to the end, with
+        // the install's labels.
+        let part = |name: &str, kind: &str, start_mib: u64, size_mib: u64, label: &str| Partition {
+            name: name.into(),
+            kind: kind.into(),
+            offset: start_mib * MIB,
+            size: size_mib * MIB,
+            label: Some(label.into()),
+        };
+        let end = 1800 * 1024 - 1;
+        let d = Disk {
+            name: "da0".into(),
+            size_bytes: 1800 << 30,
+            scheme: Some("GPT".into()),
+            partitions: vec![
+                part("da0p1", "efi", 1, 260, ESP_LABEL),
+                part("da0p2", "freebsd-swap", 261, 4096, SWAP_LABEL),
+                part("da0p3", "freebsd-zfs", 4357, end - 4357, ZFS_LABEL),
+            ],
+            ..Default::default()
+        };
+        let all = std::slice::from_ref(&d);
+        let row = |e: &Editor, name: &str| {
+            e.rows()
+                .into_iter()
+                .find(|r| matches!(r, Row::Existing { part, .. } if part.name == name))
+                .unwrap()
+        };
+        let mut e = Editor::new(&d);
+        // The pool deleted and a smaller one added in its place: the
+        // label goes with the deleted partition, so it is free.
+        e.toggle(&row(&e, "da0p3")).unwrap();
+        let gap = free_rows(&e)[0];
+        assert_eq!(gap, area(4357, end - 4357));
+        e.add(Kind::Pool, gap, "500G").unwrap();
+        let l = e.layout(all).unwrap();
+        assert_eq!(l.delete, ["da0p3"]);
+        assert_eq!(l.esp, Esp::Shared("da0p1".into()));
+        assert_eq!(l.swap, None);
+        assert_eq!(l.pool, area(4357, 500 * 1024));
+        // The old swap is kept and a new one added: same label twice.
+        e.add(Kind::Swap, free_rows(&e)[0], "8G").unwrap();
+        assert_eq!(
+            e.layout(all).unwrap_err(),
+            "Delete da0p2 first: it is labelled swap0 (an earlier install?)."
+        );
+        e.toggle(&row(&e, "da0p2")).unwrap();
+        assert_eq!(e.layout(all).unwrap().delete, ["da0p2", "da0p3"]);
+        // The same disk among the machine's disks is not "another disk"
+        // with the labels; a real other disk with them still is.
+        let mut other = d.clone();
+        other.name = "da1".into();
+        assert!(e
+            .layout(&[d.clone(), other])
+            .unwrap_err()
+            .starts_with("Cannot partition: da1 already has a partition labelled"));
     }
 }

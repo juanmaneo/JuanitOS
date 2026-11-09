@@ -28,8 +28,6 @@ pub struct Disk {
     pub scheme: Option<String>,
     /// The disk's partitions, by offset.
     pub partitions: Vec<Partition>,
-    /// GPT labels on the disk (`zfs0` for `/dev/gpt/zfs0`).
-    pub labels: Vec<String>,
 }
 
 /// A partition, as GEOM describes it.
@@ -42,6 +40,8 @@ pub struct Partition {
     /// Offset and size in bytes.
     pub offset: u64,
     pub size: u64,
+    /// Its GPT label (`zfs0` for `/dev/gpt/zfs0`), when it has one.
+    pub label: Option<String>,
 }
 
 /// Where an install next to other systems goes: the largest free area of
@@ -117,13 +117,17 @@ impl Disk {
 }
 
 /// The install names its partitions with `labels`: they must not name
-/// partitions on any of the machine's disks already, or `/dev/gpt/<label>`
-/// would be ambiguous.
-pub fn labels_free(all: &[Disk], labels: &[&str]) -> std::result::Result<(), String> {
-    match all.iter().find_map(|d| {
-        d.labels
+/// partitions on any of the `disks` already (the machine's, less the
+/// ones being erased), or `/dev/gpt/<label>` would be ambiguous.
+pub fn labels_free<'a>(
+    disks: impl IntoIterator<Item = &'a Disk>,
+    labels: &[&str],
+) -> std::result::Result<(), String> {
+    match disks.into_iter().find_map(|d| {
+        d.partitions
             .iter()
-            .find(|l| labels.contains(&l.as_str()))
+            .filter_map(|p| p.label.as_deref())
+            .find(|l| labels.contains(l))
             .map(|l| (l, &d.name))
     }) {
         Some((label, disk)) => Err(format!(
@@ -228,42 +232,43 @@ fn conftxt_value<'a>(fields: &[&'a str], key: &str) -> Option<&'a str> {
 }
 
 /// The partition table of `disk` and its partitions, sorted by offset:
-/// the `PART` lines right under the disk (depth 1).
+/// the `PART` lines right under the disk (depth 1), each with the GPT
+/// label hanging off it (a depth-2 `LABEL gpt/<name>` line; `gptid/` and
+/// the file systems' own labels, `msdosfs/EFI`, are not partition labels).
 pub fn parse_partitions(conftxt: &str, disk: &str) -> (Option<String>, Vec<Partition>) {
     let mut scheme = None;
-    let mut parts: Vec<Partition> = conftxt_subtree(conftxt, disk)
-        .filter(|f| f.first() == Some(&"1") && f.get(1) == Some(&"PART"))
-        .map(|f| {
-            scheme = conftxt_value(&f, "xs").map(String::from);
-            let number = |key| {
-                conftxt_value(&f, key)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0)
-            };
-            Partition {
-                name: f.get(2).copied().unwrap_or_default().to_string(),
-                kind: conftxt_value(&f, "ty").unwrap_or_default().to_string(),
-                offset: number("o"),
-                size: f.get(3).and_then(|v| v.parse().ok()).unwrap_or(0),
+    let mut parts: Vec<Partition> = Vec::new();
+    let mut under_part = false;
+    for f in conftxt_subtree(conftxt, disk) {
+        match (f.first().copied(), f.get(1).copied()) {
+            (Some("1"), Some("PART")) => {
+                scheme = conftxt_value(&f, "xs").map(String::from);
+                let number = |key| {
+                    conftxt_value(&f, key)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0)
+                };
+                parts.push(Partition {
+                    name: f.get(2).copied().unwrap_or_default().to_string(),
+                    kind: conftxt_value(&f, "ty").unwrap_or_default().to_string(),
+                    offset: number("o"),
+                    size: f.get(3).and_then(|v| v.parse().ok()).unwrap_or(0),
+                    label: None,
+                });
+                under_part = true;
             }
-        })
-        .collect();
+            (Some("1"), _) => under_part = false,
+            (Some("2"), Some("LABEL")) if under_part => {
+                let label = f.get(2).and_then(|name| name.strip_prefix("gpt/"));
+                if let Some((part, label)) = parts.last_mut().zip(label) {
+                    part.label = Some(label.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
     parts.sort_by_key(|p| p.offset);
     (scheme, parts)
-}
-
-/// The GPT labels on `disk` (`gpt/zfs0` gives `zfs0`).
-pub fn parse_gpt_labels(conftxt: &str, disk: &str) -> Vec<String> {
-    conftxt_subtree(conftxt, disk)
-        .filter(|f| f.get(1) == Some(&"LABEL"))
-        .filter_map(|f| {
-            f.get(2)
-                .copied()
-                .unwrap_or_default()
-                .strip_prefix("gpt/")
-                .map(String::from)
-        })
-        .collect()
 }
 
 /// The disk the running system booted from (the USB stick holding the
@@ -298,7 +303,6 @@ pub fn list_disks(runner: &dyn Runner) -> Result<Vec<Disk>> {
         };
         let (scheme, partitions) = parse_partitions(&conftxt, &name);
         disks.push(Disk {
-            labels: parse_gpt_labels(&conftxt, &name),
             name,
             size_bytes,
             description,
@@ -472,7 +476,15 @@ pub(crate) mod tests {
             description: "NVMe".into(),
             scheme,
             partitions,
-            labels: parse_gpt_labels(LINUX_DISK, "nda0"),
+        }
+    }
+
+    /// A partition that only matters for its GPT label.
+    pub(crate) fn labelled(name: &str, label: &str) -> Partition {
+        Partition {
+            name: name.into(),
+            label: Some(label.into()),
+            ..Default::default()
         }
     }
 
@@ -500,25 +512,31 @@ pub(crate) mod tests {
                 ("nda0p3", "linux-swap", 500 << 10, 8 << 10),
             ]
         );
-        // Labels of the partitions only, not of the filesystems in them
-        // (msdosfs/) nor GPT ids, and not those of the next disk.
-        assert_eq!(d.labels, ["root", "EFI"]);
-        assert_eq!(parse_gpt_labels(LINUX_DISK, "da0"), ["zfs0"]);
+        // Each partition's own GPT label, not the file system's in it
+        // (msdosfs/) nor the GPT id, and not those of the next disk.
+        let labels: Vec<Option<&str>> = d.partitions.iter().map(|p| p.label.as_deref()).collect();
+        assert_eq!(labels, [Some("EFI"), Some("root"), None]);
+        let (_, stick) = parse_partitions(LINUX_DISK, "da0");
+        assert_eq!(stick.len(), 1);
+        assert_eq!(stick[0].label.as_deref(), Some("zfs0"));
         // The partitions under the ISO's labels (depth 2) are not the
-        // stick's own.
+        // stick's own, and neither is a label under them.
         let (scheme, stick) = parse_partitions(DD_STICK, "da0");
         assert_eq!(scheme.as_deref(), Some("GPT"));
         let names: Vec<&str> = stick.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["da0p1", "da0p2"]);
+        assert!(stick.iter().all(|p| p.label.is_none()));
         assert_eq!(
             parse_partitions(VENTOY_STICK, "da0").0.as_deref(),
             Some("MBR")
         );
         // A disk without partitions, a disk GEOM does not list, and lines
-        // with missing or garbled values.
+        // with missing or garbled values. A GPT label under something
+        // other than a partition (a disk id) belongs to no partition.
         assert_eq!(parse_partitions(DD_STICK, "vtbd0"), (None, vec![]));
         assert_eq!(parse_partitions(LINUX_DISK, "ada9"), (None, vec![]));
-        let garbled = "0 DISK ada0 1 512\n1\n1 PART ada0p1 x 512 i 1 o\n";
+        let garbled = "0 DISK ada0 1 512\n1\n1 PART ada0p1 x 512 i 1 o\n\
+                       1 LABEL diskid/DISK-X 1 512\n2 LABEL gpt/stray 1 512\n";
         assert_eq!(
             parse_partitions(garbled, "ada0"),
             (
@@ -599,14 +617,14 @@ pub(crate) mod tests {
         // would make /dev/gpt/zfs0 ambiguous.
         let mut chuck = Disk {
             name: "ada0".into(),
-            labels: vec!["data".into(), ZFS_LABEL.into()],
+            partitions: vec![labelled("ada0p1", "data"), labelled("ada0p2", ZFS_LABEL)],
             ..Default::default()
         };
         assert_eq!(
             reason(&d, &[d.clone(), chuck.clone()]),
             "ada0 already has a partition labelled zfs0 (an earlier install?)"
         );
-        chuck.labels = vec![SWAP_LABEL.into()];
+        chuck.partitions = vec![labelled("ada0p1", SWAP_LABEL)];
         assert!(reason(&d, std::slice::from_ref(&chuck)).contains("labelled swap0"));
         assert!(labels_free(&[chuck], &[ZFS_LABEL, ESP_LABEL]).is_ok());
         // Too little room, or none at all.
