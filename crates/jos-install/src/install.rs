@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::disks::{partition_index, FreeSpace, ESP_LABEL, MIN_POOL_GIB, SWAP_LABEL, ZFS_LABEL};
 use juanitos_core::dom0::{self, Dom0Options, Flavor};
 use juanitos_core::fsops::FsOps;
+use juanitos_core::keyboard;
 use juanitos_core::pci::{self, PciAddr};
 use juanitos_core::release::DistManifest;
 use juanitos_core::sys::Runner;
@@ -36,6 +37,9 @@ pub struct InstallPlan {
     pub manual: Option<Layout>,
     pub pool: String,
     pub hostname: String,
+    /// The console keymap (`keyboard::Keymap::name`) of the installed
+    /// system; `None` keeps the kernel's `us`.
+    pub keymap: Option<String>,
     pub swap_gb: u64,
     pub esp_mb: u64,
     pub gui: bool,
@@ -62,6 +66,7 @@ impl Default for InstallPlan {
             manual: None,
             pool: "zroot".into(),
             hostname: "juanitos".into(),
+            keymap: None,
             swap_gb: 4,
             esp_mb: 260,
             gui: true,
@@ -238,6 +243,7 @@ impl InstallPlan {
             serial_console: self.serial_console,
             gpu_module: self.gpu_module.clone(),
             pptdevs: self.pptdevs.clone(),
+            keymap: self.keymap.clone(),
         }
     }
 
@@ -261,6 +267,7 @@ impl InstallPlan {
             "  disk      {dev}  ({note})\n  \
              pool      {pool}\n  \
              hostname  {host}\n  \
+             keyboard  {keymap}\n  \
              swap      {swap} GiB\n  \
              desktop   {gui}\n  \
              passthru  {ppt}\n  \
@@ -270,6 +277,7 @@ impl InstallPlan {
             note = self.disk_note(),
             pool = self.pool,
             host = self.hostname,
+            keymap = self.keymap.as_deref().unwrap_or(keyboard::DEFAULT_KEYMAP),
             swap = self.swap_gb,
             gui = if self.gui { "COSMIC" } else { "console only" },
             ppt = self.passthrough_text(),
@@ -1434,6 +1442,7 @@ mod tests {
         let p = InstallPlan {
             target: dir.to_string_lossy().into_owned(),
             gui: false,
+            keymap: Some("fr.macbook".into()),
             ..plan()
         };
         let m = MockRunner::new();
@@ -1442,6 +1451,8 @@ mod tests {
             .unwrap();
         let rc = std::fs::read_to_string(dir.join("etc/rc.conf")).unwrap();
         assert!(!rc.contains("jos_login_enable"));
+        // The keyboard layout chosen in the installer is the console's.
+        assert!(rc.contains("keymap=\"fr.macbook\""), "{rc}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1452,6 +1463,12 @@ mod tests {
         assert!(s.contains("COSMIC"));
         assert!(s.contains("alice"));
         assert!(s.contains("passthru  1/0/0 1/0/1\n"), "{s}");
+        assert!(s.contains("keyboard  us\n"), "{s}");
+        let french = InstallPlan {
+            keymap: Some("fr.macbook".into()),
+            ..plan()
+        };
+        assert!(french.summary().contains("keyboard  fr.macbook\n"));
         let none = InstallPlan {
             pptdevs: Vec::new(),
             ..plan()

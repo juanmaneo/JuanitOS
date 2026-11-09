@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+use juanitos_core::keyboard::Xkb;
+
 use crate::sessions::Session;
 
 /// The wrapper every session goes through (`freebsd/jos-session`): last
@@ -62,8 +64,15 @@ pub struct Plan {
 
 /// The session for `account`, on virtual terminal `vt` (1-based), with
 /// the variables PAM modules exported (`NAME=value`) layered underneath
-/// ours.
-pub fn plan(account: &Account, session: &Session, vt: i32, pam_env: &[String]) -> Plan {
+/// ours, and the keyboard layout of the console (`xkb`, from the keymap
+/// the installer chose) for the compositor.
+pub fn plan(
+    account: &Account,
+    session: &Session,
+    vt: i32,
+    pam_env: &[String],
+    xkb: Option<&Xkb>,
+) -> Plan {
     let mut env: Vec<(String, String)> = Vec::new();
     let mut set = |k: &str, v: String| {
         env.retain(|(key, _)| key != k);
@@ -75,6 +84,9 @@ pub fn plan(account: &Account, session: &Session, vt: i32, pam_env: &[String]) -
                 set(k, v.to_string());
             }
         }
+    }
+    for (k, v) in xkb.map(Xkb::env).unwrap_or_default() {
+        set(&k, v);
     }
     set("HOME", account.home.clone());
     set("USER", account.name.clone());
@@ -157,6 +169,7 @@ mod tests {
                 "junk".into(),
                 "=x".into(),
             ],
+            None,
         );
         assert_eq!(p.program, SESSION_WRAPPER);
         assert_eq!(p.args, vec!["/usr/local/bin/start-cosmic"]);
@@ -179,7 +192,25 @@ mod tests {
             home: String::new(),
             ..alice()
         };
-        assert_eq!(plan(&homeless, &Session::cosmic_default(), 9, &[]).cwd, "/");
+        assert_eq!(
+            plan(&homeless, &Session::cosmic_default(), 9, &[], None).cwd,
+            "/"
+        );
+        assert!(!p.env.iter().any(|(k, _)| k.starts_with("XKB_")));
+    }
+
+    #[test]
+    fn the_console_keymap_becomes_the_sessions_xkb_layout() {
+        let fr = juanitos_core::keyboard::xkb_for("fr.macbook").unwrap();
+        let p = plan(
+            &alice(),
+            &Session::cosmic_default(),
+            9,
+            &["XKB_DEFAULT_LAYOUT=de".into()],
+            Some(&fr),
+        );
+        assert_eq!(get(&p, "XKB_DEFAULT_LAYOUT"), Some("fr"), "ours over PAM's");
+        assert_eq!(get(&p, "XKB_DEFAULT_VARIANT"), Some("mac"));
     }
 
     #[test]

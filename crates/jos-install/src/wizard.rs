@@ -13,6 +13,7 @@
 
 use jos_fb::keys::Key;
 use juanitos_core::doctor::{self, Check, Status};
+use juanitos_core::keyboard::{self, Keymap};
 use juanitos_core::pci::{PciAddr, PciDevice};
 
 use crate::disks::{Disk, FreeSpace};
@@ -23,6 +24,7 @@ use crate::partitions::{Editor, Kind, Row, KINDS};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Page {
     Welcome,
+    Keyboard,
     Hardware,
     Disk,
     /// Only shown for [`Method::Manual`].
@@ -35,8 +37,9 @@ pub enum Page {
     Finish,
 }
 
-pub const PAGES: [Page; 10] = [
+pub const PAGES: [Page; 11] = [
     Page::Welcome,
+    Page::Keyboard,
     Page::Hardware,
     Page::Disk,
     Page::Partitions,
@@ -53,6 +56,7 @@ impl Page {
     pub fn label(self) -> &'static str {
         match self {
             Page::Welcome => "Welcome",
+            Page::Keyboard => "Keyboard",
             Page::Hardware => "Hardware",
             Page::Disk => "Disk",
             Page::Partitions => "Partitions",
@@ -85,6 +89,11 @@ impl Page {
 /// Focusable things on a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Widget {
+    /// The Keyboard page's list of layouts (Up/Down pick one, a letter
+    /// jumps to the next layout starting with it).
+    Keymaps,
+    /// Its test field: anything typed shows what the layout makes of it.
+    KeyTest,
     AcceptChecks,
     Disks,
     /// The Disk page's choice between the [`Method`]s (Up/Down pick one);
@@ -109,6 +118,9 @@ pub enum Widget {
     UserName,
     UserPw,
     UserPw2,
+    /// The Users page's box: show the passwords instead of bullets, to
+    /// see what the keyboard makes of them.
+    ShowPw,
     Confirm,
     Quit,
     Back,
@@ -135,7 +147,7 @@ impl Widget {
     pub fn is_checkbox(self) -> bool {
         matches!(
             self,
-            Widget::AcceptChecks | Widget::Desktop | Widget::Confirm
+            Widget::AcceptChecks | Widget::Desktop | Widget::ShowPw | Widget::Confirm
         )
     }
 }
@@ -282,6 +294,9 @@ pub enum InstallState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
+    /// Load this console keymap, so the Keyboard page's test field (and
+    /// every field after it) is typed with the layout just picked.
+    Keymap(String),
     /// Start installing with this plan (in the background).
     Start(Box<InstallPlan>),
     Reboot,
@@ -317,6 +332,8 @@ pub enum Target {
     Widget(Widget),
     /// A text field, and the character the caret goes before.
     Caret(Widget, usize),
+    /// A row of the keyboard layout list.
+    Keymap(usize),
     /// A row of the disk list.
     Disk(usize),
     /// A row of the Disk page's choice of method.
@@ -335,6 +352,10 @@ pub struct Wizard {
     /// Index into [`Wizard::widgets`] of the current page.
     pub focus: usize,
     base: InstallPlan,
+    /// The console keymaps on offer (`keyboard::keymaps`), by description.
+    pub keymaps: Vec<Keymap>,
+    pub keymap_index: usize,
+    pub key_test: TextField,
     pub checks: Vec<Check>,
     pub disks: Vec<Disk>,
     pub disk_index: usize,
@@ -362,6 +383,7 @@ pub struct Wizard {
     pub user_name: TextField,
     pub user_pw: TextField,
     pub user_pw2: TextField,
+    pub show_passwords: bool,
     pub accept_checks: bool,
     /// The Summary page's box: the disk may be written as planned.
     pub confirm: bool,
@@ -374,18 +396,24 @@ pub struct Wizard {
 
 impl Wizard {
     /// `base` provides the defaults (pool, hostname, swap, dist directory,
-    /// a preselected disk...) that the pages then edit.
+    /// a preselected disk, keymap...) that the pages then edit.
     pub fn new(
         base: InstallPlan,
         checks: Vec<Check>,
         disks: Vec<Disk>,
         devices: Vec<PciDevice>,
+        keymaps: Vec<Keymap>,
     ) -> Self {
         let disk_index = disks.iter().position(|d| d.name == base.disk).unwrap_or(0);
+        let keymap = base.keymap.as_deref().unwrap_or(keyboard::DEFAULT_KEYMAP);
+        let keymap_index = keymaps.iter().position(|k| k.name == keymap).unwrap_or(0);
         let mut w = Wizard {
             reserved: base.pptdevs.clone(),
             devices,
             device_index: 0,
+            keymaps,
+            keymap_index,
+            key_test: TextField::default(),
             page: Page::Welcome,
             focus: 0,
             method: Method::Erase,
@@ -405,6 +433,7 @@ impl Wizard {
             checks,
             disks,
             disk_index,
+            show_passwords: false,
             accept_checks: false,
             confirm: false,
             error: None,
@@ -425,6 +454,7 @@ impl Wizard {
         use Widget::*;
         match self.page {
             Page::Welcome => vec![Quit, Next],
+            Page::Keyboard => vec![Keymaps, KeyTest, Back, Next],
             Page::Hardware if self.checks_passed() => vec![Back, Next],
             Page::Hardware => vec![AcceptChecks, Back, Next],
             Page::Disk if self.disks.is_empty() => vec![Back],
@@ -440,7 +470,9 @@ impl Wizard {
             Page::System => vec![Hostname, Swap, Desktop, Back, Next],
             Page::Passthrough if self.devices.is_empty() => vec![Back, Next],
             Page::Passthrough => vec![Devices, Back, Next],
-            Page::Users => vec![RootPw, RootPw2, UserName, UserPw, UserPw2, Back, Next],
+            Page::Users => vec![
+                RootPw, RootPw2, UserName, UserPw, UserPw2, ShowPw, Back, Next,
+            ],
             Page::Summary => vec![Confirm, Back, Next],
             Page::Install => vec![],
             Page::Finish if self.install == InstallState::Succeeded => vec![Console, Reboot],
@@ -475,6 +507,7 @@ impl Wizard {
 
     pub fn field(&self, w: Widget) -> Option<&TextField> {
         Some(match w {
+            Widget::KeyTest => &self.key_test,
             Widget::Hostname => &self.hostname,
             Widget::Swap => &self.swap,
             Widget::NewSize => &self.new_size,
@@ -489,6 +522,7 @@ impl Wizard {
 
     fn field_mut(&mut self, w: Widget) -> Option<&mut TextField> {
         Some(match w {
+            Widget::KeyTest => &mut self.key_test,
             Widget::Hostname => &mut self.hostname,
             Widget::Swap => &mut self.swap,
             Widget::NewSize => &mut self.new_size,
@@ -505,6 +539,7 @@ impl Wizard {
         match w {
             Widget::AcceptChecks => self.accept_checks,
             Widget::Desktop => self.desktop,
+            Widget::ShowPw => self.show_passwords,
             Widget::Confirm => self.confirm,
             _ => false,
         }
@@ -520,6 +555,41 @@ impl Wizard {
                 c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
             }
             _ => !c.is_control(),
+        }
+    }
+
+    pub fn selected_keymap(&self) -> Option<&Keymap> {
+        self.keymaps.get(self.keymap_index)
+    }
+
+    /// Select a keyboard layout; a change is loaded at once
+    /// ([`Action::Keymap`]) so the test field tells the truth.
+    fn select_keymap(&mut self, index: usize) -> Action {
+        match self.keymaps.get(index) {
+            Some(k) if index != self.keymap_index => {
+                self.keymap_index = index;
+                Action::Keymap(k.name.clone())
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// A letter typed on the list: on to the next layout (after the
+    /// selected one, round the end) whose description starts with it.
+    fn jump_keymap(&mut self, c: char) -> Action {
+        let n = self.keymaps.len();
+        let starts = |k: &Keymap| {
+            k.description
+                .chars()
+                .next()
+                .is_some_and(|d| d.to_lowercase().eq(c.to_lowercase()))
+        };
+        let found = (1..=n)
+            .map(|step| (self.keymap_index + step) % n.max(1))
+            .find(|&i| self.keymaps.get(i).is_some_and(starts));
+        match found {
+            Some(i) => self.select_keymap(i),
+            None => Action::None,
         }
     }
 
@@ -691,6 +761,7 @@ impl Wizard {
                 .selected_disk()
                 .map(|d| d.name.clone())
                 .unwrap_or_default(),
+            keymap: self.selected_keymap().map(|k| k.name.clone()),
             alongside: match self.method {
                 Method::Alongside => self.alongside_space().ok(),
                 _ => None,
@@ -836,18 +907,20 @@ impl Wizard {
             Widget::Reboot => Action::Reboot,
             Widget::AcceptChecks => toggled(&mut self.accept_checks),
             Widget::Desktop => toggled(&mut self.desktop),
+            Widget::ShowPw => toggled(&mut self.show_passwords),
             Widget::Confirm => toggled(&mut self.confirm),
             Widget::PartAction => {
                 self.part_action();
                 Action::None
             }
             // Enter in a field or a list: on to the next widget, or the
-            // next page from the last input.
+            // next page from the last input (a checkbox after it keeps
+            // its default: Enter must not tick what was not read).
             _ => {
                 let next_is_button = self
                     .widgets()
                     .get(self.focus + 1)
-                    .is_none_or(|n| n.is_button());
+                    .is_none_or(|n| n.is_button() || n.is_checkbox());
                 if next_is_button {
                     self.next()
                 } else {
@@ -873,6 +946,15 @@ impl Wizard {
             Key::BackTab => self.move_focus(false),
             Key::Esc => self.back(),
             Key::Enter => return self.activate(w),
+            Key::Up | Key::Down if w == Widget::Keymaps => {
+                let i = list_step(self.keymap_index, self.keymaps.len(), key == Key::Up);
+                return self.select_keymap(i);
+            }
+            Key::PageUp | Key::PageDown if w == Widget::Keymaps => {
+                let i = page_step(self.keymap_index, self.keymaps.len(), key == Key::PageUp);
+                return self.select_keymap(i);
+            }
+            Key::Char(c) if w == Widget::Keymaps => return self.jump_keymap(c),
             Key::Up | Key::Down if w == Widget::Disks => {
                 self.select_disk(list_step(self.disk_index, self.disks.len(), key == Key::Up));
             }
@@ -929,6 +1011,7 @@ impl Wizard {
     pub fn click(&mut self, target: Target) -> Action {
         let widget = match target {
             Target::Widget(w) | Target::Caret(w, _) => w,
+            Target::Keymap(_) => Widget::Keymaps,
             Target::Disk(_) => Widget::Disks,
             Target::Method(_) => Widget::Method,
             Target::Device(_) => Widget::Devices,
@@ -947,6 +1030,7 @@ impl Wizard {
                     f.cursor = at.min(f.len());
                 }
             }
+            Target::Keymap(i) => return self.select_keymap(i),
             Target::Disk(i) => self.select_disk(i),
             Target::Method(m) => {
                 if self.method_possible(m).is_ok() {
@@ -1037,10 +1121,15 @@ impl Wizard {
             ),
             (None, None) => format!("GPT: {} MiB EFI, {swap} ZFS pool \"{}\"", p.esp_mb, p.pool),
         };
+        let keyboard = self
+            .selected_keymap()
+            .map(|k| format!("{} ({})", k.description, k.name))
+            .unwrap_or_else(|| keyboard::DEFAULT_KEYMAP.to_string());
         vec![
             ("Disk", disk),
             ("Layout", layout),
             ("Hostname", p.hostname.clone()),
+            ("Keyboard", keyboard),
             (
                 "Desktop",
                 if p.gui { "COSMIC" } else { "console only" }.into(),
@@ -1096,6 +1185,19 @@ fn list_step(index: usize, len: usize, up: bool) -> usize {
         index.saturating_sub(1)
     } else {
         (index + 1).min(len.saturating_sub(1))
+    }
+}
+
+/// Rows the keyboard layout list shows at once, which Page Up/Down
+/// move by (`ui::KEYMAP_ROWS`).
+pub const KEYMAP_PAGE: usize = 9;
+
+/// Move a list selection one page up or down, staying within `len` rows.
+fn page_step(index: usize, len: usize, up: bool) -> usize {
+    if up {
+        index.saturating_sub(KEYMAP_PAGE)
+    } else {
+        (index + KEYMAP_PAGE).min(len.saturating_sub(1))
     }
 }
 
@@ -1217,8 +1319,26 @@ mod tests {
         ]
     }
 
+    /// A few of the keymaps `INDEX.keymaps` lists, by description.
+    fn keymaps() -> Vec<Keymap> {
+        vec![
+            Keymap::new("be", "Belgian"),
+            Keymap::new("fr", "French"),
+            Keymap::new("fr.macbook", "French Macbook/Macbook Pro (accent keys)"),
+            Keymap::new("uk", "United Kingdom"),
+            Keymap::new("us", "United States of America"),
+            Keymap::new("us.dvorak", "United States of America Dvorak"),
+        ]
+    }
+
     fn wizard() -> Wizard {
-        Wizard::new(InstallPlan::default(), ok_checks(), disks(), devices())
+        Wizard::new(
+            InstallPlan::default(),
+            ok_checks(),
+            disks(),
+            devices(),
+            keymaps(),
+        )
     }
 
     fn typ(w: &mut Wizard, s: &str) {
@@ -1227,9 +1347,19 @@ mod tests {
         }
     }
 
+    /// Welcome -> Keyboard -> Hardware, keeping the keymap.
+    fn past_keyboard(w: &mut Wizard) {
+        w.handle(Key::Enter); // Welcome -> Keyboard
+        assert_eq!(w.focused(), Some(Widget::Keymaps));
+        w.handle(Key::Enter); // the list -> the test field
+        assert_eq!(w.focused(), Some(Widget::KeyTest));
+        w.handle(Key::Enter); // Keyboard -> Hardware
+        assert_eq!(w.page, Page::Hardware);
+    }
+
     /// Fill every page up to the Summary.
     fn to_summary(w: &mut Wizard) {
-        w.handle(Key::Enter); // Welcome -> Hardware
+        past_keyboard(w);
         w.handle(Key::Enter); // Hardware -> Disk
         w.handle(Key::Down); // nda0
         w.handle(Key::Enter); // to the choice: erase, preselected
@@ -1258,7 +1388,8 @@ mod tests {
 
     #[test]
     fn pages_and_labels() {
-        assert_eq!(Page::Welcome.next(), Page::Hardware);
+        assert_eq!(Page::Welcome.next(), Page::Keyboard);
+        assert_eq!(Page::Keyboard.next(), Page::Hardware);
         assert_eq!(Page::Finish.next(), Page::Finish);
         assert_eq!(Page::Welcome.prev(), Page::Welcome);
         assert_eq!(Page::Users.prev(), Page::Passthrough);
@@ -1281,6 +1412,93 @@ mod tests {
         // Esc on the first page does nothing.
         w.handle(Key::Esc);
         assert_eq!(w.page, Page::Welcome);
+    }
+
+    #[test]
+    fn the_keyboard_page_picks_loads_and_tries_a_layout() {
+        let mut w = wizard();
+        w.handle(Key::Enter);
+        assert_eq!(w.page, Page::Keyboard);
+        assert_eq!(
+            w.widgets(),
+            [Widget::Keymaps, Widget::KeyTest, Widget::Back, Widget::Next]
+        );
+        // The kernel's default is preselected and needs no loading.
+        assert_eq!(w.selected_keymap().map(|k| k.name.as_str()), Some("us"));
+        assert_eq!(w.plan().keymap.as_deref(), Some("us"));
+        // Up/Down pick a row, clamped at both ends; each change is loaded.
+        assert_eq!(w.handle(Key::Up), Action::Keymap("uk".into()));
+        assert_eq!(w.handle(Key::Down), Action::Keymap("us".into()));
+        assert_eq!(w.handle(Key::Down), Action::Keymap("us.dvorak".into()));
+        assert_eq!(w.handle(Key::Down), Action::None, "clamped");
+        assert_eq!(w.handle(Key::PageUp), Action::Keymap("be".into()));
+        assert_eq!(w.handle(Key::PageUp), Action::None);
+        assert_eq!(w.handle(Key::PageDown), Action::Keymap("us.dvorak".into()));
+        // A letter jumps to the next description starting with it, round
+        // the end; one that matches nothing stays put.
+        assert_eq!(w.handle(Key::Char('F')), Action::Keymap("fr".into()));
+        assert_eq!(
+            w.handle(Key::Char('f')),
+            Action::Keymap("fr.macbook".into())
+        );
+        assert_eq!(w.handle(Key::Char('f')), Action::Keymap("fr".into()));
+        assert_eq!(w.handle(Key::Char('z')), Action::None);
+        assert_eq!(w.handle(Key::Char(' ')), Action::None);
+        // Clicks pick a row too; the same row again loads nothing.
+        assert_eq!(
+            w.click(Target::Keymap(2)),
+            Action::Keymap("fr.macbook".into())
+        );
+        assert_eq!(w.click(Target::Keymap(2)), Action::None);
+        assert_eq!(w.click(Target::Keymap(99)), Action::None);
+        assert_eq!(w.focused(), Some(Widget::Keymaps));
+        // The test field takes anything printable.
+        w.handle(Key::Tab);
+        assert_eq!(w.focused(), Some(Widget::KeyTest));
+        typ(&mut w, "azerty +@é");
+        w.handle(Key::Char('\u{7}'));
+        assert_eq!(w.key_test.value, "azerty +@é");
+        assert_eq!(w.field(Widget::KeyTest).map(|f| f.len()), Some(10));
+        // Enter in the test field moves on; the plan and the Summary
+        // carry the choice.
+        w.handle(Key::Enter);
+        assert_eq!(w.page, Page::Hardware);
+        assert_eq!(w.plan().keymap.as_deref(), Some("fr.macbook"));
+        let rows = w.summary_rows();
+        let keyboard = rows.iter().find(|(k, _)| *k == "Keyboard").unwrap();
+        assert_eq!(
+            keyboard.1,
+            "French Macbook/Macbook Pro (accent keys) (fr.macbook)"
+        );
+        // Esc comes back to the page with the choice kept.
+        w.handle(Key::Esc);
+        assert_eq!(w.page, Page::Keyboard);
+        assert_eq!(w.keymap_index, 2);
+
+        // The keymap given on the command line is preselected; one the
+        // index does not know, or no list at all, falls back to the first.
+        let base = InstallPlan {
+            keymap: Some("uk".into()),
+            ..Default::default()
+        };
+        let w = Wizard::new(base.clone(), ok_checks(), disks(), vec![], keymaps());
+        assert_eq!(w.selected_keymap().map(|k| k.name.as_str()), Some("uk"));
+        let unknown = InstallPlan {
+            keymap: Some("xx".into()),
+            ..base
+        };
+        let w = Wizard::new(unknown, ok_checks(), disks(), vec![], keymaps());
+        assert_eq!(w.keymap_index, 0);
+        let mut none = Wizard::new(InstallPlan::default(), ok_checks(), disks(), vec![], vec![]);
+        assert_eq!(none.plan().keymap, None);
+        assert!(none
+            .summary_rows()
+            .iter()
+            .any(|(k, v)| *k == "Keyboard" && v == "us"));
+        none.goto(Page::Keyboard);
+        assert_eq!(none.handle(Key::Down), Action::None);
+        assert_eq!(none.handle(Key::Char('a')), Action::None);
+        assert_eq!(none.click(Target::Keymap(0)), Action::None);
     }
 
     #[test]
@@ -1344,7 +1562,7 @@ mod tests {
     #[test]
     fn keys_that_do_little() {
         let mut w = wizard();
-        w.handle(Key::Enter);
+        past_keyboard(&mut w);
         w.handle(Key::Enter);
         w.handle(Key::Enter);
         w.handle(Key::Enter); // Disk -> System, on the hostname
@@ -1402,10 +1620,15 @@ mod tests {
 
     #[test]
     fn failed_checks_must_be_accepted() {
-        let mut w = Wizard::new(InstallPlan::default(), failed_checks(), disks(), vec![]);
+        let mut w = Wizard::new(
+            InstallPlan::default(),
+            failed_checks(),
+            disks(),
+            vec![],
+            keymaps(),
+        );
         assert_eq!(w.check_counts(), (1, 1));
-        w.handle(Key::Enter);
-        assert_eq!(w.page, Page::Hardware);
+        past_keyboard(&mut w);
         assert_eq!(w.focused(), Some(Widget::AcceptChecks));
         w.handle(Key::Tab);
         w.handle(Key::Tab);
@@ -1428,8 +1651,14 @@ mod tests {
 
     #[test]
     fn no_disks_blocks_the_disk_page() {
-        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), vec![], vec![]);
-        w.handle(Key::Enter);
+        let mut w = Wizard::new(
+            InstallPlan::default(),
+            ok_checks(),
+            vec![],
+            vec![],
+            keymaps(),
+        );
+        past_keyboard(&mut w);
         w.handle(Key::Enter);
         assert_eq!(w.page, Page::Disk);
         assert_eq!(w.widgets(), vec![Widget::Back]);
@@ -1446,7 +1675,13 @@ mod tests {
         const MIB: u64 = 1 << 20;
         let kept = |kind: &str, mib: u64| (Stretch::Kept(kind.into()), mib * MIB);
         let new = |what: &str, mib: u64| (Stretch::New(what.into()), mib * MIB);
-        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
+        let mut w = Wizard::new(
+            InstallPlan::default(),
+            ok_checks(),
+            mixed_disks(),
+            vec![],
+            keymaps(),
+        );
         w.goto(Page::Disk);
         // Erasing the 500 GiB disk: EFI, swap, the rest is the pool.
         assert_eq!(
@@ -1490,9 +1725,9 @@ mod tests {
             disk: "nda0".into(),
             ..Default::default()
         };
-        let mut w = Wizard::new(base, ok_checks(), disks(), vec![]);
+        let mut w = Wizard::new(base, ok_checks(), disks(), vec![], keymaps());
         assert_eq!(w.disk_index, 1);
-        w.handle(Key::Enter);
+        past_keyboard(&mut w);
         w.handle(Key::Enter);
         assert_eq!(w.focused(), Some(Widget::Disks));
         w.handle(Key::Down);
@@ -1517,7 +1752,13 @@ mod tests {
 
     #[test]
     fn the_method_follows_the_disk() {
-        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
+        let mut w = Wizard::new(
+            InstallPlan::default(),
+            ok_checks(),
+            mixed_disks(),
+            vec![],
+            keymaps(),
+        );
         w.goto(Page::Disk);
         // A blank disk is erased, or partitioned by hand.
         let choice = [Widget::Disks, Widget::Method, Widget::Back, Widget::Next];
@@ -1584,7 +1825,13 @@ mod tests {
     #[test]
     fn a_blank_disk_partitioned_by_hand() {
         const MIB: u64 = 1 << 20;
-        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
+        let mut w = Wizard::new(
+            InstallPlan::default(),
+            ok_checks(),
+            mixed_disks(),
+            vec![],
+            keymaps(),
+        );
         assert!(!w.shows(Page::Partitions));
         to_partitions(&mut w);
         assert!(w.shows(Page::Partitions));
@@ -1689,7 +1936,13 @@ mod tests {
     #[test]
     fn partitions_deleted_and_errors_shown() {
         const MIB: u64 = 1 << 20;
-        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), mixed_disks(), vec![]);
+        let mut w = Wizard::new(
+            InstallPlan::default(),
+            ok_checks(),
+            mixed_disks(),
+            vec![],
+            keymaps(),
+        );
         w.goto(Page::Disk);
         w.click(Target::Disk(1));
         to_partitions(&mut w);
@@ -1766,7 +2019,13 @@ mod tests {
             name: "md0".into(),
             ..Default::default()
         };
-        let mut w = Wizard::new(InstallPlan::default(), ok_checks(), vec![tiny], vec![]);
+        let mut w = Wizard::new(
+            InstallPlan::default(),
+            ok_checks(),
+            vec![tiny],
+            vec![],
+            keymaps(),
+        );
         to_partitions(&mut w);
         assert_eq!(w.selected_row(), None);
         w.handle(Key::Down);
@@ -1783,7 +2042,7 @@ mod tests {
             disk: "nda0".into(),
             ..Default::default()
         };
-        let mut w = Wizard::new(base, ok_checks(), mixed_disks(), vec![]);
+        let mut w = Wizard::new(base, ok_checks(), mixed_disks(), vec![], keymaps());
         assert_eq!(w.method(), Method::Alongside, "preselected disk");
         w.goto(Page::Summary);
         assert!(w.page_error().unwrap().contains("free space"));
@@ -1809,7 +2068,7 @@ mod tests {
             pptdevs: vec![PciAddr::new(1, 0, 0), PciAddr::new(7, 0, 0)],
             ..Default::default()
         };
-        let mut w = Wizard::new(base, ok_checks(), disks(), devices());
+        let mut w = Wizard::new(base, ok_checks(), disks(), devices(), keymaps());
         w.goto(Page::Passthrough);
         assert_eq!(w.widgets(), [Widget::Devices, Widget::Back, Widget::Next]);
         assert_eq!(w.focused(), Some(Widget::Devices));
@@ -1848,7 +2107,13 @@ mod tests {
         assert_eq!(w.page, Page::Users);
 
         // Without candidates the page only has its buttons.
-        let mut empty = Wizard::new(InstallPlan::default(), ok_checks(), disks(), vec![]);
+        let mut empty = Wizard::new(
+            InstallPlan::default(),
+            ok_checks(),
+            disks(),
+            vec![],
+            keymaps(),
+        );
         empty.goto(Page::Passthrough);
         assert_eq!(empty.widgets(), [Widget::Back, Widget::Next]);
         assert!(!empty.reserves_every_gpu());
@@ -1862,6 +2127,8 @@ mod tests {
         let mut w = wizard();
         // Buttons are pressed.
         assert_eq!(w.click(Target::Widget(Widget::Next)), Action::None);
+        assert_eq!(w.page, Page::Keyboard);
+        w.click(Target::Widget(Widget::Next));
         assert_eq!(w.page, Page::Hardware);
         w.click(Target::Widget(Widget::Next));
         assert_eq!(w.page, Page::Disk);
@@ -1891,6 +2158,16 @@ mod tests {
         // A caret on something that is not a field only focuses it.
         w.click(Target::Caret(Widget::Back, 1));
         assert_eq!(w.focused(), Some(Widget::Back));
+        // The passwords can be shown; Enter in the last password field
+        // moves on without ticking that box.
+        assert!(!w.checkbox(Widget::ShowPw));
+        w.click(Target::Widget(Widget::ShowPw));
+        assert!(w.show_passwords && w.checkbox(Widget::ShowPw));
+        w.click(Target::Caret(Widget::UserPw2, 0));
+        w.handle(Key::Enter);
+        assert_eq!(w.page, Page::Users, "refused: passwords missing");
+        assert!(w.error.is_some());
+        assert!(w.show_passwords);
 
         // A device row is selected and ticked.
         w.goto(Page::Passthrough);
@@ -2038,7 +2315,7 @@ mod tests {
             gui: false,
             ..Default::default()
         };
-        let w = Wizard::new(base, ok_checks(), disks(), vec![]);
+        let w = Wizard::new(base, ok_checks(), disks(), vec![], keymaps());
         assert_eq!(w.hostname.value, "box");
         assert_eq!(w.swap.value, "8");
         assert_eq!(w.root_pw2.value, "r");
@@ -2082,7 +2359,7 @@ mod tests {
         assert!(!Widget::Disks.is_button());
         assert!(Widget::RootPw.is_password());
         assert!(!Widget::UserName.is_password());
-        assert!(Widget::Confirm.is_checkbox());
+        assert!(Widget::Confirm.is_checkbox() && Widget::ShowPw.is_checkbox());
         assert!(!Widget::Method.is_checkbox() && !Widget::Method.is_button());
         let w = wizard();
         assert!(w.field(Widget::Next).is_none());
@@ -2096,7 +2373,7 @@ mod tests {
             pool: "Bad Pool".into(),
             ..Default::default()
         };
-        let mut w = Wizard::new(base, ok_checks(), disks(), vec![]);
+        let mut w = Wizard::new(base, ok_checks(), disks(), vec![], keymaps());
         to_summary(&mut w);
         w.confirm = true;
         w.focus = 2;

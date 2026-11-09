@@ -15,6 +15,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 
+use juanitos_core::keyboard::Xkb;
 use juanitos_core::sys::Runner;
 
 use crate::greeter::Power;
@@ -400,14 +401,17 @@ fn open_log(a: &Account) -> Result<File, String> {
 pub struct FreeBsdBackend<'a> {
     pub runner: &'a dyn Runner,
     pub vt: i32,
+    /// The console keymap as XKB names, for the session's compositor.
+    pub xkb: Option<Xkb>,
     pending: Option<(Pam, Account)>,
 }
 
 impl<'a> FreeBsdBackend<'a> {
-    pub fn new(runner: &'a dyn Runner, vt: i32) -> Self {
+    pub fn new(runner: &'a dyn Runner, vt: i32, xkb: Option<Xkb>) -> Self {
         FreeBsdBackend {
             runner,
             vt,
+            xkb,
             pending: None,
         }
     }
@@ -435,7 +439,7 @@ impl Backend for FreeBsdBackend<'_> {
         prepare_runtime_dir(&account)?;
         let log = open_log(&account)?;
         let log_err = log.try_clone().map_err(|e| e.to_string())?;
-        let plan = launch::plan(&account, session, self.vt, &pam_env);
+        let plan = launch::plan(&account, session, self.vt, &pam_env, self.xkb.as_ref());
         let name = CString::new(account.name.clone()).map_err(|e| e.to_string())?;
 
         let mut cmd = Command::new(&plan.program);

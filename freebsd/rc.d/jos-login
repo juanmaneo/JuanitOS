@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 # PROVIDE: jos-login
-# REQUIRE: LOGIN seatd dbus jos-splash-finish
+# REQUIRE: LOGIN seatd dbus jos-splash-finish syscons
 # KEYWORD: shutdown
 #
 # The JuanitOS login screen: jos-greet on ttyv8 (VT 9, Alt+F9), which no
 # getty uses (its /etc/ttys line is "off"). It runs under daemon(8) so it
-# comes back if it ever dies; ttyv0 (Alt+F1) keeps its text login.
+# comes back if it ever dies; ttyv0 (Alt+F1) keeps its text login. It
+# comes after rc.d/syscons so the console keymap chosen in the installer
+# (keymap= in rc.conf) is loaded before the first password is typed.
 #
 # jos_login_enable="YES"   start the login screen
 # jos_login_bin            the greeter (/usr/local/bin/jos-greet)

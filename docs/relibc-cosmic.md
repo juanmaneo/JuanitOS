@@ -149,7 +149,13 @@ product:
   `ttyv8` (VT 9, Alt+F9), the terminal FreeBSD's stock `/etc/ttys`
   leaves `off`, so no getty competes and nothing is edited; `ttyv0`
   (Alt+F1) keeps its text login. `rc.d/jos-splash-finish` runs just
-  before it and leaves the boot picture up until the greeter switches.
+  before it and leaves the boot picture up until the greeter switches,
+  and `rc.d/syscons` before that, so the console keymap the installer
+  chose (`keymap=` in `rc.conf`) is loaded before the password is typed.
+  The same keymap, as XKB names (`juanitos_core::keyboard::xkb_for`),
+  goes to the session as `XKB_DEFAULT_LAYOUT`/`XKB_DEFAULT_VARIANT`,
+  which the compositor's libxkbcommon reads unless COSMIC's settings
+  name a layout.
 - The user field is pre-filled with the first account of uid ≥ 1000
   (Left/Right cycles), the session list comes from
   `/usr/local/share/wayland-sessions/*.desktop` (COSMIC's

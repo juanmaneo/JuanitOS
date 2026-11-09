@@ -210,6 +210,7 @@ pub fn render_page(w: &Wizard, width: u32, height: u32) -> (Image, Hits) {
     sidebar(&mut c, w);
     match w.page {
         Page::Welcome => welcome(&mut c),
+        Page::Keyboard => keyboard(&mut c, w),
         Page::Hardware => hardware(&mut c, w),
         Page::Disk => disk(&mut c, w),
         Page::Partitions => partitions(&mut c, w),
@@ -333,6 +334,89 @@ fn welcome(c: &mut Canvas) {
         let ky = y + 30 + i as i32 * 26;
         c.text(CONTENT_X + 20, ky, k, 2, THEME.text);
         c.text(CONTENT_X + 260, ky, what, 2, THEME.text_muted);
+    }
+}
+
+/// Rows of the keyboard layout list shown at once; the list scrolls past
+/// that, keeping the selection in the middle.
+const KEYMAP_ROWS: usize = crate::wizard::KEYMAP_PAGE;
+const KEYMAP_PITCH: i32 = 36;
+
+/// The first row shown of a list of `len` rows, `rows` at a time, with
+/// row `index` selected: in the middle of the window, which stops at
+/// both ends of the list.
+fn window(index: usize, len: usize, rows: usize) -> usize {
+    index.saturating_sub(rows / 2).min(len.saturating_sub(rows))
+}
+
+/// The keyboard layout, after Anaconda's: the list of layouts with the
+/// current one selected, and a field to try it in. The layout is loaded
+/// as soon as it is picked, so what the field shows is what every later
+/// field (the passwords) gets.
+fn keyboard(c: &mut Canvas, w: &Wizard) {
+    title(
+        c,
+        "Keyboard",
+        "Pick this keyboard's layout: passwords are typed with it, here and after.",
+    );
+    let focused = w.focused() == Some(Widget::Keymaps);
+    let first = window(w.keymap_index, w.keymaps.len(), KEYMAP_ROWS);
+    let mut y = BODY_Y;
+    for (i, k) in w.keymaps.iter().enumerate().skip(first).take(KEYMAP_ROWS) {
+        let selected = i == w.keymap_index;
+        c.boxed(
+            CONTENT_X,
+            y,
+            CONTENT_W,
+            30,
+            row_border(selected, focused),
+            THEME.highlight,
+        );
+        c.hit(CONTENT_X, y, CONTENT_W, 30, Hit::Target(Target::Keymap(i)));
+        let ink = if selected { THEME.accent } else { THEME.text };
+        c.text_clip(
+            CONTENT_X + 16,
+            y + 8,
+            &k.description,
+            2,
+            CONTENT_W - 270,
+            ink,
+        );
+        c.text_clip(
+            CONTENT_X + CONTENT_W - 240,
+            y + 8,
+            &k.name,
+            2,
+            224,
+            THEME.text_muted,
+        );
+        y += KEYMAP_PITCH;
+    }
+    let y = BODY_Y + KEYMAP_ROWS as i32 * KEYMAP_PITCH + 10;
+    field(
+        c,
+        w,
+        Widget::KeyTest,
+        CONTENT_X,
+        y,
+        "Try it here",
+        "try + @ # and accents",
+    );
+    for (i, line) in [
+        "The layout is loaded as you pick it. A letter typed on the list jumps",
+        "to the next layout starting with it; Page Up/Down turn the list.",
+    ]
+    .iter()
+    .enumerate()
+    {
+        c.text_clip(
+            CONTENT_X,
+            y + 92 + i as i32 * 26,
+            line,
+            2,
+            CONTENT_W,
+            THEME.text_muted,
+        );
     }
 }
 
@@ -706,7 +790,7 @@ fn field(c: &mut Canvas, w: &Wizard, widget: Widget, x: i32, y: i32, label: &str
             len: f.len(),
         },
     );
-    let (shown, before) = if widget.is_password() {
+    let (shown, before) = if widget.is_password() && !w.show_passwords {
         (
             font::mask(f.len()),
             font::mask(f.before_cursor().chars().count()),
@@ -915,6 +999,14 @@ fn users(c: &mut Canvas, w: &Wizard) {
     );
     field(c, w, Widget::UserPw, col2, BODY_Y + 260, "Password", "");
     field(c, w, Widget::UserPw2, col2, BODY_Y + 340, "Repeat", "");
+    checkbox(
+        c,
+        w,
+        Widget::ShowPw,
+        col2,
+        BODY_Y + 424,
+        "Show the passwords (to see what the keyboard makes of them)",
+    );
 }
 
 fn summary(c: &mut Canvas, w: &Wizard) {
@@ -1126,6 +1218,16 @@ fn sample_pages() -> Vec<(&'static str, Wizard)> {
     let mut w = sample_wizard();
     let mut pages = vec![("installer-1-welcome", w.clone())];
     w.handle(Key::Enter);
+    // A laptop keyboard (the third layout starting with an F), tried out.
+    for ch in "fff".chars() {
+        w.handle(Key::Char(ch));
+    }
+    w.handle(Key::Tab);
+    for ch in "Bonjour ! +@#".chars() {
+        w.handle(Key::Char(ch));
+    }
+    pages.push(("installer-1b-keyboard", w.clone()));
+    w.handle(Key::Enter);
     pages.push(("installer-2-hardware", w.clone()));
     w.handle(Key::Enter);
     w.handle(Key::Down); // the disk with a Linux on it: a choice to make
@@ -1193,6 +1295,39 @@ fn manual_sample(mut w: Wizard) -> Wizard {
         w.handle(Key::Char(ch));
     }
     w
+}
+
+/// A cut of `INDEX.keymaps`, as the Keyboard page lists it.
+fn sample_keymaps() -> Vec<juanitos_core::keyboard::Keymap> {
+    use juanitos_core::keyboard::Keymap;
+    [
+        ("be", "Belgian"),
+        ("br", "Brazilian (accent keys)"),
+        ("ca-fr", "Canadian French"),
+        ("dk", "Danish"),
+        ("nl", "Dutch (accent keys)"),
+        ("fr", "French"),
+        ("fr.dvorak", "French Dvorak"),
+        ("fr.macbook", "French Macbook/Macbook Pro (accent keys)"),
+        ("de", "German"),
+        ("de.noacc", "German (no accent keys)"),
+        ("it", "Italian"),
+        ("jp", "Japanese 106"),
+        ("no", "Norwegian"),
+        ("pt", "Portuguese"),
+        ("es", "Spanish"),
+        ("se", "Swedish"),
+        ("ch-fr", "Swiss French"),
+        ("ch", "Swiss German"),
+        ("uk", "United Kingdom"),
+        ("uk.macbook", "United Kingdom Macbook"),
+        ("us", "United States of America"),
+        ("us.dvorak", "United States of America Dvorak"),
+        ("us.macbook", "United States of America Macbook (ISO)"),
+    ]
+    .iter()
+    .map(|(name, description)| Keymap::new(name, description))
+    .collect()
 }
 
 /// A wizard filled with plausible hardware, for screenshots and tests:
@@ -1308,6 +1443,7 @@ pub fn sample_wizard() -> Wizard {
             },
         ],
         devices,
+        sample_keymaps(),
     )
 }
 
@@ -1368,6 +1504,15 @@ mod tests {
         w.handle(Key::Char('b'));
         let b = render(&w, 1280, 800);
         assert!(!differs(&a, &b));
+        // Shown, the letters tell.
+        w.click(Target::Widget(Widget::ShowPw));
+        assert!(w.show_passwords);
+        let shown_b = render(&w, 1280, 800);
+        assert!(differs(&b, &shown_b));
+        w.click(Target::Caret(Widget::RootPw, 1));
+        w.handle(Key::Backspace);
+        w.handle(Key::Char('a'));
+        assert!(differs(&shown_b, &render(&w, 1280, 800)));
     }
 
     #[test]
@@ -1382,7 +1527,7 @@ mod tests {
         w.finished(Ok(()));
         assert!(differs(&failed, &render(&w, 1280, 800)));
         // Disk page without disks, hardware page with failures.
-        let mut empty = Wizard::new(Default::default(), vec![], vec![], vec![]);
+        let mut empty = Wizard::new(Default::default(), vec![], vec![], vec![], vec![]);
         empty.page = Page::Disk;
         let _ = render(&empty, 1280, 800);
         empty.page = Page::Passthrough;
@@ -1506,6 +1651,50 @@ mod tests {
         assert_eq!(wrap("", 10), Vec::<String>::new());
         assert_eq!(wrap("a bb ccc dddd", 6), vec!["a bb", "ccc", "dddd"]);
         assert_eq!(wrap("toolongword x", 4), vec!["toolongword", "x"]);
+    }
+
+    #[test]
+    fn the_keyboard_page_lists_layouts_around_the_selection() {
+        let mut w = sample_wizard();
+        w.handle(Key::Enter);
+        assert_eq!(w.page, Page::Keyboard);
+        // The default layout is near the end of the list: the window
+        // stops at the end, and clicks land on the rows shown.
+        let us = w.keymap_index;
+        assert_eq!(w.keymaps[us].name, "us");
+        let first = window(us, w.keymaps.len(), KEYMAP_ROWS);
+        assert_eq!(first, w.keymaps.len() - KEYMAP_ROWS);
+        let (frame, hits) = render_page(&w, 1280, 800);
+        assert_eq!(hits.target(500, BODY_Y + 15), Some(Target::Keymap(first)));
+        assert_eq!(
+            hits.target(500, BODY_Y + 15 + KEYMAP_PITCH),
+            Some(Target::Keymap(first + 1))
+        );
+        // The selection moves to the middle once it can.
+        w.handle(Key::PageUp);
+        assert_eq!(w.keymap_index, us - KEYMAP_ROWS);
+        let (moved, hits) = render_page(&w, 1280, 800);
+        assert!(differs(&frame, &moved));
+        let mid = w.keymap_index - KEYMAP_ROWS / 2;
+        assert_eq!(hits.target(500, BODY_Y + 15), Some(Target::Keymap(mid)));
+        // The test field is under the list; typing in it shows.
+        let field_y = BODY_Y + KEYMAP_ROWS as i32 * KEYMAP_PITCH + 10 + 40;
+        assert_eq!(
+            hits.target(CONTENT_X + 4, field_y),
+            Some(Target::Caret(Widget::KeyTest, 0))
+        );
+        w.click(Target::Caret(Widget::KeyTest, 0));
+        w.handle(Key::Char('é'));
+        assert!(differs(&moved, &render(&w, 1280, 800)));
+        // Losing focus changes the list's border.
+        w.focus = 0;
+        let focused = render(&w, 1280, 800);
+        w.handle(Key::Tab);
+        assert!(differs(&focused, &render(&w, 1280, 800)));
+        assert_eq!(window(2, 100, 9), 0);
+        assert_eq!(window(50, 100, 9), 46);
+        assert_eq!(window(99, 100, 9), 91);
+        assert_eq!(window(3, 5, 9), 0);
     }
 
     #[test]

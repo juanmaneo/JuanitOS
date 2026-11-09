@@ -18,6 +18,7 @@ use std::time::Duration;
 use jos_fb::keys::Decoder;
 use jos_fb::mouse::Pointer;
 use jos_fb::Display;
+use juanitos_core::keyboard;
 use juanitos_core::sys::Runner;
 
 use crate::install::{Installer, Progress};
@@ -112,6 +113,15 @@ pub fn run<D: Display>(
             for action in actions {
                 match action {
                     Action::None => {}
+                    // The keyboard is shared by every terminal, so loading
+                    // the keymap on the console changes what this one reads.
+                    // A failure leaves the keymap as it was; the test field
+                    // shows that too.
+                    Action::Keymap(name) => {
+                        if let Err(e) = keyboard::load(runner, &name) {
+                            eprintln!("jos-install: cannot load keymap {name}: {e}");
+                        }
+                    }
                     Action::Exit => return Ok(Outcome::Exit),
                     Action::Reboot => return Ok(Outcome::Reboot),
                     Action::Start(plan) => {
@@ -265,8 +275,9 @@ mod tests {
         assert_eq!(d.inner.presented, 5);
     }
 
-    // Welcome -> ... -> Summary, ticking the confirmation, then Install.
-    const TO_INSTALL: &[u8] = b"\r\r\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\r \t\t\r";
+    // Welcome -> Keyboard (the list, the test field) -> ... -> Summary,
+    // ticking the confirmation, then Install.
+    const TO_INSTALL: &[u8] = b"\r\r\r\r\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\t\r \t\t\r";
 
     #[test]
     fn full_install_then_reboot() {
@@ -282,6 +293,7 @@ mod tests {
             w.checks.clone(),
             w.disks.clone(),
             w.devices.clone(),
+            w.keymaps.clone(),
         );
         let out = run(&mut d, &mut w, &m, true, "report", opts()).unwrap();
         assert_eq!(out, Outcome::Reboot);
@@ -299,7 +311,7 @@ mod tests {
         // Down picks the disk with a Linux on it, where keeping it is
         // preselected; Enter goes to the choice, Enter again moves on.
         let mut d = script(&[
-            b"\r\r\x1b[B\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\r \t\t\r",
+            b"\r\r\r\r\x1b[B\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\t\r \t\t\r",
             b"\r",
         ]);
         let mut w = sample_wizard();
@@ -313,6 +325,7 @@ mod tests {
             w.checks.clone(),
             w.disks.clone(),
             w.devices.clone(),
+            w.keymaps.clone(),
         );
         let out = run(&mut d, &mut w, &m, true, "report", opts()).unwrap();
         assert_eq!(out, Outcome::Reboot);
@@ -334,15 +347,15 @@ mod tests {
     #[test]
     fn manual_install_through_the_gui() {
         let mut d = script(&[
-            // The Linux disk, partitioned by hand.
-            b"\r\r\x1b[B\r\x1b[B\x1b[B\r",
+            // Past the keyboard, then the Linux disk, partitioned by hand.
+            b"\r\r\r\r\x1b[B\r\x1b[B\x1b[B\r",
             // Delete the Linux root, add swap in its place (the type
             // suggested is swap), then the pool in the rest.
             b"\x1b[B\r\r",
             b"\r",
             b"\x1b[Z\x1b[B\r\r\r\r",
             // On through System (no swap field) and the other pages.
-            b"\t\t\r\t\t\t\r\rsecret\rsecret\r\t\t\t\t\r \t\t\r",
+            b"\t\t\r\t\t\t\r\rsecret\rsecret\r\t\t\t\t\t\r \t\t\r",
             b"\r",
         ]);
         let mut w = sample_wizard();
@@ -356,6 +369,7 @@ mod tests {
             w.checks.clone(),
             w.disks.clone(),
             w.devices.clone(),
+            w.keymaps.clone(),
         );
         let out = run(&mut d, &mut w, &m, true, "report", opts()).unwrap();
         assert_eq!(out, Outcome::Reboot);
@@ -371,6 +385,50 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keymaps_are_loaded_as_they_are_picked() {
+        // Welcome -> Keyboard; Up picks the layout before the default, a
+        // letter jumps to a French one; nothing is installed.
+        let mut d = script(&[b"\r\x1b[A", b"f"]);
+        let mut w = sample_wizard();
+        let m = MockRunner::new();
+        let err = run(
+            &mut d,
+            &mut w,
+            &m,
+            true,
+            "",
+            LoopOptions {
+                tick: Duration::from_millis(1),
+                max_ticks: Some(800),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("800 ticks"));
+        assert_eq!(w.page, Page::Keyboard);
+        assert_eq!(w.plan().keymap.as_deref(), Some("fr"));
+        assert_eq!(m.calls(), ["kbdcontrol -l uk.macbook", "kbdcontrol -l fr"]);
+        // Without kbdcontrol the choice stands; only the console says so.
+        let mut d = script(&[b"\r\x1b[B"]);
+        let mut w = sample_wizard();
+        let m = MockRunner::new().missing("kbdcontrol");
+        let err = run(
+            &mut d,
+            &mut w,
+            &m,
+            true,
+            "",
+            LoopOptions {
+                tick: Duration::from_millis(1),
+                max_ticks: Some(600),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("600 ticks"));
+        assert_eq!(w.plan().keymap.as_deref(), Some("us.dvorak"));
+        assert_eq!(m.calls(), ["kbdcontrol -l us.dvorak"]);
     }
 
     #[test]

@@ -200,12 +200,14 @@ frame. The text front end asks for the console back instead
 
 The flow borrows from the two installers QubesOS users know:
 
-- **Calamares**: a sidebar of steps walked in order (Welcome, Hardware,
-  Disk, Partitions, System, Passthrough, Users, Summary, Install, Finish), with
+- **Calamares**: a sidebar of steps walked in order (Welcome, Keyboard,
+  Hardware, Disk, Partitions, System, Passthrough, Users, Summary,
+  Install, Finish), with
   Back/Next at the bottom and Next disabled until the page is valid; the
   Disk page's "install alongside / erase disk" choice under a bar that
   shows the disk to scale as the install leaves it;
-- **Anaconda**: manual partitioning as a list of the disk's partitions
+- **Anaconda**: the keyboard layout chosen first, with a field to try it
+  in; manual partitioning as a list of the disk's partitions
   and free areas, where partitions are deleted (and kept again) and new
   ones added with a type and a size; nothing is written to disk before
   the Summary page, where
@@ -215,11 +217,40 @@ The flow borrows from the two installers QubesOS users know:
 
 | | |
 |---|---|
-| ![welcome](images/installer-1-welcome.png) | ![hardware](images/installer-2-hardware.png) |
-| ![disk](images/installer-3-disk.png) | ![partitions](images/installer-3b-partitions.png) |
-| ![system](images/installer-4-system.png) | ![passthrough](images/installer-5-passthrough.png) |
-| ![users](images/installer-6-users.png) | ![summary](images/installer-7-summary.png) |
-| ![install](images/installer-8-install.png) | ![finish](images/installer-9-finish.png) |
+| ![welcome](images/installer-1-welcome.png) | ![keyboard](images/installer-1b-keyboard.png) |
+| ![hardware](images/installer-2-hardware.png) | ![disk](images/installer-3-disk.png) |
+| ![partitions](images/installer-3b-partitions.png) | ![system](images/installer-4-system.png) |
+| ![passthrough](images/installer-5-passthrough.png) | ![users](images/installer-6-users.png) |
+| ![summary](images/installer-7-summary.png) | ![install](images/installer-8-install.png) |
+| ![finish](images/installer-9-finish.png) | |
+
+### Keyboard layout
+
+The kernel boots with its built-in `us` keymap, so on any other keyboard
+the keys do not say what they type: a password with `+`, `@` or an
+accented letter in it, typed into masked fields, is then not the
+password the user thinks they set, and the login refuses it. The
+**Keyboard** page comes right after Welcome for that reason. It lists
+the console keymaps of `/usr/share/vt/keymaps` (from kbdmap(1)'s
+`INDEX.keymaps`, English descriptions, sorted) with `us` preselected;
+`Up`/`Down` and `Page Up`/`Page Down` move through the list, a letter
+jumps to the next layout starting with it, and every change is loaded
+at once (`kbdcontrol -l`, on `/dev/ttyv0`: the keymap belongs to the
+keyboard, which every terminal shares). The field under the list shows
+what the layout makes of the keys, and the **Users** page has a "Show
+the passwords" box for the same purpose.
+
+The choice goes into the installed system's `rc.conf` as
+`keymap="fr.macbook"`, which `rc.d/syscons` loads at boot before the
+login screen starts (`rc.d/jos-login` requires `syscons`), so the login
+screen on `ttyv8` reads the password with the same layout the installer
+did. The login screen also tells the desktop session: it turns the
+keymap into XKB names (`fr` with the `mac` variant, `gb` for `uk`,
+`nodeadkeys` for `noacc`, ...) and exports `XKB_DEFAULT_LAYOUT` and
+`XKB_DEFAULT_VARIANT`, which libxkbcommon reads when the compositor is
+given no layout; a layout set in COSMIC's own settings wins. The text
+front end takes `--keymap NAME` instead of asking (a serial console has
+its own keyboard handling).
 
 The **Disk** page lists the disks (the boot medium excluded), then the
 selected disk as a bar: the partitions that stay in grey, free space
@@ -292,11 +323,15 @@ of its own. NICs are never ticked by default: until `sys-net` exists the
 dom0 needs one to download templates.
 
 Keyboard: `Tab`/`Shift-Tab` or `Up`/`Down` move between fields,
-`Up`/`Down` pick a disk, a method, a partition, its type or a device in a list, `Space` ticks a device,
-`Enter`/`Space` press buttons and tick boxes, `Esc` goes back. Fields
+`Up`/`Down` pick a keyboard layout, a disk, a method, a partition, its
+type or a device in a list, `Space` ticks a device,
+`Enter`/`Space` press buttons and tick boxes, `Esc` goes back. `Enter`
+in a field moves to the next one, and on from the last field of a page
+(a checkbox after it keeps its default). Fields
 filter what they accept (digits for the swap size, digits and `G`/`M`
 for a partition size, host-name and
-user-name characters), passwords are masked.
+user-name characters), passwords are masked unless "Show the
+passwords" is ticked.
 
 Mouse and touchpad: the installer reads `/dev/sysmouse`, where `moused`
 publishes every pointing device, and draws its own pointer once the mouse
@@ -307,8 +342,8 @@ cold, so a PS/2 mouse or touchpad never got its own `moused` (seen under
 QEMU). On the live medium `rc.local` starts it before the installer:
 `rc.d/local` comes before `rc.d/moused` in the boot order, so the mouse
 would otherwise only work once the installer exits. A left click focuses and activates what it lands on: it
-presses a button, ticks a box, selects a disk, a method, a partition or
-its type, ticks a device, or puts
+presses a button, ticks a box, selects a keyboard layout, a disk, a
+method, a partition or its type, ticks a device, or puts
 the caret in a field (at the nearest character, counted in average
 character widths). Without `moused` the installer says so on the console
 and stays keyboard-only.
@@ -334,12 +369,14 @@ crates/jos-fb                      vt(4) framebuffer, keyboard and sysmouse deco
 ## Text and unattended installs
 
 Without a framebuffer (serial console, or `--ui text`) the same steps are
-asked as line prompts. Exit (Ctrl-C or answer no) for a shell; re-run with
+asked as line prompts, except the keyboard layout (`--keymap`, see
+above). Exit (Ctrl-C or answer no) for a shell; re-run with
 `jos-install`. Every answer can be given as a flag, so an unattended
 install is:
 
 ```sh
 jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
+    --keymap fr.macbook \
     --root-password '...' --user alice --user-password '...' \
     --pci 1/0/0 --pci 1/0/1     # or --no-pci; default: as on the Passthrough page
 jos-install --non-interactive --disk nda0 --alongside ...   # next to the Linux on nda0

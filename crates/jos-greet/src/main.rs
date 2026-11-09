@@ -137,6 +137,19 @@ fn hostname(runner: &dyn Runner) -> String {
         .unwrap_or_else(|| "juanitos".to_string())
 }
 
+/// The keyboard layout for the desktop: the console keymap `rc.conf`
+/// sets (the installer's choice, which the login screen itself gets
+/// from the kernel), as XKB names. `None` when no keymap is set or it
+/// has no XKB counterpart: the compositor keeps its own default.
+#[cfg_attr(not(target_os = "freebsd"), allow(dead_code))]
+fn console_xkb(runner: &dyn Runner) -> Option<juanitos_core::keyboard::Xkb> {
+    let out = runner
+        .run("sysrc", &["-n", "keymap"])
+        .ok()
+        .filter(|o| o.success())?;
+    juanitos_core::keyboard::xkb_for(out.stdout.trim())
+}
+
 #[cfg(target_os = "freebsd")]
 fn run_screen(a: &RunArgs, runner: &dyn Runner, g: &mut greeter::Greeter) -> anyhow::Result<()> {
     let vt = a.vt;
@@ -148,7 +161,7 @@ fn run_screen(a: &RunArgs, runner: &dyn Runner, g: &mut greeter::Greeter) -> any
         Ok(d)
     };
     let mut dry = gui::DryBackend { runner };
-    let mut real = freebsd::FreeBsdBackend::new(runner, vt);
+    let mut real = freebsd::FreeBsdBackend::new(runner, vt, console_xkb(runner));
     let backend: &mut dyn gui::Backend = if a.dry_run { &mut dry } else { &mut real };
     let out = gui::run(&mut open, g, backend, gui::LoopOptions::default())?;
     eprintln!("jos-greet: {out:?}");
@@ -164,7 +177,7 @@ fn try_login(
 ) -> anyhow::Result<()> {
     use gui::Backend;
     let runner = juanitos_core::sys::RealRunner;
-    let mut b = freebsd::FreeBsdBackend::new(&runner, vt);
+    let mut b = freebsd::FreeBsdBackend::new(&runner, vt, console_xkb(&runner));
     let auth = b.authenticate(user, &password);
     greeter::wipe(&mut password);
     auth.map_err(|e| anyhow::anyhow!("authentication: {e}"))?;
@@ -198,6 +211,27 @@ mod tests {
         assert_eq!(hostname(&m), "juanitos");
         let m = MockRunner::new().respond("hostname", &[], CmdOutput::failed(1, ""));
         assert_eq!(hostname(&m), "juanitos");
+    }
+
+    #[test]
+    fn the_desktop_gets_the_console_keymap_as_xkb() {
+        let sysrc = |out: CmdOutput| MockRunner::new().respond("sysrc", &["-n", "keymap"], out);
+        let xkb = console_xkb(&sysrc(CmdOutput::ok("fr.macbook\n"))).unwrap();
+        assert_eq!((xkb.layout.as_str(), xkb.variant.as_str()), ("fr", "mac"));
+        // Unset (sysrc fails), empty, or without an XKB counterpart.
+        assert_eq!(
+            console_xkb(&sysrc(CmdOutput::failed(
+                1,
+                "sysrc: unknown variable 'keymap'"
+            ))),
+            None
+        );
+        assert_eq!(console_xkb(&sysrc(CmdOutput::ok("\n"))), None);
+        assert_eq!(
+            console_xkb(&sysrc(CmdOutput::ok("nordic.asus-eee\n"))),
+            None
+        );
+        assert_eq!(console_xkb(&MockRunner::new().missing("sysrc")), None);
     }
 
     #[test]

@@ -91,6 +91,12 @@ struct Cli {
     #[arg(long, default_value = "juanitos")]
     hostname: String,
 
+    /// Console keyboard layout of the installed system: a keymap name from
+    /// /usr/share/vt/keymaps (e.g. fr.macbook; the graphical installer
+    /// offers the list). Default: the kernel's us.
+    #[arg(long, value_name = "KEYMAP")]
+    keymap: Option<String>,
+
     /// Swap partition size; 0 disables swap.
     #[arg(long, default_value_t = 4)]
     swap_gb: u64,
@@ -219,6 +225,7 @@ fn install(
         disk: cli.disk.clone().unwrap_or_default(),
         pool: cli.pool.clone(),
         hostname: cli.hostname.clone(),
+        keymap: cli.keymap.clone(),
         swap_gb: cli.swap_gb,
         gui: !cli.no_gui,
         serial_console: !cli.no_serial,
@@ -337,11 +344,13 @@ fn run_graphical(
     if let Err(e) = display.enable_mouse() {
         eprintln!("jos-install: no mouse ({e:#}); the keyboard works");
     }
+    let index = std::fs::read_to_string(juanitos_core::keyboard::INDEX_PATH).unwrap_or_default();
     let mut wizard = wizard::Wizard::new(
         plan,
         hw.checks.clone(),
         hw.disks.clone(),
         hw.devices.clone(),
+        juanitos_core::keyboard::keymaps(&index),
     );
     let outcome = gui::run(
         &mut display,
@@ -884,6 +893,8 @@ mod tests {
             "alice",
             "--user-password",
             "pw",
+            "--keymap",
+            "fr.macbook",
             "--target",
             &t,
         ];
@@ -891,6 +902,7 @@ mod tests {
         let (r, out) = install_with(&flags, &m, true, "");
         r.unwrap();
         assert!(out.contains("user      alice"), "{out}");
+        assert!(out.contains("keyboard  fr.macbook"), "{out}");
         assert!(m.calls().iter().any(|c| c.contains("useradd alice")));
         let _ = std::fs::remove_dir_all(&target);
     }

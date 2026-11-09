@@ -760,6 +760,8 @@ impl<'a> Builder<'a> {
             // Nothing is reserved on the live medium: the installer must
             // see every device.
             pptdevs: Vec::new(),
+            // The installer's Keyboard page loads keymaps as they are tried.
+            keymap: None,
         };
         self.fs
             .write(&root.join("etc/fstab"), &dom0::live_fstab(&p.label))?;

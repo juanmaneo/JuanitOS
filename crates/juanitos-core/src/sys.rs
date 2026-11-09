@@ -63,6 +63,14 @@ pub trait Runner: Send + Sync {
         self.run(program, args)
     }
 
+    /// Run `program` with the terminal `tty` as its standard input, for
+    /// tools that act on a terminal other than the caller's (`kbdcontrol`
+    /// on the console). Mocks record it like a plain [`Runner::run`].
+    fn run_on_tty(&self, program: &str, args: &[&str], tty: &str) -> Result<CmdOutput> {
+        let _ = tty;
+        self.run(program, args)
+    }
+
     fn run_with_input_checked(
         &self,
         program: &str,
@@ -126,6 +134,23 @@ impl Runner for RealRunner {
             std::process::Command::new(program)
                 .args(args)
                 .stdin(Stdio::inherit())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(io_error(program))?,
+        ))
+    }
+
+    fn run_on_tty(&self, program: &str, args: &[&str], tty: &str) -> Result<CmdOutput> {
+        use std::process::Stdio;
+        // Read-only is enough for the ioctls such tools issue (rc.d/syscons
+        // redirects the terminal the same way).
+        let terminal = std::fs::File::open(tty)
+            .map_err(|e| Error::Io(std::io::Error::new(e.kind(), format!("opening {tty}: {e}"))))?;
+        Ok(convert(
+            std::process::Command::new(program)
+                .args(args)
+                .stdin(Stdio::from(terminal))
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output()
@@ -407,6 +432,21 @@ mod tests {
         assert!(MockRunner::new()
             .run_inheriting_stdin("stty", &["-echo"])
             .is_ok());
+        // A terminal of the caller's choosing on stdin: /dev/null stands
+        // in for it here (end of input at once).
+        let on_tty = RealRunner
+            .run_on_tty("sh", &["-c", "cat; echo done; exit 4"], "/dev/null")
+            .unwrap();
+        assert_eq!(on_tty.status, Some(4));
+        assert_eq!(on_tty.stdout.trim(), "done");
+        let err = RealRunner
+            .run_on_tty("sh", &["-c", "true"], "/dev/jos-no-such-tty")
+            .unwrap_err();
+        assert!(err.to_string().contains("jos-no-such-tty"), "{err}");
+        let m = MockRunner::new();
+        m.run_on_tty("kbdcontrol", &["-l", "fr"], "/dev/ttyv0")
+            .unwrap();
+        assert_eq!(m.calls(), ["kbdcontrol -l fr"]);
         let fed = RealRunner
             .run_with_input("sh", &["-c", "cat; exit 2"], "piped in")
             .unwrap();
@@ -420,6 +460,7 @@ mod tests {
         let errors = [
             r.run("jos-no-such-tool", &[]),
             r.run_inheriting_stdin("jos-no-such-tool", &[]),
+            r.run_on_tty("jos-no-such-tool", &[], "/dev/null"),
             r.run_with_input("jos-no-such-tool", &[], "x"),
         ];
         for e in errors {
