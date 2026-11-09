@@ -136,9 +136,14 @@ pub const JOS_SESSION: &str = include_str!("../../../freebsd/jos-session");
 /// Runs `jos-greet` under daemon(8) (`jos_login_enable`).
 pub const RC_D_JOS_LOGIN: &str = include_str!("../../../freebsd/rc.d/jos-login");
 
-/// Packages needed to rebuild JuanitOS on JuanitOS (stage 2 of the
-/// bootstrap, see `docs/bootstrap.md`).
-pub const SELFHOST_PACKAGES: &[&str] = &["rust", "git"];
+/// The development toolchain: what rebuilds JuanitOS on JuanitOS (stage 2
+/// of the bootstrap, see `docs/bootstrap.md`: `rust` and `git`, the rest
+/// is in the base system) and what a developer expects next to the base
+/// system's clang, lld and BSD make: GCC, GNU make, pkgconf, CMake and
+/// Ninja, which C sources and Rust build scripts ask for. Names are
+/// checked by the release build: a package that does not exist aborts it.
+pub const SELFHOST_PACKAGES: &[&str] =
+    &["rust", "git", "gcc", "gmake", "pkgconf", "cmake", "ninja"];
 
 /// Kernel modules loaded at boot. `if_tap` is needed too but is compiled
 /// into GENERIC (as part of `if_tuntap`) since FreeBSD 12, so listing it

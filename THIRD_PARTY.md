@@ -71,8 +71,8 @@ The images contain third-party binaries under their own licenses:
 
 - **FreeBSD base and kernel** (BSD-2-Clause, with some files under other
   permissive licenses): unmodified release sets.
-- **FreeBSD packages** (`pkg`, rust, git, vim, tmux, …): each under its
-  own license; several are GPL (e.g. git, GPL-2.0).
+- **FreeBSD packages** (`pkg`, rust, git, gcc, zellij, …): each under its
+  own license; several are GPL (e.g. git, GPL-2.0; gcc, GPL-3.0).
 - **COSMIC desktop** (GPL-3.0), built from source by
   `tools/dev/cosmic-build.sh` and shipped as a local pkg repository.
 - **Ventoy module** (`geom_ventoy.ko`, BSD-2-Clause), built from

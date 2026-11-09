@@ -227,17 +227,19 @@ mod tests {
     #[test]
     fn package_sets_follow_flags() {
         let mut p = Profile::default();
-        p.packages.extra = vec!["tmux".into()];
+        p.packages.extra = vec!["zellij".into()];
         let (req, opt) = p.package_sets();
         assert!(req.contains(&"edk2-bhyve"));
         assert!(req.contains(&"rust"));
-        assert!(req.contains(&"tmux"));
+        assert!(req.contains(&"gcc"));
+        assert!(req.contains(&"zellij"));
         assert!(opt.contains(&"cosmic-comp"));
 
         p.packages.gui = false;
         p.packages.selfhost = false;
         let (req, opt) = p.package_sets();
         assert!(!req.contains(&"rust"));
+        assert!(!req.contains(&"gcc"));
         assert!(opt.is_empty());
     }
 

@@ -144,8 +144,11 @@ Output lands in `release/out/`: the ISO, its `.sha256`, the dom0 tarball
 and the extracted `rootfs/` for inspection.
 
 The package set lives in `crates/juanitos-core/src/dom0.rs`: required
-(`edk2-bhyve`, `seatd`, `dbus`, …), self-hosting (`rust`, `git`) and
-best-effort desktop packages (COSMIC, `drm-kmod`). FreeBSD has no
+(`edk2-bhyve`, `seatd`, `dbus`, …), the development toolchain (`rust`
+and `git` for stage 2, plus `gcc`, `gmake`, `pkgconf`, `cmake` and
+`ninja` next to the base system's clang, lld and make, so the dom0 is a
+development machine as well) and best-effort desktop packages (COSMIC,
+`drm-kmod`). The profile's `extra` list adds `zellij`. FreeBSD has no
 COSMIC packages: they come from the repository `tools/dev/cosmic-build.sh`
 builds in the FreeBSD VM (`docs/relibc-cosmic.md`), which `[packages]
 local_repo` points at and the root carries at `/usr/local/share/juanitos/pkg`.
