@@ -59,6 +59,14 @@ pub trait Display {
     fn escape_pressed(&mut self) -> bool {
         false
     }
+    /// Should the last frame be presented again, although nothing
+    /// changed? Polled every tick: `true` while the kernel may be painting
+    /// its terminal over the frame, after the user switched terminals and
+    /// came back ([`vt`]), or after the display opened on a terminal
+    /// something else just left. `false` otherwise.
+    fn needs_redraw(&mut self) -> bool {
+        false
+    }
 }
 
 /// Bit offsets of the colour channels inside a 32-bit pixel.
@@ -154,6 +162,8 @@ pub struct NullDisplay {
     /// Bytes typed while frame N is on screen (counted from 1): keys
     /// pressed while the program is busy rather than waiting for them.
     pub typed_at_frame: Option<(usize, Vec<u8>)>,
+    /// Mouse packets arriving while frame N is on screen (counted from 1).
+    pub mouse_at_frame: Option<(usize, Vec<mouse::Mouse>)>,
     /// Rows given to `present_rows`, call by call; they do not count as
     /// frames.
     pub repaired: Vec<Range<u32>>,
@@ -163,6 +173,8 @@ pub struct NullDisplay {
     pub mouse: std::collections::VecDeque<Vec<mouse::Mouse>>,
     /// What `escape_pressed` answers, one call each (then `false`).
     pub escapes: std::collections::VecDeque<bool>,
+    /// What `needs_redraw` answers, one call each (then `false`).
+    pub redraws: std::collections::VecDeque<bool>,
     /// Calls to `reclaim`.
     pub reclaimed: usize,
 }
@@ -203,6 +215,9 @@ impl Display for NullDisplay {
         self.presented += 1;
         if let Some((_, bytes)) = self.typed_at_frame.take_if(|(n, _)| *n == self.presented) {
             self.keys.extend(bytes);
+        }
+        if let Some((_, packets)) = self.mouse_at_frame.take_if(|(n, _)| *n == self.presented) {
+            self.mouse.push_back(packets);
         }
         if self.keep_frames {
             self.last_frame = Some(frame.clone());
@@ -246,6 +261,10 @@ impl Display for NullDisplay {
 
     fn escape_pressed(&mut self) -> bool {
         self.escapes.pop_front().unwrap_or(false)
+    }
+
+    fn needs_redraw(&mut self) -> bool {
+        self.redraws.pop_front().unwrap_or(false)
     }
 }
 
@@ -339,6 +358,11 @@ mod tests {
             [d.escape_pressed(), d.escape_pressed(), d.escape_pressed()],
             [false, true, false]
         );
+        d.redraws.extend([true, false]);
+        assert_eq!(
+            [d.needs_redraw(), d.needs_redraw(), d.needs_redraw()],
+            [true, false, false]
+        );
 
         // On request it fails like a framebuffer that went away.
         let mut d = NullDisplay {
@@ -354,16 +378,20 @@ mod tests {
         assert!(d.restore_console().is_err() && !d.restored);
         assert!(d.reclaim().is_err() && d.reclaimed == 0);
 
-        // Keys arriving while a given frame is shown.
+        // Keys and mouse packets arriving while a given frame is shown.
         let mut d = NullDisplay {
             typed_at_frame: Some((2, b"k".to_vec())),
+            mouse_at_frame: Some((2, vec![m])),
             ..NullDisplay::new(4, 4)
         };
         d.present(&Image::new(4, 4, Rgba::TRANSPARENT)).unwrap();
         assert_eq!(d.poll_key(), None);
+        assert!(d.poll_mouse().is_empty());
         d.present(&Image::new(4, 4, Rgba::TRANSPARENT)).unwrap();
         assert_eq!(d.poll_key(), Some(b'k'));
+        assert_eq!(d.poll_mouse(), [m]);
         assert!(d.typed_at_frame.is_none(), "typed once");
+        assert!(d.mouse_at_frame.is_none(), "moved once");
     }
 
     #[test]
@@ -407,6 +435,7 @@ mod tests {
             .is_ok());
         assert!(b.poll_mouse().is_empty());
         assert!(!b.escape_pressed());
+        assert!(!b.needs_redraw());
         assert!(b.present(&Image::new(1, 1, Rgba::TRANSPARENT)).is_ok());
         assert!(b.restore_console().is_ok());
         assert_eq!((b.size(), b.poll_key()), ((1, 1), None));

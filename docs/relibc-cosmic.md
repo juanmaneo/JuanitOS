@@ -154,7 +154,22 @@ product:
   (Left/Right cycles), the session list comes from
   `/usr/local/share/wayland-sessions/*.desktop` (COSMIC's
   `cosmic.desktop`; COSMIC if there is none). F1/F2 pressed twice power
-  off/reboot.
+  off/reboot; the *Power off* and *Reboot* buttons want a second click
+  the same way.
+- Mouse and touchpad work as in the installer: the greeter reads
+  `/dev/sysmouse` (`moused` is up by then) and draws its own pointer
+  once the mouse moves; a click focuses a field, turns the session (`<`
+  goes back, the rest of the box on), presses *Log in* or a power
+  button. Without `moused` it says so on the console and stays
+  keyboard-only.
+- Alt+F1 shows the text console; Alt+F9 comes back. vt(4) repaints the
+  terminal it switches to (blank cells, border) whatever its mode, so
+  the greeter presents its frame again for a second once it sees its
+  terminal back on screen (`VT_GETACTIVE` polled every tick,
+  `Display::needs_redraw` in `crates/jos-fb`), and does the same when it
+  opens on a terminal that was on screen already — after a session, when
+  the GPU driver restores the console mode and the kernel repaints it
+  some time later. While another terminal is on screen it draws nothing.
 - Authentication is OpenPAM, service `jos-greet`
   (`/etc/pam.d/jos-greet`: `login`'s policy without `pam_self`, which
   would let root, the greeter's own uid, in without a password); root

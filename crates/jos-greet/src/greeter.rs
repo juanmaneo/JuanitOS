@@ -80,6 +80,21 @@ pub enum Action {
     Power(Power),
 }
 
+/// What a click can land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// The user or password field (the session box focuses through
+    /// [`Target::Session`]).
+    Field(Focus),
+    /// The session box: `true` for the next session, `false` for the
+    /// previous one.
+    Session(bool),
+    /// The Log in button.
+    Login,
+    /// A power button.
+    Power(Power),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Info(String),
@@ -149,12 +164,10 @@ impl Greeter {
                 .into_iter()
                 .find(|p| p.key() == n)
             {
-                return self.power_key(p);
+                return self.power(p, &format!("Press F{n} again"));
             }
         }
-        if self.armed.take().is_some() {
-            self.message = None;
-        }
+        self.disarm();
         match key {
             Key::Tab | Key::Down => self.move_focus(1),
             Key::BackTab | Key::Up => self.move_focus(FOCUS_ORDER.len() - 1),
@@ -182,19 +195,48 @@ impl Greeter {
         Action::None
     }
 
-    fn power_key(&mut self, p: Power) -> Action {
+    /// Handle a click: focus the field, turn the session, log in, or
+    /// (twice) power off or reboot.
+    pub fn click(&mut self, target: Target) -> Action {
+        match target {
+            Target::Power(p) => self.power(p, "Click again"),
+            Target::Field(f) => {
+                self.disarm();
+                self.focus = f;
+                Action::None
+            }
+            Target::Session(forward) => {
+                self.disarm();
+                self.focus = Focus::Session;
+                self.cycle(forward);
+                Action::None
+            }
+            Target::Login => {
+                self.disarm();
+                self.focus = Focus::Password;
+                self.enter()
+            }
+        }
+    }
+
+    /// A power request, by key or by click: the first one arms it and
+    /// says how to confirm (`again`), the second one goes ahead.
+    fn power(&mut self, p: Power, again: &str) -> Action {
         if self.armed == Some(p) {
             self.armed = None;
             self.message = Some(Message::Info(format!("Going to {}...", p.verb())));
             return Action::Power(p);
         }
         self.armed = Some(p);
-        self.message = Some(Message::Info(format!(
-            "Press F{} again to {}",
-            p.key(),
-            p.verb()
-        )));
+        self.message = Some(Message::Info(format!("{again} to {}", p.verb())));
         Action::None
+    }
+
+    /// Anything but the confirmation forgets an armed power request.
+    fn disarm(&mut self) {
+        if self.armed.take().is_some() {
+            self.message = None;
+        }
     }
 
     fn move_focus(&mut self, step: usize) {
@@ -482,6 +524,64 @@ mod tests {
         assert_eq!(g.armed, Some(Power::Reboot));
         assert_eq!(g.handle(Key::F(2)), Action::Power(Power::Reboot));
         assert!(matches!(&g.message, Some(Message::Info(m)) if m.contains("reboot")));
+    }
+
+    #[test]
+    fn clicks_focus_turn_the_session_log_in_and_power_off() {
+        let mut g = greeter();
+        assert_eq!(g.click(Target::Field(Focus::User)), Action::None);
+        assert_eq!(g.focus, Focus::User);
+        assert_eq!(g.click(Target::Session(true)), Action::None);
+        assert_eq!(
+            (g.focus, g.current_session().name.as_str()),
+            (Focus::Session, "Sway")
+        );
+        assert_eq!(g.click(Target::Session(false)), Action::None);
+        assert_eq!(g.current_session().name, "COSMIC");
+        g.click(Target::Field(Focus::Password));
+        typed(&mut g, "pw");
+        // Log in from anywhere: the focus goes to the password field.
+        g.focus = Focus::User;
+        let req = Request {
+            user: "alice".into(),
+            password: "pw".into(),
+            session: Session::cosmic_default(),
+        };
+        assert_eq!(g.click(Target::Login), Action::Login(req));
+        assert_eq!(g.focus, Focus::Password);
+        // Without a user name it asks for one.
+        g.user.clear();
+        assert_eq!(g.click(Target::Login), Action::None);
+        assert_eq!(g.focus, Focus::User);
+        assert_eq!(g.message, Some(Message::Error("Enter a user name".into())));
+
+        // Power buttons want a second click; anything else disarms.
+        assert_eq!(g.click(Target::Power(Power::Off)), Action::None);
+        assert_eq!(g.armed, Some(Power::Off));
+        assert_eq!(
+            g.message,
+            Some(Message::Info("Click again to power off".into()))
+        );
+        g.click(Target::Field(Focus::User));
+        assert_eq!((g.armed, &g.message), (None, &None));
+        g.click(Target::Power(Power::Reboot));
+        g.click(Target::Session(true));
+        assert_eq!(g.armed, None);
+        g.click(Target::Power(Power::Reboot));
+        g.click(Target::Login);
+        assert_eq!(g.armed, None);
+        g.click(Target::Power(Power::Reboot));
+        assert_eq!(g.click(Target::Power(Power::Off)), Action::None, "re-armed");
+        assert_eq!(
+            g.handle(Key::F(1)),
+            Action::Power(Power::Off),
+            "key or click"
+        );
+        g.handle(Key::F(2));
+        assert_eq!(
+            g.click(Target::Power(Power::Reboot)),
+            Action::Power(Power::Reboot)
+        );
     }
 
     #[test]

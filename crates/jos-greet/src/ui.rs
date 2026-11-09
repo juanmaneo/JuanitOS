@@ -10,25 +10,55 @@ use jos_gfx::icons;
 use jos_gfx::image::{Image, Rect};
 use jos_gfx::Rgba;
 
-use crate::greeter::{Focus, Greeter, Message};
+use crate::greeter::{Focus, Greeter, Message, Power, Target};
 
 pub const LOGICAL_W: i32 = 1280;
 pub const LOGICAL_H: i32 = 800;
 
 const CARD_X: i32 = 420;
+const CARD_Y: i32 = 320;
 const CARD_W: i32 = 440;
+const CARD_H: i32 = 340;
 const FIELD_X: i32 = CARD_X + 20;
 const FIELD_W: i32 = CARD_W - 40;
 const FIELD_H: i32 = 44;
+/// The session box's `<` arrow: clicks there go back.
+const ARROW_W: i32 = 48;
+const BUTTON_H: i32 = 40;
+const LOGIN_W: i32 = 200;
+const POWER_W: i32 = 170;
+const BAR_Y: i32 = LOGICAL_H - 70;
+const REBOOT_X: i32 = LOGICAL_W - 20 - POWER_W;
+const POWER_OFF_X: i32 = REBOOT_X - POWER_W - 12;
+const HINT: &str = "Tab: next field   Enter: log in   Alt+F1: text console";
 
 const CARD_BG: Rgba = Rgba::rgb(0x0e, 0x11, 0x16);
 const FAIL: Rgba = Rgba::rgb(0xff, 0x5c, 0x5c);
+
+/// What a click can land on: the screen rectangles of the last rendered
+/// frame's widgets, in drawing order (the first one under the pointer
+/// wins).
+#[derive(Debug, Clone, Default)]
+pub struct Hits {
+    regions: Vec<(Rect, Target)>,
+}
+
+impl Hits {
+    /// What is under the screen pixel (x, y), if anything.
+    pub fn target(&self, x: i32, y: i32) -> Option<Target> {
+        self.regions
+            .iter()
+            .find(|(r, _)| (r.x..r.right()).contains(&x) && (r.y..r.bottom()).contains(&y))
+            .map(|(_, t)| *t)
+    }
+}
 
 struct Canvas {
     img: Image,
     s: i32,
     ox: i32,
     oy: i32,
+    hits: Hits,
 }
 
 impl Canvas {
@@ -41,7 +71,14 @@ impl Canvas {
             s,
             ox: (width as i32 - LOGICAL_W * s) / 2,
             oy: (height as i32 - LOGICAL_H * s) / 2,
+            hits: Hits::default(),
         }
+    }
+
+    /// Remember that the logical box (x, y, w, h) is `target`.
+    fn hit(&mut self, x: i32, y: i32, w: i32, h: i32, target: Target) {
+        let r = self.rect(x, y, w, h);
+        self.hits.regions.push((r, target));
     }
 
     fn rect(&self, x: i32, y: i32, w: i32, h: i32) -> Rect {
@@ -85,6 +122,20 @@ impl Canvas {
         self.text(cx - w / 2, y, &shown, scale, c);
     }
 
+    /// A clickable button, `lit` when it is the thing to press.
+    fn button(&mut self, x: i32, y: i32, w: i32, label: &str, target: Target, lit: bool) {
+        self.hit(x, y, w, BUTTON_H, target);
+        let (fill, ink) = if lit {
+            (THEME.accent, THEME.background)
+        } else {
+            (THEME.highlight, THEME.text)
+        };
+        self.rounded(x, y, w, BUTTON_H, 8, fill);
+        let shown = font::ellipsize(label, w - 16, 2);
+        let tw = font::text_width(&shown, 2);
+        self.text(x + (w - tw) / 2, y + 13, &shown, 2, ink);
+    }
+
     fn logo(&mut self, cx: i32, cy: i32, r: i32) {
         icons::draw_logo(
             &mut self.img,
@@ -97,37 +148,60 @@ impl Canvas {
     }
 }
 
-/// Render the whole screen for the greeter's state.
-pub fn render(g: &Greeter, width: u32, height: u32) -> Image {
+/// Render the whole screen for the greeter's state, with what a click on
+/// it would land on.
+pub fn render(g: &Greeter, width: u32, height: u32) -> (Image, Hits) {
     let mut c = Canvas::new(width, height);
     let cx = LOGICAL_W / 2;
     c.logo(cx, 150, 52);
     c.text_centered(cx, 228, "JUANITOS", 4, THEME.text);
     c.text_centered(cx, 272, &g.hostname, 2, THEME.text_muted);
 
-    c.rounded(CARD_X, 320, CARD_W, 340, 12, CARD_BG);
+    c.rounded(CARD_X, CARD_Y, CARD_W, CARD_H, 12, CARD_BG);
     let shown_password = font::mask(g.password.chars().count());
-    field(&mut c, g, Focus::User, 340, "User", &g.user);
-    field(&mut c, g, Focus::Password, 428, "Password", &shown_password);
-    session(&mut c, g, 516);
+    field(&mut c, g, Focus::User, CARD_Y + 20, "User", &g.user);
+    field(
+        &mut c,
+        g,
+        Focus::Password,
+        CARD_Y + 108,
+        "Password",
+        &shown_password,
+    );
+    session(&mut c, g, CARD_Y + 196);
+    c.button(
+        cx - LOGIN_W / 2,
+        CARD_Y + CARD_H - BUTTON_H - 16,
+        LOGIN_W,
+        "Log in",
+        Target::Login,
+        true,
+    );
 
     if let Some(m) = &g.message {
         let (text, colour) = match m {
             Message::Info(t) => (t, THEME.accent),
             Message::Error(t) => (t, FAIL),
         };
-        c.text_centered(cx, 628, text, 2, colour);
+        c.text_centered(cx, CARD_Y + CARD_H + 24, text, 2, colour);
     }
 
-    c.fill(0, LOGICAL_H - 70, LOGICAL_W, 2, THEME.highlight);
-    c.text_centered(
-        cx,
-        LOGICAL_H - 46,
-        "Tab: next field   Enter: log in   F1: power off   F2: reboot   Alt+F1: console",
-        2,
-        THEME.text_muted,
-    );
-    c.img
+    bottom_bar(&mut c, g);
+    (c.img, c.hits)
+}
+
+/// The keys that matter, and the power buttons (F1/F2 do the same).
+fn bottom_bar(c: &mut Canvas, g: &Greeter) {
+    c.fill(0, BAR_Y, LOGICAL_W, 2, THEME.highlight);
+    let by = BAR_Y + 16;
+    for (p, x, label) in [
+        (Power::Off, POWER_OFF_X, "Power off (F1)"),
+        (Power::Reboot, REBOOT_X, "Reboot (F2)"),
+    ] {
+        c.button(x, by, POWER_W, label, Target::Power(p), g.armed == Some(p));
+    }
+    let hint = font::ellipsize(HINT, POWER_OFF_X - 40, 2);
+    c.text(20, by + 13, &hint, 2, THEME.text_muted);
 }
 
 fn label(c: &mut Canvas, g: &Greeter, which: Focus, y: i32, text: &str) -> bool {
@@ -140,6 +214,7 @@ fn label(c: &mut Canvas, g: &Greeter, which: Focus, y: i32, text: &str) -> bool 
 fn field(c: &mut Canvas, g: &Greeter, which: Focus, y: i32, name: &str, value: &str) {
     let focused = label(c, g, which, y, name);
     let by = y + 24;
+    c.hit(FIELD_X, y, FIELD_W, by + FIELD_H - y, Target::Field(which));
     let border = if focused { THEME.accent } else { THEME.dim };
     c.boxed(FIELD_X, by, FIELD_W, FIELD_H, border, THEME.highlight);
     // Keep the end of a long value (where the caret is) in view.
@@ -160,6 +235,9 @@ fn field(c: &mut Canvas, g: &Greeter, which: Focus, y: i32, name: &str, value: &
 fn session(c: &mut Canvas, g: &Greeter, y: i32) {
     let focused = label(c, g, Focus::Session, y, "Session");
     let by = y + 24;
+    // The `<` arrow goes back, the rest of the box (`>` included) on.
+    c.hit(FIELD_X, by, ARROW_W, FIELD_H, Target::Session(false));
+    c.hit(FIELD_X, by, FIELD_W, FIELD_H, Target::Session(true));
     let border = if focused { THEME.accent } else { THEME.dim };
     c.boxed(FIELD_X, by, FIELD_W, FIELD_H, border, THEME.highlight);
     let arrows = if g.sessions.len() > 1 || focused {
@@ -200,7 +278,7 @@ pub fn screenshots(dir: &std::path::Path, width: u32, height: u32) -> anyhow::Re
     let mut written = Vec::new();
     let mut shot = |g: &Greeter, name: &str| -> anyhow::Result<()> {
         let file = dir.join(format!("{name}.png"));
-        jos_gfx::png::write(&render(g, width, height), &file)?;
+        jos_gfx::png::write(&render(g, width, height).0, &file)?;
         written.push(file.display().to_string());
         Ok(())
     };
@@ -221,6 +299,10 @@ mod tests {
 
     fn differs(a: &Image, b: &Image) -> bool {
         (0..a.height()).any(|y| a.row(y) != b.row(y))
+    }
+
+    fn frame(g: &Greeter, width: u32, height: u32) -> Image {
+        render(g, width, height).0
     }
 
     #[test]
@@ -244,27 +326,57 @@ mod tests {
     #[test]
     fn renders_at_any_size_and_reacts_to_state() {
         let mut g = sample_greeter();
-        let base = render(&g, 1280, 800);
+        let base = frame(&g, 1280, 800);
         assert_eq!((base.width(), base.height()), (1280, 800));
         // Scaled and letterboxed, and smaller than the canvas.
-        let big = render(&g, 2560, 1700);
+        let big = frame(&g, 2560, 1700);
         assert_eq!((big.width(), big.height()), (2560, 1700));
-        let small = render(&g, 640, 480);
+        let small = frame(&g, 640, 480);
         assert_eq!(small.width(), 640);
 
         g.handle(Key::Char('x'));
-        let typed = render(&g, 1280, 800);
+        let typed = frame(&g, 1280, 800);
         assert!(differs(&base, &typed), "password dots are drawn");
         g.login_failed("Login incorrect");
-        assert!(differs(&base, &render(&g, 1280, 800)));
+        assert!(differs(&base, &frame(&g, 1280, 800)));
         g.focus = Focus::Session;
         g.message = Some(Message::Info("hello".into()));
-        let one = render(&g, 1280, 800);
+        let one = frame(&g, 1280, 800);
         g.handle(Key::Right);
-        assert!(
-            differs(&one, &render(&g, 1280, 800)),
-            "session name changes"
+        assert!(differs(&one, &frame(&g, 1280, 800)), "session name changes");
+        // An armed power button lights up.
+        let calm = frame(&g, 1280, 800);
+        g.handle(Key::F(1));
+        assert!(differs(&calm, &frame(&g, 1280, 800)));
+    }
+
+    #[test]
+    fn clicks_land_on_fields_arrows_and_buttons() {
+        let g = sample_greeter();
+        // At 1280x800 the logical canvas is the screen.
+        let (_, hits) = render(&g, 1280, 800);
+        assert_eq!(hits.target(640, 100), None, "the logo");
+        assert_eq!(
+            hits.target(500, 345),
+            Some(Target::Field(Focus::User)),
+            "label"
         );
+        assert_eq!(hits.target(500, 390), Some(Target::Field(Focus::User)));
+        assert_eq!(hits.target(500, 470), Some(Target::Field(Focus::Password)));
+        assert_eq!(hits.target(450, 560), Some(Target::Session(false)), "<");
+        assert_eq!(hits.target(640, 560), Some(Target::Session(true)));
+        assert_eq!(hits.target(830, 560), Some(Target::Session(true)), ">");
+        assert_eq!(hits.target(640, 620), Some(Target::Login));
+        assert_eq!(hits.target(1000, 760), Some(Target::Power(Power::Off)));
+        assert_eq!(hits.target(1170, 760), Some(Target::Power(Power::Reboot)));
+        assert_eq!(hits.target(100, 760), None, "the hint");
+        // Scaled twice and centred: the Log in button moves with the card.
+        let (_, hits) = render(&g, 2600, 1640);
+        assert_eq!(hits.target(1300, 1260), Some(Target::Login));
+        assert_eq!(hits.target(640, 620), None);
+        // The hint fits next to the power buttons without being cut.
+        let hint_w = font::text_width(HINT, 2);
+        assert!(hint_w <= POWER_OFF_X - 40, "{hint_w}");
     }
 
     #[test]
@@ -277,7 +389,7 @@ mod tests {
         for _ in 0..200 {
             g.handle(Key::Char('w'));
         }
-        let img = render(&g, 1280, 800);
+        let img = frame(&g, 1280, 800);
         assert_eq!(img.width(), 1280);
     }
 

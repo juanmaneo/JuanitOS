@@ -3,9 +3,10 @@
 //!
 //! Started by `rc.d/jos-login` (under daemon(8), restarted if it dies) on
 //! a virtual terminal no getty uses (`ttyv8`, VT 9). It draws on the
-//! `vt(4)` framebuffer with `jos-fb`, authenticates with PAM, then hands
-//! the same VT to the desktop session (COSMIC, through seatd) and comes
-//! back when it ends. Pure parts (state machine, renderer, session plan)
+//! `vt(4)` framebuffer with `jos-fb`, takes the keyboard and the mouse
+//! (`/dev/sysmouse`), authenticates with PAM, then hands the same VT to
+//! the desktop session (COSMIC, through seatd) and comes back when it
+//! ends. Pure parts (state machine, renderer, session plan)
 //! are tested on any host; `screenshots` renders the screen to PNGs.
 
 #[cfg(target_os = "freebsd")]
@@ -139,7 +140,13 @@ fn hostname(runner: &dyn Runner) -> String {
 #[cfg(target_os = "freebsd")]
 fn run_screen(a: &RunArgs, runner: &dyn Runner, g: &mut greeter::Greeter) -> anyhow::Result<()> {
     let vt = a.vt;
-    let mut open = || jos_fb::vt::VtDisplay::open(vt);
+    let mut open = || {
+        let mut d = jos_fb::vt::VtDisplay::open(vt)?;
+        if let Err(e) = d.enable_mouse() {
+            eprintln!("jos-greet: no mouse ({e:#}); the keyboard works");
+        }
+        Ok(d)
+    };
     let mut dry = gui::DryBackend { runner };
     let mut real = freebsd::FreeBsdBackend::new(runner, vt);
     let backend: &mut dyn gui::Backend = if a.dry_run { &mut dry } else { &mut real };

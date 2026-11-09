@@ -16,59 +16,13 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use jos_fb::keys::Decoder;
-use jos_fb::mouse::Mouse;
+use jos_fb::mouse::Pointer;
 use jos_fb::Display;
-use jos_gfx::{icons, Image};
 use juanitos_core::sys::Runner;
 
 use crate::install::{Installer, Progress};
 use crate::ui;
 use crate::wizard::{Action, Wizard};
-
-/// Pointer height, as a fraction of the screen height.
-const POINTER_SIZE: f32 = 1.0 / 40.0;
-
-/// The mouse pointer: hidden until the mouse first moves, then clamped to
-/// the screen. Clicks are the press edge of the left button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pointer {
-    pub shown: bool,
-    pub x: i32,
-    pub y: i32,
-    left: bool,
-}
-
-impl Pointer {
-    /// Starts hidden at the centre of a `width` x `height` screen.
-    pub fn new(width: u32, height: u32) -> Self {
-        Pointer {
-            shown: false,
-            x: width as i32 / 2,
-            y: height as i32 / 2,
-            left: false,
-        }
-    }
-
-    /// Apply a packet; `true` when the left button was just pressed.
-    pub fn update(&mut self, m: Mouse, width: u32, height: u32) -> bool {
-        self.shown = true;
-        self.x = (self.x + m.dx).clamp(0, width as i32 - 1);
-        self.y = (self.y + m.dy).clamp(0, height as i32 - 1);
-        let pressed = m.left && !self.left;
-        self.left = m.left;
-        pressed
-    }
-
-    /// `frame` with the pointer on it (the frame itself when hidden).
-    pub fn composite(&self, frame: &Image) -> Image {
-        let mut img = frame.clone();
-        if self.shown {
-            let scale = frame.height() as f32 * POINTER_SIZE / 20.0;
-            icons::draw_pointer(&mut img, self.x, self.y, scale.max(1.0));
-        }
-        img
-    }
-}
 
 /// How the user left the installer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +67,8 @@ pub fn run<D: Display>(
     let (tx, rx) = mpsc::channel::<Event>();
 
     std::thread::scope(|scope| {
-        // The page changed (re-render) / the pointer moved (re-present).
+        // The page changed (re-render) / the pointer moved or the kernel
+        // painted over the frame (re-present).
         let mut dirty = true;
         let mut moved = false;
         let (mut frame, mut hits) = ui::render_page(wizard, width, height);
@@ -122,6 +77,7 @@ pub fn run<D: Display>(
             if dirty {
                 (frame, hits) = ui::render_page(wizard, width, height);
             }
+            moved |= display.needs_redraw();
             if dirty || moved {
                 display.present(&pointer.composite(&frame))?;
                 dirty = false;
@@ -197,6 +153,7 @@ mod tests {
     use super::*;
     use crate::ui::sample_wizard;
     use crate::wizard::{InstallState, Page};
+    use jos_fb::mouse::Mouse;
     use jos_fb::NullDisplay;
     use juanitos_core::sys::{CmdOutput, MockRunner};
     use std::collections::VecDeque;
@@ -245,6 +202,9 @@ mod tests {
         fn poll_mouse(&mut self) -> Vec<Mouse> {
             self.inner.poll_mouse()
         }
+        fn needs_redraw(&mut self) -> bool {
+            self.inner.needs_redraw()
+        }
     }
 
     fn opts() -> LoopOptions {
@@ -292,31 +252,17 @@ mod tests {
         };
         let mut w = sample_wizard();
         let m = MockRunner::new();
+        // The kernel painted over the frame twice while idle (the user
+        // went to the console and back): the frame is presented again.
+        d.inner.redraws.extend([false, true, false, true]);
         assert_eq!(
             run(&mut d, &mut w, &m, true, "", opts()).unwrap(),
             Outcome::Exit
         );
         assert_eq!(w.page, Page::Welcome);
-        // The first frame, then one per burst: Quit leaves before drawing.
-        assert_eq!(d.inner.presented, 3);
-    }
-
-    #[test]
-    fn the_pointer_is_clamped_and_clicks_on_the_press_edge() {
-        let mut p = Pointer::new(100, 50);
-        assert_eq!((p.shown, p.x, p.y), (false, 50, 25));
-        let frame = jos_gfx::Image::new(100, 50, jos_gfx::Rgba::rgb(9, 9, 9));
-        assert_eq!(p.composite(&frame).pixels(), frame.pixels());
-        assert!(!p.update(mouse(-500, 10, false), 100, 50));
-        assert_eq!((p.shown, p.x, p.y), (true, 0, 35));
-        assert!(p.update(mouse(500, 500, true), 100, 50));
-        assert_eq!((p.x, p.y), (99, 49));
-        assert!(!p.update(mouse(-20, -20, true), 100, 50), "still held");
-        assert!(!p.update(mouse(0, 0, false), 100, 50));
-        assert!(p.update(mouse(0, 0, true), 100, 50));
-        let shown = p.composite(&frame);
-        assert_ne!(shown.pixels(), frame.pixels());
-        assert_ne!(shown.get(80, 30), frame.get(80, 30));
+        // The first frame, two repaints, then one per burst: Quit leaves
+        // before drawing.
+        assert_eq!(d.inner.presented, 5);
     }
 
     // Welcome -> ... -> Summary, ticking the confirmation, then Install.

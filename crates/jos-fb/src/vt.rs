@@ -65,6 +65,15 @@ struct FbRgbOffs {
 /// reached are given up on.
 pub const POST_SWITCH_SETTLE: Duration = Duration::from_millis(200);
 
+/// How long [`Display::needs_redraw`] keeps asking for the frame again
+/// after the user switched back to the terminal, or after the display
+/// opened on a terminal that was on screen already (the login screen
+/// after a desktop session): the kernel repaints its terminal from the
+/// 25 Hz timer in both cases, and a modeset restored by the GPU driver
+/// when the compositor exits can take a good while longer than a plain
+/// switch ([`POST_SWITCH_SETTLE`]).
+pub const RETURN_SETTLE: Duration = Duration::from_millis(1000);
+
 /// Planted in the last pixel of every row before a switch: the repaint
 /// paints black over it (rows of blank cells, then the border, top to
 /// bottom), and a row whose marker is gone is rewritten at once. Nearly
@@ -93,6 +102,11 @@ pub struct VtDisplay {
     /// [`Display::restore_console`] and [`Display::reclaim`]: the next
     /// `present` switches to it, with that frame ([`VtDisplay::switch_under`]).
     switched: bool,
+    /// The user switched to another terminal (Alt+F1) while `switched`:
+    /// frames are held back until they come back.
+    away: bool,
+    /// Until when [`Display::needs_redraw`] asks for the frame again.
+    repaint_until: Option<Instant>,
 }
 
 fn ioctl_int(fd: libc::c_int, req: u32, value: libc::c_int, what: &str) -> anyhow::Result<()> {
@@ -231,6 +245,8 @@ impl VtDisplay {
             mouse: None,
             keyboards: Vec::new(),
             switched: false,
+            away: false,
+            repaint_until: None,
         })
     }
 
@@ -273,6 +289,21 @@ impl VtDisplay {
         self.tty.as_raw_fd()
     }
 
+    /// The terminal on screen, when the kernel says.
+    fn active_vt(&self) -> Option<i32> {
+        ioctl_out::<libc::c_int>(self.fd(), ioc::VT_GETACTIVE, "VT_GETACTIVE").ok()
+    }
+
+    /// Is another terminal on screen? Remembered (the last answer stands
+    /// when the kernel gives none), so that [`Display::needs_redraw`] sees
+    /// the user come back.
+    fn is_away(&mut self) -> bool {
+        if let Some(active) = self.active_vt() {
+            self.away = active != self.vt;
+        }
+        self.away
+    }
+
     fn restore_tty_settings(&self) {
         let fd = self.fd();
         // SAFETY: restoring values obtained from the same fd earlier.
@@ -296,6 +327,10 @@ impl VtDisplay {
         let active: libc::c_int = ioctl_out(fd, ioc::VT_GETACTIVE, "VT_GETACTIVE")?;
         self.present_rows(frame, 0..self.height)?;
         if active == self.vt {
+            // Whatever left this terminal on screen (a compositor whose
+            // exit restored the console's mode) may have the kernel
+            // repainting it right now: keep presenting for a while.
+            self.repaint_until = Some(Instant::now() + RETURN_SETTLE);
             return ioctl_int(fd, ioc::KDSETMODE, ioc::KD_GRAPHICS, "KDSETMODE");
         }
         let mut pending = self.plant_markers();
@@ -382,6 +417,11 @@ impl Display for VtDisplay {
 
     fn present(&mut self, frame: &Image) -> anyhow::Result<()> {
         if self.switched {
+            // Another terminal is on screen: the frame would go over its
+            // text. It is presented again when the user comes back.
+            if self.is_away() {
+                return Ok(());
+            }
             return self.present_rows(frame, 0..self.height);
         }
         self.switch_under(frame)?;
@@ -422,12 +462,16 @@ impl Display for VtDisplay {
         show_console(self.fd())?;
         self.console_restored = true;
         self.switched = false;
+        self.away = false;
+        self.repaint_until = None;
         Ok(())
     }
 
     fn reclaim(&mut self) -> anyhow::Result<()> {
         self.console_restored = false;
         self.switched = false;
+        self.away = false;
+        self.repaint_until = None;
         Ok(())
     }
 
@@ -471,6 +515,32 @@ impl Display for VtDisplay {
             }
         }
         pressed
+    }
+
+    /// vt(4) repaints a terminal the user switches back to (blank cells,
+    /// border, cursor; see [`take_terminal`]) whatever its mode, which
+    /// wipes the frame: once the terminal is on screen again the frame is
+    /// asked for on every tick for [`RETURN_SETTLE`], and once more after
+    /// it, so the last one lands after the repaint.
+    fn needs_redraw(&mut self) -> bool {
+        if !self.switched || self.console_restored {
+            return false;
+        }
+        let was_away = self.away;
+        if self.is_away() {
+            return false;
+        }
+        if was_away {
+            self.repaint_until = Some(Instant::now() + RETURN_SETTLE);
+        }
+        match self.repaint_until {
+            Some(until) if Instant::now() < until => true,
+            Some(_) => {
+                self.repaint_until = None;
+                true
+            }
+            None => false,
+        }
     }
 }
 
