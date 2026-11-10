@@ -359,149 +359,48 @@ reproduces the Redox display problem (`docs/templates.md`).
 
 ## Status
 
-v0.1 scaffold targeting FreeBSD 15.1-RELEASE: configuration, storage
-provisioning, bhyve command generation, networking plumbing, per-qube
-supervisor (restart on reboot, pidfiles and logs under
-`/var/run/juanitos`), host checks, release builder, the graphical
-installer (with its passthrough page), the first-boot `jos setup`, guest templates from the distributions' images (Debian 13 +
-Docker, FreeBSD 15 + Podman, Redox), the COSMIC desktop built from
-source for the dom0 (packaged, with a login screen), `jos run` through a virtio-console
-agent channel (serial console as the fallback), the per-qube virtio-9p
-share with its guest agent (own hostname per clone), `jos copy` on top
-of it and the request broker (`jos-copy` in a qube, `jos policy`, `jos
-serve`), the `sys-firewall` unikernel, and the graphical boot chain
-(`jos-boot.efi`, kernel splash, `jos-splash`). Everything is verified
-with `--dry-run` and unit tests on the development host; on Linux,
-`tools/uefi-test.sh` boots the UEFI pieces under QEMU + OVMF:
-`jos-boot.efi` draws the card and chain-loads the genuine FreeBSD
-`loader.efi`, and `jos-firewall.efi` serves DHCP, answers ARP and NATs a
-ping end to end.
+v0.1, targeting FreeBSD 15.1-RELEASE. Every component has unit tests
+with 100 % coverage (lines, functions and regions, enforced in CI by
+`coverage.toml`) and a `--dry-run` mode.
 
-Stage 1 is done from a Linux host: `jos-release builder --auto` builds
-the ISO inside FreeBSD's official 15.1 VM image under QEMU/KVM (about 10
-minutes). That ISO boots on OVMF to the graphical installer, whose
-hardware check passes in the VM and which installs onto a virtual disk;
-the installed system then boots through the splash to a login. Inside
-that installed dom0 (nested virtualisation), real bhyve runs the qubes:
-`fbsd15-dev`, `fbsd15-net` and `redox` were installed there from a USB
-stick, and the whole network chain works — `work` (clone of
-`fbsd15-dev`) gets its address from the Rust `sys-firewall` unikernel,
-which takes its lease from `sys-net` (clone of `fbsd15-net`, bridged to
-the dom0's NIC), and `fetch https://www.freebsd.org/` succeeds from
-`work` while `jos firewall` rules are enforced on the way. `jos run`
-answers from FreeBSD's `sh` and Redox's `ion` alike, with exit statuses.
-On the same dom0, a clone created after the guest agent was added to
-`fbsd15-dev` boots as itself (`hostname` = `test`) with the dom0 share
-on `/mnt/jos`, and `jos copy` moved a file and a directory from `work`
-into `test`'s inbox and the agent script from dom0 into the qubes. The
-`debian-13-dev` template was installed there from Debian's `generic`
-image and a clone `web` boots as `web`, takes its address from
-`sys-firewall`, reaches the Internet, runs Docker, and mounts the share.
-With `jos serve` running, `jos-copy` inside `work`, `test` and `web`
-moved files to each other as the policy allowed, was refused where it
-said `deny`, and waited for `jos requests approve` where it said
-nothing. NIC passthrough was exercised in the same nest: `jos-release
-qemu --iommu` gives the dom0 an emulated AMD-Vi (the laptop is a Ryzen)
-and a second NIC; bound to `ppt(4)` and handed to `sys-net` with `--pci`,
-it shows up as `em0` in the qube, takes a DHCP lease, and `work` reaches
-the Internet through `sys-firewall` → `sys-net` → that NIC
-(`docs/gpu-passthrough.md`; it also found that AMD hosts need
-`hw.vmm.amdvi.enable=1`, which the installer and `jos doctor` now cover).
-The agent channel was brought up there as well: `work` and `web` answer
-`jos run` through `jos-agentd` a second after they boot, in a tenth of a
-second per command, 2 MB of output included, and `jos copy` and
-`jos-copy` ride on it. The channel's second port is the qube's doorbell:
-`jos-copy` rings it and `jos serve` answers at once instead of on its
-next poll (0.4 s end to end with the poll set to 60 s; both templates
-updated). The test suite covers 100 % of lines, functions and regions
-in every file, and CI keeps it there: `coverage.toml` allows no file
-any uncovered code.
+### What works, and where it was tried
 
-`jos setup` was then run for real on that dom0 (`--nic` on the
-emulated-IOMMU NIC, no GPU): it built `fbsd15-net`, `sys-net` and
-`sys-firewall` and started them. The bugs it exposed are fixed:
-two supervisors racing to create the same bridge, qubes asking for more
-vCPUs than `vmm` allows (now capped at `hw.vmm.maxcpu` with a note),
-FreeBSD's `nuageinit` dropping the agent files (its `write_files` stops
-at the first missing directory), dry runs writing qube files outside
-`JOS_CONFIG_DIR`, and the firmware watchdog resetting `sys-firewall`
-every five minutes. On top of it `fbsd15-dev` and a clone `work` were
-installed; `work` reaches the Internet through `sys-firewall` →
-`sys-net`, runs Podman, takes `jos copy` from dom0, and `jos stop
---all` powers the agents' qubes off through them, tier by tier.
+| Area | Verified on | Details |
+|------|-------------|---------|
+| Build the ISO from Linux (stage 1) | FreeBSD 15.1 VM under QEMU/KVM, ~10 min | `docs/bootstrap.md` |
+| JuanitOS rebuilds itself (stage 2) | installed dom0, ~5 min, same file list | `docs/bootstrap.md` |
+| Boot chain: `jos-boot.efi`, kernel splash, `jos-splash` | QEMU + OVMF, real hardware | `docs/boot-splash.md` |
+| Graphical installer (keyboard, disks, manual partitions, users) | QEMU, real hardware | `docs/installer.md` |
+| COSMIC desktop with the `jos-greet` login screen | QEMU, VirtualBox, real hardware (Intel GPU) | `docs/relibc-cosmic.md` |
+| bhyve qubes: FreeBSD 15 + Podman, Debian 13 + Docker, Redox | nested in a QEMU dom0 | `docs/templates.md` |
+| Network chain `work` → `sys-firewall` (Rust unikernel) → `sys-net` | nested dom0, `jos firewall` rules enforced | `docs/unikernel-firewall.md` |
+| `jos run`, `jos copy`, `jos-copy` with policy and approval | nested dom0, FreeBSD and Debian qubes | `docs/inter-qube.md` |
+| NIC passthrough to `sys-net` | nested dom0 with an emulated AMD IOMMU | `docs/gpu-passthrough.md` |
+| `jos setup` (first-boot qubes) | nested dom0, no GPU | `docs/architecture.md` |
+| dom0 userland as an OCI image (`jos-release oci`) | podman on FreeBSD, nested in QEMU | `docs/installer.md` |
 
-Stage 2 is done too: the stage-1 ISO was installed headless (`qemu -vga
-none`, text installer on the serial port) and the installed JuanitOS
-rebuilt itself with `jos-release all` in 5.5 minutes, producing an ISO
-stamped `built_on = "juanitos"`, `stage = 2` that boots to the installer.
-The stage-1 and stage-2 dom0 tarballs have the same 128,568 entries and
-differ only in the JuanitOS binaries, `release.toml` and `pkg`'s
-bookkeeping (`docs/bootstrap.md` has the comparison and what it
-uncovered). It was repeated on the nested dom0 with the events-port
-sources, qubes running alongside: 4 min 49 s, `stage = 2`, the stage-1
-file list plus the 13 new source files, after fixing a source copy that
-had shipped that dom0's UEFI build output and a dangling `vendor` link.
+### On real hardware
 
-COSMIC is built from source for the dom0, since FreeBSD has no packages
-for it: `tools/dev/cosmic-build.sh` compiles `pop-os/cosmic-epoch`
-(`epoch-1.10.0`) in the FreeBSD build VM with the systemd/logind
-features off and a handful of portability patches
-(`tools/dev/cosmic-patches/`: Linux-only abstract sockets, pidfd, bluez,
-the stale BSD paths in libcosmic's iced fork, FreeBSD's renamed
-`pw_init`), and packages every component for `pkg`. The compositor,
-session, panel, applets, launcher, settings, terminal, files, editor and
-the rest install into the dom0 root from that repository, which the
-installed system keeps; `jos-greet`, a Rust login screen on the same
-framebuffer stack as the splash and the installer, authenticates with
-PAM on `ttyv8` and starts the session there, and the installer picks the KMS driver for the GPU it finds
-(`docs/relibc-cosmic.md`). `drm-kmod` has none for virtual GPUs, so
-`freebsd/jos_vmsvga` drives the VMware SVGA II device of VirtualBox
-(VMSVGA) and QEMU: `jos-release vbox` installs the ISO, logs in on the
-login screen and checks that the COSMIC panel comes up, rendered in
-software. A GPU that no `drm-kmod` driver drives (too new, missing
-firmware, a failed attach) still gets the desktop: `rc.d/jos-kms` then
-loads `freebsd/jos_efifb`, a KMS driver on the UEFI frame buffer, and
-COSMIC renders in software at the firmware's resolution on one monitor
-(`jos doctor` warns about it). `jos-release oci` turns the dom0 tarball into an OCI image
-(`release/oci/Containerfile`) and checks its userland under podman on
-FreeBSD, nested in QEMU on Linux (`docs/installer.md`); its first run
-found that the dom0 shipped without `pkg`.
+The ISO was installed from Ventoy onto an external disk of a laptop with
+an Intel GPU (`i915kms`). It boots from the firmware's boot picker and
+from rEFInd, logins work, and COSMIC runs well enough to develop
+JuanitOS from JuanitOS (the dom0 ships rust, git, gcc, cmake and
+zellij). The bugs that run found are fixed: keyboard layout at install,
+the login screen after a VT switch, COSMIC's power menu, the shutdown
+splash, and reusing a partition label in manual partitioning.
 
-The ISO has been installed on real hardware: booted from Ventoy, the
-graphical installer put the automatic full-disk layout on a 1.8 TB
-external disk of a laptop with an Intel GPU (`i915kms`). The installed
-system boots from the firmware's boot picker and from rEFInd, logins work
-on `jos-greet` and on the text consoles, and the COSMIC session comes up
-and the desktop works, so JuanitOS can be developed from JuanitOS itself
-with the toolchain the dom0 ships. The run exposed bugs that are fixed
-since: a password with characters outside the `us` keymap could not be
-typed back at login (the installer now has a Keyboard page with a field
-to try the layout, `docs/installer.md`), the login screen came back
-without a mouse and badly redrawn after a VT switch, COSMIC's power menu
-did nothing (the `cosmic-applets` and `cosmic-osd` patches,
-`docs/relibc-cosmic.md`), the kernel's splash said "STARTING" during
-`poweroff` (it now says "SHUTTING DOWN"), and the manual partitioning page refused to recreate a
-deleted partition under the same label. COSMIC's tiling still left the
-windows floating on that laptop; it works in QEMU, and what differs is
-open (`docs/relibc-cosmic.md`).
+### Not yet done
 
-The Redox display problem was traced with an instrumented bhyve: Redox's
-`pcid` sizes PCI BARs through `pci_types` without disabling memory
-decoding first (every other OS, and the PCI specification, do), so the
-32 MiB framebuffer BAR of bhyve's `fbuf` transiently decodes over the
-HPET and bhyve asserts. It is a Redox/`pci_types` bug; the reproducer,
-the trace and the upstream report are in `tools/dev/redox-fbuf/`
-(`docs/templates.md`).
+`docs/hardware-testing.md` is the checklist for hardware runs.
 
-Not yet done (`docs/hardware-testing.md` is the checklist for the
-hardware runs): passthrough on real hardware (the nested run above proves
-the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
-Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
-but has not been booted), a display for Redox qubes (until `pci_types`
-is fixed upstream), `jos setup` on real hardware (the nested run above
-covers it without a GPU), Wi-Fi on real hardware (untested; a USB
-Ethernet adapter is the first network to try), and COSMIC's tiling on
-the laptop above.
+* **COSMIC tiling on the laptop**: windows stay floating there, while
+  tiling works in QEMU (`docs/relibc-cosmic.md`).
+* **Wi-Fi**: untested; a USB Ethernet adapter comes first.
+* **Passthrough on real hardware**: the nested run proves the plumbing,
+  not IOMMU groups, device resets or GPU option ROMs.
+* **`jos setup` on real hardware**.
+* **A display for Redox qubes**: blocked by a Redox `pci_types` bug,
+  reported upstream (`tools/dev/redox-fbuf/`, `docs/templates.md`).
 
 ## License
 
