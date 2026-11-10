@@ -104,6 +104,10 @@ dd-written stick, or Ventoy's normal mode on firmware where it works).
 The ISO boots the same dom0 it installs. `jos-install` runs the `jos doctor`
 host checks (bhyve, IOMMU, kernel modules) on the live medium first, so you
 learn whether the hardware can run JuanitOS before any disk is touched.
+The installed dom0 is also a development machine: it carries this
+repository with its crates vendored (`/usr/local/src/juanitos`) and the
+toolchain to build it offline (rust, git, gcc, gmake, pkgconf, cmake,
+ninja next to the base system's clang and make), plus zellij.
 
 ## Installing
 
@@ -117,7 +121,9 @@ out like Calamares: steps on the left, the current page on the right.
 
 ![installer](docs/images/installer-3-disk.png)
 
-Welcome → **Hardware** (the `jos doctor` checks: VT-x/AMD-V, IOMMU, bhyve
+Welcome → **Keyboard** (the console layout, loaded as you pick it, with
+a field to try it in, so the passwords typed later are what their keys
+say) → **Hardware** (the `jos doctor` checks: VT-x/AMD-V, IOMMU, bhyve
 modules, passthrough devices) → **Disk** (install next to the systems
 already there, erase the disk, or partition it by hand) → **Partitions**
 (only for the last: delete and keep partitions, add EFI, swap and the
