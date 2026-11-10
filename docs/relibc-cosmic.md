@@ -252,9 +252,29 @@ the same session at the firmware's 2560x1600:
 
 ![COSMIC on jos_efifb in QEMU](images/cosmic-efifb.png)
 
-PipeWire is not running (the settings daemon retries it), and neither is
-a COSMIC session on real hardware yet (amd64 with an Intel or AMD GPU that
-`drm-kmod` drives).
+PipeWire is not running (the settings daemon retries it). On real
+hardware (a laptop with an Intel GPU, `i915kms`, installed to an
+external disk) the session comes up and the desktop works; what does
+not yet:
+
+- **Power menu.** Shut down and restart did nothing (logind calls, see
+  the `cosmic-osd` and `cosmic-applets` patches above); the fix is in the
+  patches and takes a rebuild of the two packages, and the user has to
+  be in `operator` (`pw groupmod operator -m <user>` on an existing
+  install; the installer does it now). Until then, log out and use the
+  login screen's Power off (F1) and Reboot (F2).
+- **Tiling.** The tiling applet's "Tile current workspace" and the
+  Tiled/Floating choice for new workspaces leave the windows floating.
+  Not understood yet. The toggle goes to the compositor over the
+  `zcosmic_workspace_handle_v2` protocol and the choice is written to
+  `~/.config/cosmic/com.system76.CosmicComp/v1/autotile`, which
+  `cosmic-comp` watches with the `notify` crate (kqueue on FreeBSD). To
+  tell the two apart: `Super+Y` toggles tiling in the compositor itself;
+  if that tiles but the applet does not, look for "Workspaces
+  subscription failed" in `/var/run/user/<uid>/jos-session.log`; if
+  neither does, check whether the `autotile` file changes and whether
+  logging out and in (the compositor reads its config at start) tiles
+  the windows, which would point at the kqueue watcher.
 
 On the host COSMIC is the *management* UI only: the long-term plan is a
 `jos`-backed applet (qube list, start/stop, colour labels) and
