@@ -248,7 +248,11 @@ did. The login screen also tells the desktop session: it turns the
 keymap into XKB names (`fr` with the `mac` variant, `gb` for `uk`,
 `nodeadkeys` for `noacc`, ...) and exports `XKB_DEFAULT_LAYOUT` and
 `XKB_DEFAULT_VARIANT`, which libxkbcommon reads when the compositor is
-given no layout; a layout set in COSMIC's own settings wins. The text
+given no layout; a layout set in COSMIC's own settings wins. An install
+without a keymap line (a text or unattended install without `--keymap`)
+exports nothing: `sysrc -n keymap` then answers `NO`, rc.conf's word for
+"none", which is not a layout (taken for one, it made `cosmic-comp`
+abort at start). The text
 front end takes `--keymap NAME` instead of asking (a serial console has
 its own keyboard handling).
 

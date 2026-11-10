@@ -267,7 +267,9 @@ not yet:
 - **Power menu.** Shut down and restart did nothing (logind calls, see
   the `cosmic-osd` and `cosmic-applets` patches above). The two packages
   were rebuilt with the patches and the repository the ISO ships carries
-  them since 2026-11-10; the user has to be in `operator`
+  them since 2026-11-10 (in QEMU, the panel's power button, its "Shut
+  down now?" dialog and Confirm power the machine off); the user has to
+  be in `operator`
   (`pw groupmod operator -m <user>` on an existing install; the installer
   does it now). An install made from an earlier ISO keeps the old
   binaries: the version did not change, so `pkg upgrade` sees nothing;
@@ -275,12 +277,20 @@ not yet:
   and `pkg install -f cosmic-applets cosmic-osd`, or reinstall. Until
   then, log out and use the login screen's Power off (F1) and Reboot
   (F2).
-- **Tiling.** The tiling applet's "Tile current workspace" and the
-  Tiled/Floating choice for new workspaces leave the windows floating.
-  Not understood yet. `Super+Y` toggles tiling in the compositor itself
-  (`ToggleTiling` in the default shortcuts); if that tiles, the
-  compositor is fine and the applet's connection to it is the suspect.
-  The applet does not talk to the compositor over the panel's display
+- **Tiling.** On the laptop the tiling applet's "Tile current
+  workspace" and the Tiled/Floating choice for new workspaces left the
+  windows floating. Not reproduced: in QEMU (the `jos_efifb` session
+  above, a fresh account, the same packages) `Super+Y` tiles two
+  terminals and floats them again, the applet's toggle tiles them and
+  writes `autotile` (`true`), and with "Tiled" chosen the two terminals
+  opened on a second workspace are tiled from the start. So the
+  compositor, the applet's privileged socket and the config watcher work
+  on FreeBSD; what differs on the laptop is open. Candidates are state
+  an older session left in `~/.config/cosmic/com.system76.CosmicComp/v1/`
+  and the applet's connection failing there; the log lines below tell
+  which, and `rm -r ~/.config/cosmic/com.system76.CosmicComp` followed by
+  a new login tests the first. How the applet reaches the compositor:
+  it does not talk to it over the panel's display
   but over a second, privileged socket: the panel creates a
   `wp_security_context_v1` listener (the socket file under
   `XDG_RUNTIME_DIR` from the `cosmic-panel` patch), connects to it and
