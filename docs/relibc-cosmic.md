@@ -125,7 +125,14 @@ does not verify after download):
 
 All 26 components of the tag build and package this way (2026-10-15,
 FreeBSD 15.1-RELEASE, rust 1.98.1, about 3 hours on 10 vCPUs for the
-first build; `target/` reaches 45 GB).
+first build; `target/` reaches 45 GB). Rebuilding a few components after
+a patch does not need the whole set: on a fresh VM, `deps`, `fetch`,
+`patch`, then `build` and `package` of `cosmic-applets` and `cosmic-osd`
+took half an hour on 8 vCPUs (2026-11-10, 15 GB of disk). The other
+packages come from the repository the current dom0 tarball carries
+(`tar -xJf juanitos-dom0.txz --strip-components=6
+./usr/local/share/juanitos/pkg`), copied into `repo/` before `package`
+and `repo` so the catalogue lists all 26 again.
 
 `release/juanitos.toml` points `[packages] local_repo` at the copied
 repository and `repo = "latest"` at the package branch the VM built
@@ -258,11 +265,16 @@ external disk) the session comes up and the desktop works; what does
 not yet:
 
 - **Power menu.** Shut down and restart did nothing (logind calls, see
-  the `cosmic-osd` and `cosmic-applets` patches above); the fix is in the
-  patches and takes a rebuild of the two packages, and the user has to
-  be in `operator` (`pw groupmod operator -m <user>` on an existing
-  install; the installer does it now). Until then, log out and use the
-  login screen's Power off (F1) and Reboot (F2).
+  the `cosmic-osd` and `cosmic-applets` patches above). The two packages
+  were rebuilt with the patches and the repository the ISO ships carries
+  them since 2026-11-10; the user has to be in `operator`
+  (`pw groupmod operator -m <user>` on an existing install; the installer
+  does it now). An install made from an earlier ISO keeps the old
+  binaries: the version did not change, so `pkg upgrade` sees nothing;
+  replace `/usr/local/share/juanitos/pkg` with the newer medium's copy
+  and `pkg install -f cosmic-applets cosmic-osd`, or reinstall. Until
+  then, log out and use the login screen's Power off (F1) and Reboot
+  (F2).
 - **Tiling.** The tiling applet's "Tile current workspace" and the
   Tiled/Floating choice for new workspaces leave the windows floating.
   Not understood yet. `Super+Y` toggles tiling in the compositor itself
@@ -286,10 +298,15 @@ not yet:
   round, written to `~/.config/cosmic/com.system76.CosmicComp/v1/autotile`
   and picked up by `cosmic-comp` through the `notify` crate (kqueue on
   FreeBSD): if that file changes but only a new login tiles the
-  windows, the watcher is the problem. Unverified inference from the
-  sources: the listener's close pipe is polled for reading on its write
-  end, which never fires on FreeBSD, so each applet start may leave a
-  `cosmic-panel-sc-*` socket behind; that is a leak, not this bug.
+  windows, the watcher is the problem. Two things that look suspicious
+  in the sources are not it: the compositor polls the listener's close
+  pipe for reading on its write end, which does fire on FreeBSD because
+  its pipes are bidirectional (EOF when the panel drops the other end,
+  the same signal Linux gives as an error event); and a
+  `cosmic-panel-sc-*` socket file is left behind per applet start
+  because the panel takes the stream and listener out of the context
+  right after `commit`, so the patched `Drop` has no path to remove. The
+  leak is harmless.
 
 On the host COSMIC is the *management* UI only: the long-term plan is a
 `jos`-backed applet (qube list, start/stop, colour labels) and
