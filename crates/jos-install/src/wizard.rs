@@ -1140,7 +1140,9 @@ impl Wizard {
                 "User",
                 p.user
                     .as_ref()
-                    .map(|(n, _)| format!("{n} (wheel, video)"))
+                    .map(|(n, _)| {
+                        format!("{n} ({})", crate::install::USER_GROUPS.replace(',', ", "))
+                    })
                     .unwrap_or_else(|| "(none)".into()),
             ),
         ]

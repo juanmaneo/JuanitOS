@@ -116,7 +116,8 @@ does not verify after download):
 | libcosmic (iced fork) | drop a stale BSD-only block with an old winit API, give the BSDs the Linux Wayland code paths; older pinned revisions gate everything Wayland on `target_os = "linux"` and are rewritten wholesale |
 | `cosmic-panel` | abstract unix sockets for the security context are Linux-only; a socket file under `XDG_RUNTIME_DIR` elsewhere |
 | `cosmic-session` | not FreeBSD-specific: it waits forever for the compositor's environment when `cosmic-comp` exits first (no display or GPU), so the greeter never gets the exit status; it now exits with an error |
-| `cosmic-applets` | the bluetooth applet (bluer) is Linux-only |
+| `cosmic-applets` | the bluetooth applet (bluer) is Linux-only; the power applet's own shut down and restart (its fallback when `cosmic-osd` cannot start) run shutdown(8) instead of logind |
+| `cosmic-osd` | the shut down and restart confirmed in its dialog went through logind's `PowerOff`/`Reboot`, which FreeBSD has not, so nothing happened; `shutdown -p now` / `shutdown -r now` instead, which root and the `operator` group may run (the installer puts its user there) |
 | `pop-launcher` | pidfd is Linux-only (tokio's `Child::wait` instead); plugins and config under `/usr/local` |
 | `pipewire`, `pipewire-sys` | FreeBSD renames `pw_init` to `pipewire_init` (libc has a `pw_init`); the bindgen allowlist missed it |
 | `ddc-hi` | its i2c backend is only a dependency on Linux but was enabled on every unix |

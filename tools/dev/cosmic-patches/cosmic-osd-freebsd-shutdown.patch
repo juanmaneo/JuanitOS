@@ -1,0 +1,68 @@
+SPDX-License-Identifier: GPL-3.0-only
+The confirmation dialog's "Shut down" and "Restart" go through logind
+(org.freedesktop.login1.Manager PowerOff/Reboot), which FreeBSD has not:
+the call failed quietly and nothing happened. On FreeBSD run shutdown(8)
+instead, which root and the operator group may (the JuanitOS installer
+puts its user there). Applied to cosmic-osd by tools/dev/cosmic-build.sh
+patch.
+--- a/src/components/app.rs
++++ b/src/components/app.rs
+@@ -38,6 +38,7 @@
+ use cosmic_settings_upower_subscription::kbdbacklight::{
+     KeyboardBacklightUpdate, kbd_backlight_subscription,
+ };
++#[cfg(not(target_os = "freebsd"))]
+ use logind_zbus::manager::ManagerProxy;
+ use serde::{Deserialize, Serialize};
+ use std::cell::RefCell;
+@@ -132,6 +133,7 @@
+     variant: String,
+ }
+ 
++#[cfg(not(target_os = "freebsd"))]
+ async fn restart(reboot_to_firmware_setup: bool) -> zbus::Result<()> {
+     let connection = Connection::system().await?;
+     let manager_proxy = ManagerProxy::new(&connection).await?;
+@@ -141,12 +143,42 @@
+     manager_proxy.reboot(true).await
+ }
+ 
++#[cfg(not(target_os = "freebsd"))]
+ async fn shutdown() -> zbus::Result<()> {
+     let connection = Connection::system().await?;
+     let manager_proxy = ManagerProxy::new(&connection).await?;
+     manager_proxy.power_off(true).await
+ }
+ 
++// FreeBSD has no logind: shutdown(8) powers off and reboots, for root and
++// the operator group (the JuanitOS installer puts its user there).
++#[cfg(target_os = "freebsd")]
++async fn restart(_reboot_to_firmware_setup: bool) -> zbus::Result<()> {
++    freebsd_shutdown("-r").await
++}
++
++#[cfg(target_os = "freebsd")]
++async fn shutdown() -> zbus::Result<()> {
++    freebsd_shutdown("-p").await
++}
++
++#[cfg(target_os = "freebsd")]
++async fn freebsd_shutdown(how: &str) -> zbus::Result<()> {
++    let status = tokio::process::Command::new("/sbin/shutdown")
++        .arg(how)
++        .arg("now")
++        .status()
++        .await
++        .map_err(|e| zbus::Error::Failure(format!("shutdown {how} now: {e}")))?;
++    if status.success() {
++        Ok(())
++    } else {
++        Err(zbus::Error::Failure(format!(
++            "shutdown {how} now exited with {status}"
++        )))
++    }
++}
++
+ async fn log_out() -> zbus::Result<()> {
+     let session_type = std::env::var("XDG_CURRENT_DESKTOP").ok();
+     let connection = Connection::session().await?;

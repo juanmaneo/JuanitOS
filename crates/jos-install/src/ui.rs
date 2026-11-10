@@ -995,7 +995,7 @@ fn users(c: &mut Canvas, w: &Wizard) {
         col2,
         BODY_Y + 180,
         "User name (optional)",
-        "groups wheel, video",
+        "groups wheel, video, operator",
     );
     field(c, w, Widget::UserPw, col2, BODY_Y + 260, "Password", "");
     field(c, w, Widget::UserPw2, col2, BODY_Y + 340, "Repeat", "");

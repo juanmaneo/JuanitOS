@@ -113,7 +113,8 @@ struct Cli {
     #[arg(long)]
     root_password: Option<String>,
 
-    /// First user (member of wheel/video); password via --user-password.
+    /// First user (member of wheel, video and operator); password via
+    /// --user-password.
     #[arg(long)]
     user: Option<String>,
 

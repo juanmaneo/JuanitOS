@@ -286,6 +286,12 @@ impl InstallPlan {
     }
 }
 
+/// Groups of the first user: `wheel` for su(1) and doas, `video` for the
+/// compositor's KMS and render nodes, `operator` so that shutdown(8)
+/// works from the desktop (the COSMIC power menu runs it on FreeBSD,
+/// which has no logind).
+pub const USER_GROUPS: &str = "wheel,video,operator";
+
 /// Datasets created under the pool, after FreeBSD's `zfsboot` layout.
 /// `(name, properties)`; `ROOT/default` is handled separately.
 pub const DATASETS: &[(&str, &[&str])] = &[
@@ -743,7 +749,7 @@ impl<'a> Installer<'a> {
                     name,
                     "-m",
                     "-G",
-                    "wheel,video",
+                    USER_GROUPS,
                     "-s",
                     "/bin/sh",
                     "-h",
@@ -1131,7 +1137,7 @@ mod tests {
         assert_eq!(calls[0], "chroot /mnt pw usermod root -h 0");
         assert_eq!(
             calls[1],
-            "chroot /mnt pw useradd alice -m -G wheel,video -s /bin/sh -h 0"
+            "chroot /mnt pw useradd alice -m -G wheel,video,operator -s /bin/sh -h 0"
         );
         // The password itself never shows up in argv.
         assert!(calls.iter().all(|c| !c.contains("secret")));

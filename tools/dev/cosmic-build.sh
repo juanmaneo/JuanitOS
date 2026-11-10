@@ -243,11 +243,14 @@ cmd_patch() {
 		fi
 	done
 	# Source patches (tools/dev/cosmic-patches, kept next to this script):
-	# Linux-only APIs with a portable alternative.
+	# Linux-only APIs with a portable alternative, and logind's power
+	# calls replaced by shutdown(8) (root and the operator group).
 	patches=$here/cosmic-patches
 	apply_patch "$src/cosmic-panel" "$patches/cosmic-panel-freebsd-security-context.patch"
 	apply_patch "$src/cosmic-session" "$patches/cosmic-session-exit-before-ready.patch"
 	apply_patch "$src/cosmic-applets" "$patches/cosmic-applets-freebsd-no-bluetooth.patch"
+	apply_patch "$src/cosmic-applets" "$patches/cosmic-applets-freebsd-shutdown.patch"
+	apply_patch "$src/cosmic-osd" "$patches/cosmic-osd-freebsd-shutdown.patch"
 	apply_patch "$src/pop-launcher" "$patches/pop-launcher-freebsd-no-pidfd.patch"
 	for d in "$HOME"/.cargo/registry/src/*/pipewire-0.10.*; do
 		[ -f "$d/src/lib.rs" ] && apply_patch "$d" "$patches/pipewire-0.10-freebsd-init.patch"
@@ -296,7 +299,7 @@ cmd_patch() {
 	done
 	# cargo trusts registry and git sources not to change: forget what it
 	# built from the patched crates so they are compiled again.
-	for crate in fontdb libdisplay-info-sys pipewire pipewire-sys iced_core iced_winit pop-launcher pop-launcher-plugins cosmic-applets nix ddc-hi; do
+	for crate in fontdb libdisplay-info-sys pipewire pipewire-sys iced_core iced_winit pop-launcher pop-launcher-plugins cosmic-applets cosmic-applet-power cosmic-osd nix ddc-hi; do
 		rm -rf "$work/target/release/.fingerprint/$crate-"*
 	done
 }

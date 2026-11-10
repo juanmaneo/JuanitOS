@@ -1,0 +1,58 @@
+SPDX-License-Identifier: GPL-3.0-only
+The power applet asks cosmic-osd to confirm and shut down or restart,
+and does it itself through logind when cosmic-osd cannot be started.
+FreeBSD has no logind: run shutdown(8) there, as the cosmic-osd patch
+does, so both paths work for root and the operator group. Applied to
+cosmic-applets by tools/dev/cosmic-build.sh patch.
+--- a/cosmic-applet-power/src/lib.rs
++++ b/cosmic-applet-power/src/lib.rs
+@@ -320,18 +320,49 @@
+ 
+ // ### System helpers
+ 
++#[cfg(not(target_os = "freebsd"))]
+ async fn restart() -> zbus::Result<()> {
+     let connection = Connection::system().await?;
+     let manager_proxy = ManagerProxy::new(&connection).await?;
+     manager_proxy.reboot(true).await
+ }
+ 
++#[cfg(not(target_os = "freebsd"))]
+ async fn shutdown() -> zbus::Result<()> {
+     let connection = Connection::system().await?;
+     let manager_proxy = ManagerProxy::new(&connection).await?;
+     manager_proxy.power_off(true).await
+ }
+ 
++// FreeBSD has no logind: shutdown(8) powers off and reboots, for root and
++// the operator group (the JuanitOS installer puts its user there).
++#[cfg(target_os = "freebsd")]
++async fn restart() -> zbus::Result<()> {
++    freebsd_shutdown("-r").await
++}
++
++#[cfg(target_os = "freebsd")]
++async fn shutdown() -> zbus::Result<()> {
++    freebsd_shutdown("-p").await
++}
++
++#[cfg(target_os = "freebsd")]
++async fn freebsd_shutdown(how: &str) -> zbus::Result<()> {
++    let status = process::Command::new("/sbin/shutdown")
++        .arg(how)
++        .arg("now")
++        .status()
++        .await
++        .map_err(|e| zbus::Error::Failure(format!("shutdown {how} now: {e}")))?;
++    if status.success() {
++        Ok(())
++    } else {
++        Err(zbus::Error::Failure(format!(
++            "shutdown {how} now exited with {status}"
++        )))
++    }
++}
++
+ async fn suspend() -> zbus::Result<()> {
+     let connection = Connection::system().await?;
+     let manager_proxy = ManagerProxy::new(&connection).await?;
