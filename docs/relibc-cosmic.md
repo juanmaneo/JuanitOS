@@ -265,16 +265,31 @@ not yet:
   login screen's Power off (F1) and Reboot (F2).
 - **Tiling.** The tiling applet's "Tile current workspace" and the
   Tiled/Floating choice for new workspaces leave the windows floating.
-  Not understood yet. The toggle goes to the compositor over the
-  `zcosmic_workspace_handle_v2` protocol and the choice is written to
-  `~/.config/cosmic/com.system76.CosmicComp/v1/autotile`, which
-  `cosmic-comp` watches with the `notify` crate (kqueue on FreeBSD). To
-  tell the two apart: `Super+Y` toggles tiling in the compositor itself;
-  if that tiles but the applet does not, look for "Workspaces
-  subscription failed" in `/var/run/user/<uid>/jos-session.log`; if
-  neither does, check whether the `autotile` file changes and whether
-  logging out and in (the compositor reads its config at start) tiles
-  the windows, which would point at the kqueue watcher.
+  Not understood yet. `Super+Y` toggles tiling in the compositor itself
+  (`ToggleTiling` in the default shortcuts); if that tiles, the
+  compositor is fine and the applet's connection to it is the suspect.
+  The applet does not talk to the compositor over the panel's display
+  but over a second, privileged socket: the panel creates a
+  `wp_security_context_v1` listener (the socket file under
+  `XDG_RUNTIME_DIR` from the `cosmic-panel` patch), connects to it and
+  passes that connection as `X_PRIVILEGED_WAYLAND_SOCKET`. Only a client
+  on that socket sees the `ext_workspace_manager_v1` /
+  `zcosmic_workspace_manager_v2` globals the toggle needs. When the
+  listener cannot be made, the applet falls back to `WAYLAND_SOCKET`,
+  the panel's own embedded display, which has no workspace globals: the
+  toggle then flips in the menu and nothing happens, without a message.
+  So look in `/var/run/user/<uid>/jos-session.log` for "Failed to
+  initialize security context manager" or "Failed to create a listener"
+  (panel side), and for "Workspaces subscription failed" (applet side:
+  its workspace thread died, for example because the compositor never
+  accepted the connection). The new-workspace choice goes the other way
+  round, written to `~/.config/cosmic/com.system76.CosmicComp/v1/autotile`
+  and picked up by `cosmic-comp` through the `notify` crate (kqueue on
+  FreeBSD): if that file changes but only a new login tiles the
+  windows, the watcher is the problem. Unverified inference from the
+  sources: the listener's close pipe is polled for reading on its write
+  end, which never fires on FreeBSD, so each applet start may leave a
+  `cosmic-panel-sc-*` socket behind; that is a leak, not this bug.
 
 On the host COSMIC is the *management* UI only: the long-term plan is a
 `jos`-backed applet (qube list, start/stop, colour labels) and
