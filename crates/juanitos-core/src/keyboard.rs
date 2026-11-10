@@ -133,7 +133,9 @@ pub fn xkb_for(keymap: &str) -> Option<Xkb> {
         "latinamerican" => ("latam", ""),
         "ch-fr" => ("ch", "fr"),
         "ca-fr" => ("ca", ""),
+        "ca-multi" => ("ca", "multix"),
         "colemak" => ("us", "colemak"),
+        "colemak-dh" => ("us", "colemak_dh"),
         base => (base, ""),
     };
     for part in parts {
@@ -145,7 +147,7 @@ pub fn xkb_for(keymap: &str) -> Option<Xkb> {
             "macbook" if layout == "ch" => "de_mac",
             "macbook" => "mac",
             "noacc" => "nodeadkeys",
-            "phonetic" | "bds" | "f" | "colemak" => part,
+            "phonetic" | "bds" | "f" | "bepo" | "intl" => part,
             "win" => "winkeys",
             _ => continue,
         };
@@ -181,13 +183,13 @@ br.kbd:en:Brazilian (accent keys)
 br.kbd:pt,pt_BR:Brasileiro (com acentos)
 fr.kbd:en:French
 fr.kbd:fr:Français
-fr.macbook.kbd:en:French Macbook/Macbook Pro (accent keys)
-fr.dvorak.kbd:en:French Dvorak
+fr.macbook.kbd:en:French (MacBook/MacBook Pro) (accent keys)
+fr.dvorak.kbd:en:French Dvorak-like
 uk.kbd:en:United Kingdom
 us.kbd:en:United States of America
 us.kbd:de:US-amerikanisch
-us.dvorak.kbd:en:United States of America Dvorak
-us.macbook.kbd:en:United States of America Macbook (ISO)
+us.dvorak.kbd:en:United States of America dvorak
+us.macbook.kbd:en:United States of America (MacBook/MacBook Pro) ISO-8859-1
 fr.kbd::French again
 malformed line
 nofile:en:no keymap file
@@ -204,12 +206,12 @@ nofile:en:no keymap file
                 "be.acc",
                 "br",
                 "fr",
-                "fr.dvorak",
                 "fr.macbook",
+                "fr.dvorak",
                 "uk",
                 "us",
-                "us.dvorak",
-                "us.macbook"
+                "us.macbook",
+                "us.dvorak"
             ]
         );
         let fr = maps.iter().find(|m| m.name == "fr").unwrap();
@@ -272,7 +274,12 @@ nofile:en:no keymap file
         assert_eq!(xkb_for("us.dvorakl"), xkb("us", "dvorak-l"));
         assert_eq!(xkb_for("us.dvorakr"), xkb("us", "dvorak-r"));
         assert_eq!(xkb_for("us.dvorakp"), xkb("us", "dvp"));
-        assert_eq!(xkb_for("colemak"), xkb("us", "colemak"));
+        assert_eq!(xkb_for("colemak.acc"), xkb("us", "colemak"));
+        assert_eq!(xkb_for("colemak-dh.acc"), xkb("us", "colemak_dh"));
+        assert_eq!(xkb_for("ca-multi"), xkb("ca", "multix"));
+        assert_eq!(xkb_for("fr.bepo"), xkb("fr", "bepo"));
+        assert_eq!(xkb_for("us.intl.acc"), xkb("us", "intl"));
+        assert_eq!(xkb_for("us.dvorakx"), xkb("us", "dvorak"));
         assert_eq!(xkb_for("latinamerican.acc"), xkb("latam", ""));
         assert_eq!(xkb_for("bg.phonetic"), xkb("bg", "phonetic"));
         assert_eq!(xkb_for("tr.f"), xkb("tr", "f"));
