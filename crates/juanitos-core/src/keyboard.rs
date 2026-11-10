@@ -124,7 +124,15 @@ impl Xkb {
 /// counterpart: the keymap's first dotted component names the country,
 /// the others its flavour. Accent ("acc") keymaps are the plain XKB
 /// layouts, which have dead keys; "noacc" is `nodeadkeys`.
+///
+/// `NO` is no keymap at all: it is `rc.conf`'s default (`sysrc -n keymap`
+/// answers it when nothing sets one, and `rc.d/syscons` skips it), not
+/// the Norwegian layout, which is the lower-case `no`. An XKB layout
+/// that does not exist makes the compositor give up at start.
 pub fn xkb_for(keymap: &str) -> Option<Xkb> {
+    if keymap == "NO" {
+        return None;
+    }
     let name = keymap.strip_suffix(".kbd").unwrap_or(keymap);
     let mut parts = name.split('.');
     let (layout, mut variant) = match parts.next().unwrap_or("") {
@@ -287,6 +295,10 @@ nofile:en:no keymap file
         assert_eq!(xkb_for("centraleuropean.qwerty"), None);
         assert_eq!(xkb_for("nordic.asus-eee"), None);
         assert_eq!(xkb_for(""), None);
+        // rc.conf's "unset" is not Norwegian.
+        assert_eq!(xkb_for("NO"), None);
+        assert_eq!(xkb_for("no"), xkb("no", ""));
+        assert_eq!(xkb_for("no.dvorak"), xkb("no", "dvorak"));
     }
 
     #[test]

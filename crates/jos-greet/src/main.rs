@@ -227,6 +227,8 @@ mod tests {
             None
         );
         assert_eq!(console_xkb(&sysrc(CmdOutput::ok("\n"))), None);
+        // Nothing sets a keymap: sysrc answers rc.conf's default.
+        assert_eq!(console_xkb(&sysrc(CmdOutput::ok("NO\n"))), None);
         assert_eq!(
             console_xkb(&sysrc(CmdOutput::ok("nordic.asus-eee\n"))),
             None
