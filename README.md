@@ -2,7 +2,7 @@
 # JuanitOS
 
 [![CI](https://github.com/juanmaneo/JuanitOS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/juanmaneo/JuanitOS/actions/workflows/ci.yml)
-[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](#license)
 
 A FreeBSD distribution with bhyve aiming at beeing like QubesOS for FreeBSD
 
@@ -505,22 +505,53 @@ the laptop above.
 
 ## License
 
-JuanitOS is under the BSD 3-Clause license (`LICENSE`), like much of
-FreeBSD's ecosystem and compatible with every project it draws on.
-`THIRD_PARTY.md` lists the vendored code (`freebsd/geom_ventoy`,
-BSD-2-Clause), the one directory under another license (`freebsd/grub`,
-a GRUB module and so GPL-3.0-or-later; nothing else links against it),
-the Rust dependencies' licenses, the projects that inspired the design
-(ideas only, no code taken), and what publishing a built ISO requires
-(sources for the GPL-3.0 COSMIC packages it ships).
+Licensed under the BSD 3-Clause license ([LICENSE](LICENSE) or
+<https://opensource.org/licenses/BSD-3-Clause>), like much of FreeBSD's
+ecosystem. The copyright holders are Juanito (Juan Manuel CABA
+GONZALEZ-NICOLAS) and the contributors listed in [AUTHORS](AUTHORS).
+
+A few files in the repository are not covered by that license and keep
+their own:
+
+* `freebsd/geom_ventoy/`: vendored from Ventoy, BSD-2-Clause (the
+  original file headers are kept).
+* `crates/jos-gfx/fonts/OpenSans-Regular.ttf`: the Open Sans font, SIL
+  Open Font License 1.1, see
+  [OFL.txt](crates/jos-gfx/fonts/OFL.txt).
+* `freebsd/grub/`: a GRUB module, so GPL-3.0-or-later. Nothing else in
+  JuanitOS links against it.
+* `tools/dev/cosmic-patches/*.patch`: patches to other projects, under
+  the license of the project they patch (GPL-3.0-only for COSMIC, MIT for
+  pipewire-rs), named on each patch's first line.
+
+[THIRD_PARTY.md](THIRD_PARTY.md) has the details, the licenses of the
+Rust dependencies, and the projects that inspired the design (ideas
+only, no code taken).
+
+### Built images
+
+The ISO and the dom0 tarball also ship third-party binaries under their
+own licenses: the FreeBSD base system (BSD-2-Clause), FreeBSD packages
+(several of them GPL, such as git and gcc) and the COSMIC desktop
+(GPL-3.0). Publishing a built ISO therefore means publishing the sources
+of the GPL parts it ships; [THIRD_PARTY.md](THIRD_PARTY.md#built-images-iso-dom0-tarball)
+says what that takes.
+
+### License headers
+
 Every file names its license with an `SPDX-License-Identifier:` comment
 in its first lines (line 2 after a `#!` or `#cloud-config` line). The
 files that cannot carry a comment (images, the font, lockfiles, vendored
 files kept as upstream has them) are listed in `REUSE.toml`, in the
 [REUSE](https://reuse.software) format. `cargo xtask lint` checks
-both, and only accepts the licenses `THIRD_PARTY.md` accounts for. The
-license texts are `LICENSE` and those referenced in `THIRD_PARTY.md`.
+both, and only accepts the licenses `THIRD_PARTY.md` accounts for.
 There is no `LICENSES/` directory, so `reuse lint` itself would still
 ask for one.
-`AUTHORS` names the copyright holders: Juanito (Juan Manuel CABA
-GONZALEZ-NICOLAS) and the contributors.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in JuanitOS by you shall be licensed under the
+BSD 3-Clause license as above, without any additional terms or
+conditions. Add yourself to [AUTHORS](AUTHORS) in the change that brings
+your first contribution.
