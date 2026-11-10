@@ -467,6 +467,24 @@ COSMIC renders in software at the firmware's resolution on one monitor
 FreeBSD, nested in QEMU on Linux (`docs/installer.md`); its first run
 found that the dom0 shipped without `pkg`.
 
+The ISO has been installed on real hardware: booted from Ventoy, the
+graphical installer put the automatic full-disk layout on a 1.8 TB
+external disk of a laptop with an Intel GPU (`i915kms`). The installed
+system boots from the firmware's boot picker and from rEFInd, logins work
+on `jos-greet` and on the text consoles, and the COSMIC session comes up
+and the desktop works, so JuanitOS can be developed from JuanitOS itself
+with the toolchain the dom0 ships. The run exposed bugs that are fixed
+since: a password with characters outside the `us` keymap could not be
+typed back at login (the installer now has a Keyboard page with a field
+to try the layout, `docs/installer.md`), the login screen came back
+without a mouse and badly redrawn after a VT switch, COSMIC's power menu
+did nothing (the `cosmic-applets` and `cosmic-osd` patches,
+`docs/relibc-cosmic.md`), the kernel's splash said "STARTING" during
+`poweroff` (it now says "SHUTTING DOWN"), and the manual partitioning page refused to recreate a
+deleted partition under the same label. COSMIC's tiling still left the
+windows floating on that laptop; it works in QEMU, and what differs is
+open (`docs/relibc-cosmic.md`).
+
 The Redox display problem was traced with an instrumented bhyve: Redox's
 `pcid` sizes PCI BARs through `pci_types` without disabling memory
 decoding first (every other OS, and the PCI specification, do), so the
@@ -480,9 +498,10 @@ hardware runs): passthrough on real hardware (the nested run above proves
 the plumbing, not IOMMU groups, device resets or GPU option ROMs; the
 Intel vIOMMU recipe of `jos-release qemu --iommu` follows the vmm source
 but has not been booted), a display for Redox qubes (until `pci_types`
-is fixed upstream), a COSMIC session on real hardware (it runs in
-VirtualBox on `freebsd/jos_vmsvga`, rendered in software), and `jos setup` on
-real hardware (the nested run above covers it without a GPU).
+is fixed upstream), `jos setup` on real hardware (the nested run above
+covers it without a GPU), Wi-Fi on real hardware (untested; a USB
+Ethernet adapter is the first network to try), and COSMIC's tiling on
+the laptop above.
 
 ## License
 
