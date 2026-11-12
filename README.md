@@ -385,16 +385,15 @@ The ISO was installed from Ventoy onto an external disk of a laptop with
 an Intel GPU (`i915kms`). It boots from the firmware's boot picker and
 from rEFInd, logins work, and COSMIC runs well enough to develop
 JuanitOS from JuanitOS (the dom0 ships rust, git, gcc, cmake and
-zellij). The bugs that run found are fixed: keyboard layout at install,
-the login screen after a VT switch, COSMIC's power menu, the shutdown
-splash, and reusing a partition label in manual partitioning.
+zellij), including COSMIC's tiling mode. The bugs that run found are
+fixed: keyboard layout at install, the login screen after a VT switch,
+COSMIC's power menu, the shutdown splash, and reusing a partition label
+in manual partitioning.
 
 ### Not yet done
 
 `docs/hardware-testing.md` is the checklist for hardware runs.
 
-* **COSMIC tiling on the laptop**: windows stay floating there, while
-  tiling works in QEMU (`docs/relibc-cosmic.md`).
 * **Wi-Fi**: untested; a USB Ethernet adapter comes first.
 * **Passthrough on real hardware**: the nested run proves the plumbing,
   not IOMMU groups, device resets or GPU option ROMs.
