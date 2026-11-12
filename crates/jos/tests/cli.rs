@@ -1464,19 +1464,76 @@ fn copy_moves_files_through_the_share_for_real() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no such file or directory on dom0"));
 }
 
+/// The template images the install media ships, in the sandbox's cache
+/// (`cache_dir = "cache"`): `fbsd15-net`, `fbsd15-dev` and
+/// `debian-13-dev`, whose image is the bytes `image`. Corrupted when
+/// `valid` is false.
+#[cfg(unix)]
+fn ship_images(e: &Env, valid: bool) {
+    let images = e.dir.join("cache/images");
+    std::fs::create_dir_all(&images).unwrap();
+    let (sha256, sha512) = match valid {
+        true => (
+            "6105d6cc76af400325e94d588ce511be5bfdbb73b437dc51eca43917d7a43e3d",
+            "eb31d04da633dc9f49dfbd66cdb92fbb9b4f9c9be67914c0209b5dd31cc65a136e1cdce7d0db88112e3a759\
+             131b9d970cfaac7ee77ccd620c3dd49043f88958e",
+        ),
+        false => ("00", "00"),
+    };
+    let fbsd = "FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.raw.xz";
+    let debian = "debian-13-generic-amd64.tar.xz";
+    for file in [fbsd, debian] {
+        std::fs::write(images.join(file), b"image").unwrap();
+    }
+    // Both FreeBSD recipes boot the same image.
+    for recipe in ["fbsd15-net", "fbsd15-dev"] {
+        std::fs::write(
+            images.join(format!("{recipe}.checksums")),
+            format!("SHA256 ({fbsd}) = {sha256}\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        images.join("debian-13-dev.checksums"),
+        format!("{sha512}  {debian}\n"),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
 #[test]
 fn setup_creates_the_system_qubes_and_resumes() {
     let e = Env::new("setup");
+    let cfg = sandbox_config(&e, &[("cache_dir", "cache"), ("run_dir", "run")]);
+    let empty = e.dir.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+    let jos = |args: &[&str]| jos_on(&e, &cfg, &empty, true, args);
+    let ok = |args: &[&str]| {
+        let out = jos(args);
+        assert!(out.status.success(), "jos {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let err = |args: &[&str]| {
+        let out = jos(args);
+        assert!(!out.status.success(), "jos {args:?} succeeded");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
     // A dev box has no FreeBSD default route to download through.
-    let err = e.err(&["setup"]);
-    assert!(err.contains("--uplink IFACE"), "{err}");
-    assert!(e
-        .err(&["setup", "--uplink", "em0", "--firewall-image", "/no/fw.img"])
-        .contains("no such firewall image"));
+    assert!(err(&["setup"]).contains("--uplink IFACE"));
+    assert!(err(&["setup", "--firewall-image", "/no/fw.img"]).contains("no such firewall image"));
+    // The dom0 has no network of its own: without the image on the
+    // media, only a card to bridge is no use.
+    let no_image = err(&["setup", "--uplink", "em0"]);
+    assert!(
+        no_image.contains("no local image of fbsd15-net"),
+        "{no_image}"
+    );
+    assert!(no_image.contains("--image FILE --checksums FILE"));
 
+    ship_images(&e, true);
     let img = e.dir.join("fw.img");
     std::fs::write(&img, b"esp").unwrap();
-    let out = e.ok(&[
+    let out = ok(&[
         "setup",
         "--uplink",
         "em0",
@@ -1485,16 +1542,22 @@ fn setup_creates_the_system_qubes_and_resumes() {
     ]);
     assert!(out.contains("initialized datasets"), "{out}");
     assert!(
-        out.contains(" 1. install template fbsd15-net (downloading through em0)"),
+        out.contains(" 1. install template fbsd15-net (provisioned bridged to em0)"),
         "{out}"
     );
     assert!(out.contains(
         " 2. create sys-net (net qube, freebsd, from fbsd15-net, bridged to em0, autostart)"
     ));
     assert!(out.contains(" 3. create sys-firewall (firewall qube, unikernel, booting "));
+    assert!(out.contains(" 4. start sys-net") && out.contains(" 5. start sys-firewall"));
+    assert!(
+        out.contains("==> [1/5] install template fbsd15-net"),
+        "{out}"
+    );
+    assert!(out.contains("==> [5/5] start sys-firewall"), "{out}");
     assert!(out.contains("- no gpu qube: no NVIDIA card is reserved"));
     assert!(out.contains("created sys-net") && out.contains("created sys-firewall"));
-    assert!(out.contains("ready: `jos autostart`"));
+    assert!(out.contains("ready: sys-net and sys-firewall start at every boot"));
     for q in ["fbsd15-net", "sys-net", "sys-firewall"] {
         assert!(e.qube_file(q).is_file(), "{q}");
     }
@@ -1504,7 +1567,7 @@ fn setup_creates_the_system_qubes_and_resumes() {
     assert!(fw.contains("netvm = \"sys-net\"") && fw.contains("os = \"unikernel\""));
 
     // Again, without any uplink: everything is there.
-    let again = e.ok(&["setup", "--no-gpu"]);
+    let again = ok(&["setup", "--no-gpu"]);
     assert!(again.contains("- sys-net exists"), "{again}");
     assert!(again.contains("- no gpu qube (--no-gpu)"));
     assert!(again.contains("nothing to do"));
@@ -1684,10 +1747,15 @@ esac"#,
     // sys-net, the reserved NVIDIA card to gpu; the NIC is reserved last.
     let out = ok(&["setup"]);
     assert!(
-        out.contains(" 1. install template fbsd15-net (downloading through em0)"),
+        out.contains(" 1. install template fbsd15-net (provisioned bridged to em0)"),
         "{out}"
     );
-    assert!(out.contains("install template debian-13-dev"), "{out}");
+    // sys-net's card goes to the qube at the next boot, so the gpu's
+    // template still comes through the bridge.
+    assert!(
+        out.contains("install template debian-13-dev (provisioned bridged to em0)"),
+        "{out}"
+    );
     assert!(out.contains("created sys-net") && out.contains("created gpu"));
     assert!(
         out.contains("+ sysrc -f /boot/loader.conf 'pptdevs=1/0/0 1/0/1 5/0/0'"),
@@ -2292,7 +2360,8 @@ fn host_tools_failing() {
 #[test]
 fn setup_failures() {
     let e = Env::new("setup-fail");
-    let cfg = sandbox_config(&e, &[("run_dir", "run")]);
+    let cfg = sandbox_config(&e, &[("run_dir", "run"), ("cache_dir", "cache")]);
+    ship_images(&e, true);
     let tools = |sysrc: &'static str, sysctl: &'static str| {
         fake_host(
             &e,
@@ -2315,8 +2384,8 @@ fn setup_failures() {
         String::from_utf8_lossy(&out.stderr).contains("16 vCPUs"),
         "{out:?}"
     );
-    // For real, the first step (a template download) fails: no fetch(1)
-    // or curl(1) on this host.
+    // For real, the first step fails: the image on the media is corrupt.
+    ship_images(&e, false);
     let bin = fake_host(
         &e,
         &[
@@ -2329,7 +2398,126 @@ fn setup_failures() {
     let out = jos_on(&e, &cfg, &bin, false, &["setup", "--uplink", "em0"]);
     assert!(!out.status.success(), "{out:?}");
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("1. install template"),
+        String::from_utf8_lossy(&out.stdout).contains("==> [1/"),
+        "{out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"),
+        "{out:?}"
+    );
+}
+
+/// A qube set up first, then the templates built through it: `jos setup`
+/// starts `sys-net`, waits until it reaches the network, and only then
+/// provisions the app qubes' template through it.
+#[cfg(unix)]
+#[test]
+fn setup_builds_the_apps_through_sys_net() {
+    // sys-net and sys-firewall exist (bridged or with their card
+    // reserved); the dom0 has no route and no address.
+    let sandbox = |tag: &str| {
+        let e = Env::new(tag);
+        e.ok(&["init"]);
+        e.ok(&[
+            "create",
+            "fbsd15-net",
+            "--kind",
+            "template",
+            "--os",
+            "freebsd",
+        ]);
+        for (name, kind, extra) in [
+            ("sys-net", "net", &[][..]),
+            ("sys-firewall", "firewall", &["--netvm", "sys-net"][..]),
+        ] {
+            let mut args = vec!["create", name, "--kind", kind, "--os", "freebsd"];
+            args.extend(["--template", "fbsd15-net", "--autostart"]);
+            args.extend(extra);
+            e.ok(&args);
+        }
+        e
+    };
+    let apps = [
+        "setup",
+        "--no-gpu",
+        "--app",
+        "work",
+        "--app",
+        "vault:offline",
+    ];
+
+    // The plan, as a dry run prints it.
+    let e = sandbox("setup-chain-dry");
+    let cfg = sandbox_config(&e, &[("cache_dir", "cache"), ("run_dir", "run")]);
+    ship_images(&e, true);
+    let empty = e.dir.join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+    let out = jos_on(&e, &cfg, &empty, true, &apps);
+    assert!(out.status.success(), "{out:?}");
+    let out = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        " 1. start sys-net",
+        " 2. wait for sys-net to reach the network",
+        " 3. install template fbsd15-dev (provisioned through sys-net)",
+        " 4. create work (app qube, freebsd, from fbsd15-dev)",
+        " 5. create vault (app qube, freebsd, from fbsd15-dev, offline)",
+        " 6. start sys-firewall",
+        "+ in sys-net, every 5s for up to 180s: fetch -q -o /dev/null -T 5 https://download.freebsd.org/",
+        "==> [3/6] install template fbsd15-dev",
+    ] {
+        assert!(out.contains(line), "{line}\n{out}");
+    }
+    assert!(out.contains("br-sys-net"), "{out}");
+
+    // For real, the card never gets a link.
+    let e = sandbox("setup-chain");
+    let cfg = sandbox_config(
+        &e,
+        &[
+            ("cache_dir", "cache"),
+            ("run_dir", "run"),
+            ("vmm_dir", "vmm"),
+        ],
+    );
+    ship_images(&e, false);
+    let bin = fake_host(
+        &e,
+        &[
+            ("pciconf", PCICONF),
+            ("sysrc", "exit 1"),
+            ("sysctl", "exit 1"),
+            ("zfs", "exit 0"),
+        ],
+    );
+    let mut timeout_0 = apps.to_vec();
+    timeout_0.extend(["--network-timeout", "0"]);
+    let out = jos_on(&e, &cfg, &bin, false, &timeout_0);
+    assert!(!out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("started sys-net (supervisor pid "),
+        "{out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sys-net did not reach the network within 0s"),
+        "{stderr}"
+    );
+    assert!(!e.qube_file("work").exists());
+
+    // sys-net runs already, and answers: the build starts (and stops at
+    // the corrupt image).
+    std::fs::write(e.dir.join("vmm/sys-net"), "").unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(e.dir.join("run/sys-net.agent")).unwrap();
+    let agent = fake_agent_raw(listener, true, |id, _| format!("ok\nEND {id} 0\n"));
+    let out = jos_on(&e, &cfg, &bin, false, &apps);
+    let seen = agent.join().unwrap();
+    assert!(seen.contains("fetch -q -o /dev/null -T 5"), "{seen}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("sys-net is already running"), "{stdout}");
+    assert!(stdout.contains("sys-net reaches the network"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"),
         "{out:?}"
     );
 }

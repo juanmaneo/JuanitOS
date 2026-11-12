@@ -16,6 +16,7 @@ pub mod error;
 pub mod events;
 pub mod firewall;
 pub mod fsops;
+pub mod ifaces;
 pub mod keyboard;
 pub mod net;
 pub mod pci;

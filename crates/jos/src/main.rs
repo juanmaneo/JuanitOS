@@ -172,8 +172,9 @@ enum Cmd {
     },
     /// Start every qube marked `autostart` (used by the rc script).
     Autostart,
-    /// First boot: build the templates and create sys-net, sys-firewall
-    /// and the gpu qube. Skips what exists, so it can be run again.
+    /// First boot: build the templates and create sys-net, sys-firewall,
+    /// the gpu qube and the app qubes. Skips what exists, so it can be run
+    /// again.
     Setup(SetupArgs),
 }
 
@@ -199,6 +200,20 @@ struct SetupArgs {
     /// any; else sys-firewall is a FreeBSD qube).
     #[arg(long, value_name = "PATH")]
     firewall_image: Option<PathBuf>,
+    /// App qube to create: NAME behind sys-firewall, NAME:offline without
+    /// a network (repeatable).
+    #[arg(long = "app", value_name = "NAME[:offline]", value_parser = parse_app)]
+    apps: Vec<setup::AppSpec>,
+    /// Template recipe the app qubes are cloned from.
+    #[arg(long, value_name = "RECIPE", default_value = setup::APP_TEMPLATE)]
+    app_template: String,
+    /// Bridge sys-net to its card even when the IOMMU could pass the card
+    /// through (no reboot needed).
+    #[arg(long)]
+    no_passthrough: bool,
+    /// Seconds to wait for sys-net to reach the network.
+    #[arg(long, value_name = "SECS", hide = true, default_value_t = setup::NETWORK_TIMEOUT.as_secs())]
+    network_timeout: u64,
 }
 
 #[derive(Subcommand)]
@@ -383,6 +398,13 @@ fn parse_os(s: &str) -> std::result::Result<OsType, String> {
 fn parse_pci(s: &str) -> std::result::Result<PciAddr, String> {
     s.parse().map_err(|e: juanitos_core::Error| e.to_string())
 }
+
+fn parse_app(s: &str) -> std::result::Result<setup::AppSpec, String> {
+    s.parse().map_err(|e: juanitos_core::Error| e.to_string())
+}
+
+/// How long one try of [`setup::NETWORK_PROBE`] in sys-net may take.
+const NETWORK_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct App {
     runner: Box<dyn Runner>,
@@ -1203,13 +1225,7 @@ impl App {
             }
             Err(e) => return Err(e.into()),
         };
-        let host = setup::Host {
-            devices,
-            uplink: setup::default_route_iface(runner),
-            iommu: doctor::iommu_enabled(runner),
-            pptdevs: setup::loader_pptdevs(runner)?,
-            max_vcpus: bhyve::max_vcpus(runner),
-        };
+        let host = setup::probe_host_with(runner, &self.cfg, devices)?;
         let firewall_image = match a.firewall_image {
             Some(p) if p.is_file() => Some(p.display().to_string()),
             Some(p) => bail!("{}: no such firewall image", p.display()),
@@ -1220,31 +1236,50 @@ impl App {
         let opts = setup::SetupOptions {
             uplink: a.uplink,
             nic: a.nic,
+            passthrough: !a.no_passthrough,
             gpu: !a.no_gpu,
             gpu_cpus: a.gpu_cpus,
             gpu_memory_mb: a.gpu_memory_mb,
             firewall_image,
+            apps: a.apps,
+            app_template: a.app_template,
         };
-        let plan = setup::plan(&host, &self.store.list()?, &opts)?;
-        for note in &plan.notes {
+        let setup::Plan {
+            steps,
+            notes,
+            reboot,
+        } = setup::plan(&host, &self.store.list()?, &opts)?;
+        for note in &notes {
             println!("- {note}");
         }
-        if plan.steps.is_empty() {
+        if steps.is_empty() {
             println!("nothing to do");
         }
-        for (i, step) in plan.steps.iter().enumerate() {
+        for (i, step) in steps.iter().enumerate() {
             println!("{:>2}. {step}", i + 1);
         }
-        for step in plan.steps {
+        let timeout = std::time::Duration::from_secs(a.network_timeout);
+        let n = steps.len();
+        for (i, step) in steps.into_iter().enumerate() {
+            println!("{}", setup::progress_line(i + 1, n, &step));
             let done = match step {
-                setup::Step::InstallTemplate { recipe, uplink } => self.template_install(
-                    recipe,
-                    &juanitos_core::template::InstallOptions {
-                        uplink: Some(uplink),
-                        ..Default::default()
-                    },
-                ),
+                setup::Step::InstallTemplate { recipe, via } => {
+                    let (uplink, netvm) = match via {
+                        setup::Via::Uplink(iface) => (Some(iface), None),
+                        setup::Via::Chain => (None, Some(setup::SYS_NET.to_string())),
+                    };
+                    self.template_install(
+                        recipe,
+                        &juanitos_core::template::InstallOptions {
+                            uplink,
+                            netvm,
+                            ..Default::default()
+                        },
+                    )
+                }
                 setup::Step::Create(q) => self.create_qube(*q),
+                setup::Step::Start(name) => self.setup_start(&name),
+                setup::Step::WaitForNetwork(name) => self.wait_for_network(&name, timeout),
                 setup::Step::ReservePci(addrs) => setup::reserve(runner, &addrs)
                     .map(|()| {
                         println!(
@@ -1257,14 +1292,70 @@ impl App {
             };
             done?;
         }
-        if plan.reboot {
+        if reboot {
             println!(
                 "reboot to hand the reserved devices to their qubes; sys-net and \
                  sys-firewall start at boot"
             );
         } else {
-            println!("ready: `jos autostart` starts sys-net and sys-firewall (done at boot)");
+            println!("ready: sys-net and sys-firewall start at every boot (`jos autostart`)");
         }
+        Ok(())
+    }
+
+    /// `jos start`, unless the qube runs already (a setup run again).
+    fn setup_start(&self, name: &str) -> Result<()> {
+        match self.check_not_running(name) {
+            Err(e) => {
+                println!("{e:#}");
+                Ok(())
+            }
+            Ok(()) => self.start(name, false),
+        }
+    }
+
+    /// Try [`setup::NETWORK_PROBE`] in `name` until it succeeds: the
+    /// templates built next are provisioned through it.
+    fn wait_for_network(&self, name: &str, timeout: std::time::Duration) -> Result<()> {
+        if self.dry_run {
+            println!(
+                "+ in {name}, every {}s for up to {}s: {}",
+                setup::NETWORK_INTERVAL.as_secs(),
+                timeout.as_secs(),
+                setup::NETWORK_PROBE
+            );
+            return Ok(());
+        }
+        let q = self.store.get(name)?;
+        let mut probe = || {
+            matches!(
+                self.run_in(
+                    &q,
+                    None,
+                    setup::NETWORK_PROBE,
+                    NETWORK_PROBE_TIMEOUT,
+                    None,
+                    false
+                ),
+                Ok(Some(juanitos_core::console::Outcome {
+                    status: Some(0),
+                    ..
+                }))
+            )
+        };
+        if !setup::wait_until(
+            timeout,
+            setup::NETWORK_INTERVAL,
+            &mut probe,
+            &mut std::thread::sleep,
+        ) {
+            bail!(
+                "{name} did not reach the network within {}s: check its cable or card \
+                 (`jos console {name}`), then run `jos setup` again",
+                timeout.as_secs()
+            );
+        }
+        println!("{name} reaches the network");
         Ok(())
     }
 
@@ -1604,6 +1695,7 @@ fn main() -> Result<()> {
                     disk_gb,
                     no_boot,
                     uplink,
+                    netvm: None,
                     image,
                     checksums,
                 },

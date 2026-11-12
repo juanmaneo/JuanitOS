@@ -259,6 +259,25 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     }
 }
 
+/// The image and checksum list of `r` are in the cache directory `dir`
+/// and need no download (never for a wildcard image name).
+fn is_cached(dir: &Path, r: &Recipe) -> bool {
+    !r.image_url.contains('*')
+        && dir.join(format!("{}.checksums", r.name)).is_file()
+        && dir.join(r.image_file()).is_file()
+}
+
+/// The recipes whose image is in the dom0's cache (`cache_dir/images`):
+/// templates that can be built without the dom0 downloading anything.
+pub fn local_images(cfg: &GlobalConfig) -> Vec<String> {
+    let dir = Path::new(&cfg.cache_dir).join("images");
+    RECIPES
+        .iter()
+        .filter(|r| is_cached(&dir, r))
+        .map(|r| r.name.to_string())
+        .collect()
+}
+
 /// Hex digest of a file.
 pub fn digest_file(path: &Path, digest: Digest) -> Result<String> {
     use std::io::Read;
@@ -319,6 +338,10 @@ pub struct InstallOptions {
     pub no_boot: bool,
     /// Provision through this host interface instead of the NetVM.
     pub uplink: Option<String>,
+    /// Provision through this NetVM instead of the default one (`jos
+    /// setup` uses `sys-net`, which serves any client, while a running
+    /// unikernel `sys-firewall` only knows the qubes defined at its boot).
+    pub netvm: Option<String>,
     /// A local copy of the image, verified against `checksums` (no
     /// download).
     pub image: Option<PathBuf>,
@@ -346,8 +369,25 @@ impl<'a> TemplateInstaller<'a> {
         Path::new(&self.cfg.run_dir).join(format!("{name}-seed.iso"))
     }
 
+    /// `fetch -o out url`, explaining why it may fail on a dom0.
+    fn download(&self, out: &Path, url: &str) -> Result<()> {
+        self.runner
+            .run_checked("fetch", &["-o", &out.to_string_lossy(), url])
+            .map(drop)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "{e}\nThe dom0 has no network of its own by design: copy the image and \
+                     its checksum list to a USB stick and use `jos template install <recipe> \
+                     --image FILE --checksums FILE`"
+                ))
+            })
+    }
+
     /// Download (when not cached) and verify the recipe's image. With
-    /// `local` (image, checksum list) nothing is downloaded.
+    /// `local` (image, checksum list) nothing is downloaded. A cached
+    /// image and checksum list (the install media ship them, see
+    /// [`local_images`]) need no network either, unless the image name is
+    /// a wildcard resolved against a fresh list (nightly builds).
     pub fn fetch(&self, r: &Recipe, local: Option<(&Path, &Path)>) -> Result<PathBuf> {
         let (image, sums, file) = match local {
             Some((image, sums)) => {
@@ -361,8 +401,11 @@ impl<'a> TemplateInstaller<'a> {
                 FsOps::new(self.dry_run).mkdir_p(&dir)?;
                 let sums = dir.join(format!("{}.checksums", r.name));
                 self.step(&format!("Fetching {}", r.image_url));
-                self.runner
-                    .run_checked("fetch", &["-o", &sums.to_string_lossy(), r.checksums_url])?;
+                if is_cached(&dir, r) {
+                    println!("   {}: cached", sums.display());
+                } else {
+                    self.download(&sums, r.checksums_url)?;
+                }
                 let file = if self.dry_run && !sums.is_file() {
                     r.image_file().to_string()
                 } else {
@@ -372,10 +415,7 @@ impl<'a> TemplateInstaller<'a> {
                 if image.is_file() {
                     println!("   {}: cached", image.display());
                 } else {
-                    self.runner.run_checked(
-                        "fetch",
-                        &["-o", &image.to_string_lossy(), &r.image_url_for(&file)],
-                    )?;
+                    self.download(&image, &r.image_url_for(&file))?;
                 }
                 if self.dry_run && !image.is_file() {
                     println!("   (verification skipped in dry run)");
@@ -443,6 +483,7 @@ impl<'a> TemplateInstaller<'a> {
         q.memory_mb = r.memory_mb;
         q.label = Some(format!("recipe:{}", r.name));
         q.uplink = opts.uplink.clone();
+        q.netvm = opts.netvm.clone();
         self.store.list().and_then(|existing| {
             crate::firewall::assign_address(&mut q, &existing, self.cfg.default_netvm.as_deref())
         })?;
@@ -1138,8 +1179,9 @@ mod tests {
         assert!(r.cpus > 3);
         assert_eq!(q.cpus, 3);
         let calls = m.calls();
-        // Cached image: only the checksum list was fetched.
-        assert_eq!(calls.iter().filter(|c| c.starts_with("fetch")).count(), 1);
+        // Cached image and checksum list (shipped on the install media):
+        // nothing is downloaded.
+        assert!(!calls.iter().any(|c| c.starts_with("fetch")), "{calls:?}");
         let boot = calls.iter().find(|c| c.starts_with("bhyve ")).unwrap();
         assert!(boot.contains("29,ahci,cd:"), "{boot}");
         assert!(boot.starts_with("bhyve -c 3 "), "{boot}");
@@ -1158,6 +1200,57 @@ mod tests {
         // A second install of the same name is refused.
         let again = inst.install(r, &opts).unwrap_err().to_string();
         assert_eq!(again, "qube already exists: podman");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cached_images_need_no_network_but_nightlies_do() {
+        let (d, c, store) = setup("offline");
+        assert!(local_images(&c).is_empty());
+        let net = find("fbsd15-net").unwrap();
+        let images = cache(&c, net, net.image_file());
+        assert_eq!(local_images(&c), ["fbsd15-net"]);
+        // fbsd15-dev shares the image but has no checksum list yet.
+        std::fs::copy(
+            images.join("fbsd15-net.checksums"),
+            images.join("fbsd15-dev.checksums"),
+        )
+        .unwrap();
+        assert_eq!(local_images(&c), ["fbsd15-dev", "fbsd15-net"]);
+        let gone = MockRunner::new().missing("fetch");
+        let inst = installer(&gone, &c, &store, false);
+        assert_eq!(
+            inst.fetch(net, None).unwrap(),
+            images.join(net.image_file())
+        );
+        assert!(gone.calls().is_empty());
+
+        // A nightly (wildcard name) always fetches its list; without
+        // network the error tells what to do instead.
+        let redox = find("redox").unwrap();
+        std::fs::write(images.join("redox.checksums"), "").unwrap();
+        std::fs::write(images.join(redox.image_file()), "").unwrap();
+        assert!(!local_images(&c).contains(&"redox".to_string()));
+        let err = inst.fetch(redox, None).unwrap_err().to_string();
+        assert!(err.contains("no network of its own"), "{err}");
+        assert!(err.contains("--image FILE --checksums FILE"), "{err}");
+
+        // Provisioned through a chosen NetVM.
+        let m = MockRunner::new()
+            .respond("zfs", &["list"], CmdOutput::failed(1, ""))
+            .respond("bhyve", &[], CmdOutput::failed(1, ""));
+        let opts = InstallOptions {
+            netvm: Some("sys-net".into()),
+            ..Default::default()
+        };
+        let q = installer(&m, &c, &store, true).install(net, &opts).unwrap();
+        assert_eq!(q.netvm.as_deref(), Some("sys-net"));
+        assert!(
+            m.calls().iter().any(|c| c.contains("br-sys-net")),
+            "{:?}",
+            m.calls()
+        );
+        assert!(q.uplink.is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 
