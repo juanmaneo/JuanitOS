@@ -52,10 +52,18 @@ template's hostname.
 `--name` installs a recipe under another name (several variants side by
 side), `--disk-gb` sizes the zvol (default 40 GiB, sparse; the guest
 grows its file system on first boot), `--no-boot` stops before
-provisioning. A dom0 without network installs from a USB stick with
-`--image FILE --checksums FILE`, and `--uplink IFACE` provisions through
-a host NIC before any `sys-net` exists (the dom0 bridges the interface
-into `bru-IFACE`, shared by every qube using that uplink).
+provisioning. The dom0 has no network of its own, so `fetch` only works
+for an image already in `/var/cache/juanitos/images` (the install media
+ships the FreeBSD one, for `fbsd15-net` and `fbsd15-dev`) or on a dom0
+that has a route; otherwise install from a USB stick with
+`--image FILE --checksums FILE`. `--uplink IFACE` provisions through a
+host NIC before any `sys-net` exists (the dom0 bridges the interface
+into `bru-IFACE`, shared by every qube using that uplink), and
+`jos setup` provisions the templates after the first through the
+running `sys-net`: they keep `netvm = "sys-net"` (its dnsmasq serves any
+client, where the unikernel `sys-firewall` only answers the qubes
+defined when it booted). That only concerns the template itself, when
+it is run for maintenance: clones use the default NetVM, `sys-firewall`.
 
 ## How `jos template install` works
 

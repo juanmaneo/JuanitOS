@@ -211,9 +211,12 @@ jos-release all
 ```
 
 On real hardware the interface is the dom0's only one: with a USB Ethernet
-adapter plugged in it is `ue0` (`dhclient ue0`; the dom0 normally has no
-network, see `docs/hardware-testing.md` — Network on the installed dom0 —
-and `jos setup --uplink ue0` for the qube chain instead).
+adapter plugged in it is `ue0` (`dhclient ue0`). The dom0 normally has no
+network and this is the one exception, for the rebuild only: the qubes'
+network is set up by `jos setup --uplink ue0`, which needs no address on
+the dom0 (see `docs/hardware-testing.md` — Network on the installed
+dom0). `jos setup` does not download anything in the dom0 either: the
+FreeBSD VM image is on the install media.
 
 `jos-release` notices `/usr/local/share/juanitos/release.toml` and stamps
 the new image `built_on = "juanitos"`, `stage = 2`. The resulting ISO is a

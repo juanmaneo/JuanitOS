@@ -107,20 +107,34 @@ Plugging in a USB Ethernet adapter therefore changes nothing by itself:
 the interface appears (`ue0`; `dmesg | tail` names the chip, and
 `kldload if_axge` (AX88179, the common USB 3.0 GbE chip) or `if_axe`
 loads its driver when devmatch did not — all USB NIC modules ship in the
-kernel), but no one runs DHCP on it. Two ways to get connectivity:
+kernel), but no one runs DHCP on it, and none should: the dom0 never
+gets an address, the qubes do. Two ways to get connectivity:
 
 - **The qube chain (the normal way):** `jos setup --uplink ue0` as root.
-  `jos` creates the bridge `bru-ue0` with `ue0` as member and downloads
-  the templates through it (DHCP runs inside the provisioning qube; the
-  bridge needs no address), then creates `sys-net` bridged to `ue0` — a
-  USB adapter is not a PCI device, so it cannot be passed through.
-  App qubes then reach the network over `sys-firewall` → `sys-net`.
+  The dom0 downloads nothing (it has no route to download through): the
+  FreeBSD VM image is on the install media, in `/var/cache/juanitos/
+  images`. `jos` creates the bridge `bru-ue0` with `ue0` as member and
+  boots the `fbsd15-net` template's provisioning qube on it (DHCP runs
+  inside that qube; the bridge needs no address). It then creates
+  `sys-net` bridged to `ue0` (a USB adapter is not a PCI device, so it
+  cannot be passed through) and `sys-firewall`, starts `sys-net`, waits
+  until it reaches the network, and provisions the other templates
+  (`fbsd15-dev` for the apps) through it. App qubes reach the network
+  over `sys-firewall` → `sys-net`; `--app NAME` and `--app
+  NAME:offline` choose them.
   Without `--uplink`, `jos setup` uses the default route's interface,
   which a dom0 without network does not have.
-- **A temporary dom0 uplink (for stage 2, `docs/bootstrap.md`):**
-  `dhclient ue0` as root, then `cd /usr/local/src/juanitos && jos-release
-  all`. Stop the dhclient process when done; the qube chain above still
-  works afterwards because it bridges at layer 2, it does not route.
+- **An image that is not on the media** (`debian-13-dev` for the `gpu`
+  qube): the dom0 cannot download it. Fetch the image and its checksum
+  list on another machine, copy them to a USB stick and run `jos
+  template install debian-13-dev --image FILE --checksums FILE`; the
+  provisioning boot then goes through `sys-net` as above.
+- **A temporary dom0 uplink (stage 2 only, `docs/bootstrap.md`):** the
+  rebuild downloads `base.txz` and packages from the dom0 itself.
+  `dhclient ue0` as root (`dhclient bru-ue0` once `ue0` is a bridge
+  member), then `cd /usr/local/src/juanitos && jos-release all`. Stop the
+  dhclient process when done; the qube chain above still works
+  afterwards because it bridges at layer 2, it does not route.
 
 ## 6. What to send back
 

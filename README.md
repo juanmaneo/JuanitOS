@@ -142,15 +142,21 @@ screens: `docs/installer.md`. Trying it on a
 new machine: `docs/hardware-testing.md` (what each boot icon means, and
 `jos doctor --report FILE` to bring back what the hardware looks like).
 
-After the first boot, `jos setup` does what the QubesOS firstboot does:
-it builds the `fbsd15-net` template (downloading through the dom0's own
-network card), creates `sys-net` with that card passed through (bridged
-to it on a machine without IOMMU), `sys-firewall` (the Rust unikernel)
-and, when an NVIDIA card was reserved, the CUDA `gpu` qube from
-`debian-13-dev`. The network card is reserved last (`pptdevs`), so the
-dom0 keeps it until the reboot that hands it to `sys-net`. `jos setup`
-skips what exists, so it can be run again after a failure; `--nic`,
-`--uplink`, `--no-gpu` and `--dry-run` adjust or preview it.
+After the first boot, `jos setup` does what the QubesOS firstboot does,
+and the network only ever goes through the qubes: the dom0 gets no
+address and downloads nothing. It builds the `fbsd15-net` template from
+the FreeBSD image shipped on the install media (its provisioning boot is
+bridged to the network card), creates `sys-net` with that card passed
+through (bridged to it on a machine without IOMMU, and for a USB
+adapter) and `sys-firewall` (the Rust unikernel), starts them, waits
+until `sys-net` reaches the network and builds the other templates
+through it. Then it creates the app qubes (`--app work`, `--app
+vault:offline`) and, when an NVIDIA card was reserved, the CUDA `gpu`
+qube from `debian-13-dev`. The network card is reserved last
+(`pptdevs`), so the dom0 keeps it until the reboot that hands it to
+`sys-net`. `jos setup` skips what exists, so it can be run again after
+a failure; `--nic`, `--uplink`, `--no-passthrough`, `--no-gpu` and
+`--dry-run` adjust or preview it.
 
 Once installed, `jos-release all` works on JuanitOS itself (sources and
 vendored crates are in `/usr/local/src/juanitos`), which is how the
