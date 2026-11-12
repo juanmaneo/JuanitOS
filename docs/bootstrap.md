@@ -210,6 +210,11 @@ cd /usr/local/src/juanitos      # or a fresh git clone
 jos-release all
 ```
 
+On real hardware the interface is the dom0's only one: with a USB Ethernet
+adapter plugged in it is `ue0` (`dhclient ue0`; the dom0 normally has no
+network, see `docs/hardware-testing.md` — Network on the installed dom0 —
+and `jos setup --uplink ue0` for the qube chain instead).
+
 `jos-release` notices `/usr/local/share/juanitos/release.toml` and stamps
 the new image `built_on = "juanitos"`, `stage = 2`. The resulting ISO is a
 stage-2 image: a JuanitOS built by JuanitOS.

@@ -99,6 +99,29 @@ doctor --report /root/report.txt` as root) before running `jos setup`: it
 shows the `drm-kmod` driver and the `ppt` devices as the dom0 sees them.
 Note whether the login screen and a COSMIC session appear.
 
+### Network on the installed dom0
+
+The installed dom0 has **no network of its own**: `/etc/rc.conf` sets no
+`ifconfig_*`, the physical NIC belongs to `sys-net` (`docs/security.md`).
+Plugging in a USB Ethernet adapter therefore changes nothing by itself:
+the interface appears (`ue0`; `dmesg | tail` names the chip, and
+`kldload if_axge` (AX88179, the common USB 3.0 GbE chip) or `if_axe`
+loads its driver when devmatch did not — all USB NIC modules ship in the
+kernel), but no one runs DHCP on it. Two ways to get connectivity:
+
+- **The qube chain (the normal way):** `jos setup --uplink ue0` as root.
+  `jos` creates the bridge `bru-ue0` with `ue0` as member and downloads
+  the templates through it (DHCP runs inside the provisioning qube; the
+  bridge needs no address), then creates `sys-net` bridged to `ue0` — a
+  USB adapter is not a PCI device, so it cannot be passed through.
+  App qubes then reach the network over `sys-firewall` → `sys-net`.
+  Without `--uplink`, `jos setup` uses the default route's interface,
+  which a dom0 without network does not have.
+- **A temporary dom0 uplink (for stage 2, `docs/bootstrap.md`):**
+  `dhclient ue0` as root, then `cd /usr/local/src/juanitos && jos-release
+  all`. Stop the dhclient process when done; the qube chain above still
+  works afterwards because it bridges at layer 2, it does not route.
+
 ## 6. What to send back
 
 - `report.txt` (and the one from the installed system, if any);
