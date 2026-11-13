@@ -403,8 +403,9 @@ fn parse_app(s: &str) -> std::result::Result<setup::AppSpec, String> {
     s.parse().map_err(|e: juanitos_core::Error| e.to_string())
 }
 
-/// How long one try of [`setup::NETWORK_PROBE`] in sys-net may take.
-const NETWORK_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long one try of [`setup::NETWORK_PROBE`] in sys-net may take
+/// (logging in on its console included).
+const NETWORK_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 struct App {
     runner: Box<dyn Runner>,
@@ -1326,11 +1327,18 @@ impl App {
             );
             return Ok(());
         }
-        let q = self.store.get(name)?;
+        self.store
+            .get(name)
+            .map_err(Into::into)
+            .and_then(|q| self.probe_network(&q, timeout))
+    }
+
+    fn probe_network(&self, q: &Qube, timeout: std::time::Duration) -> Result<()> {
+        let name = &q.name;
         let mut probe = || {
             matches!(
                 self.run_in(
-                    &q,
+                    q,
                     None,
                     setup::NETWORK_PROBE,
                     NETWORK_PROBE_TIMEOUT,

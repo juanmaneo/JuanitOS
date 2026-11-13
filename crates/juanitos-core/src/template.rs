@@ -1245,11 +1245,8 @@ mod tests {
         };
         let q = installer(&m, &c, &store, true).install(net, &opts).unwrap();
         assert_eq!(q.netvm.as_deref(), Some("sys-net"));
-        assert!(
-            m.calls().iter().any(|c| c.contains("br-sys-net")),
-            "{:?}",
-            m.calls()
-        );
+        let calls = m.calls();
+        assert!(calls.iter().any(|c| c.contains("br-sys-net")), "{calls:?}");
         assert!(q.uplink.is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -1301,11 +1298,11 @@ mod tests {
         std::fs::write(&local, b"local").unwrap();
         let sha = digest_file(&local, Digest::Sha512).unwrap();
         std::fs::write(&local_sums, format!("{sha}  {}\n", r.image_file())).unwrap();
-        let fetches_before = m.calls().iter().filter(|c| c.starts_with("fetch")).count();
+        let calls_before = m.calls().len();
         assert_eq!(inst.fetch(r, Some((&local, &local_sums))).unwrap(), local);
-        let fetches_after = m.calls().iter().filter(|c| c.starts_with("fetch")).count();
         assert_eq!(
-            fetches_before, fetches_after,
+            m.calls().len(),
+            calls_before,
             "a local image is never fetched"
         );
         let opts = InstallOptions {

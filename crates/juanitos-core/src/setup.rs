@@ -136,11 +136,8 @@ impl FromStr for AppSpec {
 
 impl fmt::Display for AppSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.name)?;
-        if !self.network {
-            f.write_str(":offline")?;
-        }
-        Ok(())
+        let suffix = if self.network { "" } else { ":offline" };
+        write!(f, "{}{suffix}", self.name)
     }
 }
 
@@ -714,7 +711,8 @@ pub fn probe_host(runner: &dyn Runner, cfg: &GlobalConfig) -> Result<Host> {
 }
 
 /// Run `probe` until it succeeds, sleeping `interval` between tries, for
-/// at most `timeout`. False when it never did.
+/// at most `timeout` of sleep (the time the probes take comes on top).
+/// False when it never did.
 pub fn wait_until(
     timeout: Duration,
     interval: Duration,
@@ -733,6 +731,7 @@ pub fn wait_until(
         waited += interval;
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

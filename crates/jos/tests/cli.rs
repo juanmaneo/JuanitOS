@@ -2405,6 +2405,15 @@ fn setup_failures() {
         String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"),
         "{out:?}"
     );
+    // An app qube is NAME or NAME:offline, and never a system qube.
+    for app in ["alice:online", "sys-net"] {
+        let out = jos_on(&e, &cfg, &bin, true, &["setup", "--app", app]);
+        assert!(!out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("invalid value"),
+            "{out:?}"
+        );
+    }
 }
 
 /// A qube set up first, then the templates built through it: `jos setup`
