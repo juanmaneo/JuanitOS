@@ -84,6 +84,24 @@ impl FsOps {
             .and_then(|()| self.chmod(path, 0o755))
     }
 
+    /// Write a secret (a key) that only its owner may read: the file is
+    /// created with mode `0400`, so no other user sees it at any moment,
+    /// and replaces a file there. Where there is no Unix mode (only dry
+    /// runs make sense there) it is a plain write.
+    pub fn write_secret(&self, path: &Path, content: &str) -> Result<()> {
+        if self.dry_run {
+            println!(
+                "+ write {} ({} bytes, mode 400)",
+                path.display(),
+                content.len()
+            );
+            return Ok(());
+        }
+        create_parent(path)
+            .and_then(|()| write_owner_only(path, content.as_bytes()))
+            .map_err(Into::into)
+    }
+
     pub fn chmod(&self, path: &Path, mode: u32) -> Result<()> {
         if self.dry_run {
             println!("+ chmod {mode:o} {}", path.display());
@@ -156,6 +174,26 @@ impl FsOps {
     }
 }
 
+/// A new file readable by its owner only. A file there is removed first:
+/// it would keep its own mode.
+#[cfg(unix)]
+fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = fs::remove_file(path);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o400)
+        .open(path)
+        .and_then(|mut file| file.write_all(content))
+}
+
+#[cfg(not(unix))]
+fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    fs::write(path, content)
+}
+
 /// The directory `path` goes into (none for a bare root).
 pub(crate) fn create_parent(path: &Path) -> std::io::Result<()> {
     path.parent().map_or(Ok(()), fs::create_dir_all)
@@ -226,6 +264,37 @@ mod tests {
         let copied = dry.copy_tree(&src, &base.join("never"), &["target"]);
         assert_eq!(copied.unwrap(), 0);
         assert!(!base.join("never").exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secrets_are_written_for_their_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("jos-fsops-secret-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let key = base.join("etc/zfs/key");
+        let fs_ops = FsOps::new(false);
+        fs_ops.write_secret(&key, "alice").unwrap();
+        assert_eq!(fs::read_to_string(&key).unwrap(), "alice");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&key), 0o400);
+        // Replaced, and the mode stays, though the old file was 0644.
+        fs::remove_file(&key).unwrap();
+        fs::write(&key, "bob").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        fs_ops.write_secret(&key, "chuck").unwrap();
+        assert_eq!(fs::read_to_string(&key).unwrap(), "chuck");
+        assert_eq!(mode(&key), 0o400);
+        // A directory in the way, a file where the directory goes.
+        let dir = base.join("dir");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(fs_ops.write_secret(&dir, "x").is_err());
+        assert!(fs_ops.write_secret(&key.join("sub"), "x").is_err());
+        // Dry runs write nothing.
+        let never = base.join("never");
+        FsOps::new(true).write_secret(&never, "x").unwrap();
+        assert!(!never.exists());
         let _ = fs::remove_dir_all(&base);
     }
 

@@ -29,6 +29,7 @@ pub enum Page {
     Disk,
     /// Only shown for [`Method::Manual`].
     Partitions,
+    Encryption,
     System,
     Passthrough,
     Users,
@@ -37,12 +38,13 @@ pub enum Page {
     Finish,
 }
 
-pub const PAGES: [Page; 11] = [
+pub const PAGES: [Page; 12] = [
     Page::Welcome,
     Page::Keyboard,
     Page::Hardware,
     Page::Disk,
     Page::Partitions,
+    Page::Encryption,
     Page::System,
     Page::Passthrough,
     Page::Users,
@@ -60,6 +62,7 @@ impl Page {
             Page::Hardware => "Hardware",
             Page::Disk => "Disk",
             Page::Partitions => "Partitions",
+            Page::Encryption => "Encryption",
             Page::System => "System",
             Page::Passthrough => "Passthrough",
             Page::Users => "Users",
@@ -110,6 +113,10 @@ pub enum Widget {
     PartAction,
     /// The Passthrough page's device list (Space ticks a device).
     Devices,
+    /// The Encryption page's box and its passphrase, typed twice.
+    Encrypt,
+    Passphrase,
+    Passphrase2,
     Hostname,
     Swap,
     Desktop,
@@ -118,8 +125,8 @@ pub enum Widget {
     UserName,
     UserPw,
     UserPw2,
-    /// The Users page's box: show the passwords instead of bullets, to
-    /// see what the keyboard makes of them.
+    /// The box of the Users and Encryption pages: show the passwords
+    /// instead of bullets, to see what the keyboard makes of them.
     ShowPw,
     Confirm,
     Quit,
@@ -140,14 +147,23 @@ impl Widget {
     pub fn is_password(self) -> bool {
         matches!(
             self,
-            Widget::RootPw | Widget::RootPw2 | Widget::UserPw | Widget::UserPw2
+            Widget::RootPw
+                | Widget::RootPw2
+                | Widget::UserPw
+                | Widget::UserPw2
+                | Widget::Passphrase
+                | Widget::Passphrase2
         )
     }
 
     pub fn is_checkbox(self) -> bool {
         matches!(
             self,
-            Widget::AcceptChecks | Widget::Desktop | Widget::ShowPw | Widget::Confirm
+            Widget::AcceptChecks
+                | Widget::Encrypt
+                | Widget::Desktop
+                | Widget::ShowPw
+                | Widget::Confirm
         )
     }
 }
@@ -375,6 +391,10 @@ pub struct Wizard {
     /// Devices to reserve; may hold addresses that are not candidates
     /// (given with `--pci`), which are kept as they are.
     pub reserved: Vec<PciAddr>,
+    /// Encrypt the disk, with this passphrase typed twice.
+    pub encrypt: bool,
+    pub passphrase: TextField,
+    pub passphrase2: TextField,
     pub hostname: TextField,
     pub swap: TextField,
     pub desktop: bool,
@@ -421,6 +441,9 @@ impl Wizard {
             part_index: 0,
             new_kind: Kind::Pool,
             new_size: TextField::default(),
+            encrypt: base.encrypt,
+            passphrase: TextField::new(base.passphrase.as_deref().unwrap_or("")),
+            passphrase2: TextField::new(base.passphrase.as_deref().unwrap_or("")),
             hostname: TextField::new(&base.hostname),
             swap: TextField::new(&base.swap_gb.to_string()),
             desktop: base.gui,
@@ -464,6 +487,10 @@ impl Wizard {
                 vec![Parts, NewKind, NewSize, PartAction, Back, Next]
             }
             Page::Partitions => vec![Parts, PartAction, Back, Next],
+            Page::Encryption if self.encrypt => {
+                vec![Encrypt, Passphrase, Passphrase2, ShowPw, Back, Next]
+            }
+            Page::Encryption => vec![Encrypt, Back, Next],
             Page::System if self.method == self::Method::Manual => {
                 vec![Hostname, Desktop, Back, Next]
             }
@@ -484,13 +511,20 @@ impl Wizard {
         self.widgets().get(self.focus).copied()
     }
 
-    /// First input of a page, or its primary button.
+    /// First input of a page, or its primary button. The Encryption
+    /// page starts in its passphrase, or on Next with the encryption
+    /// off: Enter on its box would tick it, or untick it, unread.
     fn initial_focus(&self) -> usize {
         let widgets = self.widgets();
-        widgets
-            .iter()
-            .position(|w| !w.is_button())
-            .unwrap_or(widgets.len().saturating_sub(1))
+        let first = if self.page == Page::Encryption {
+            widgets
+                .iter()
+                .position(|w| *w == Widget::Passphrase)
+                .or(widgets.iter().position(|w| *w == Widget::Next))
+        } else {
+            widgets.iter().position(|w| !w.is_button())
+        };
+        first.unwrap_or(widgets.len().saturating_sub(1))
     }
 
     fn goto(&mut self, page: Page) {
@@ -511,6 +545,8 @@ impl Wizard {
             Widget::Hostname => &self.hostname,
             Widget::Swap => &self.swap,
             Widget::NewSize => &self.new_size,
+            Widget::Passphrase => &self.passphrase,
+            Widget::Passphrase2 => &self.passphrase2,
             Widget::RootPw => &self.root_pw,
             Widget::RootPw2 => &self.root_pw2,
             Widget::UserName => &self.user_name,
@@ -526,6 +562,8 @@ impl Wizard {
             Widget::Hostname => &mut self.hostname,
             Widget::Swap => &mut self.swap,
             Widget::NewSize => &mut self.new_size,
+            Widget::Passphrase => &mut self.passphrase,
+            Widget::Passphrase2 => &mut self.passphrase2,
             Widget::RootPw => &mut self.root_pw,
             Widget::RootPw2 => &mut self.root_pw2,
             Widget::UserName => &mut self.user_name,
@@ -538,6 +576,7 @@ impl Wizard {
     pub fn checkbox(&self, w: Widget) -> bool {
         match w {
             Widget::AcceptChecks => self.accept_checks,
+            Widget::Encrypt => self.encrypt,
             Widget::Desktop => self.desktop,
             Widget::ShowPw => self.show_passwords,
             Widget::Confirm => self.confirm,
@@ -550,6 +589,8 @@ impl Wizard {
         match w {
             Widget::Swap => c.is_ascii_digit(),
             Widget::NewSize => c.is_ascii_digit() || "GgMm".contains(c),
+            // What the boot loader types: see `crypt::check_passphrase`.
+            Widget::Passphrase | Widget::Passphrase2 => (' '..='~').contains(&c),
             Widget::Hostname => c.is_ascii_alphanumeric() || c == '-' || c == '.',
             Widget::UserName => {
                 c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
@@ -724,6 +765,9 @@ impl Wizard {
                 Some("No disk found: JuanitOS needs a whole disk to install to.".into())
             }
             Page::Partitions => self.manual_layout().and_then(Result::err),
+            Page::Encryption if self.encrypt => {
+                validate_passphrase(&self.passphrase.value, &self.passphrase2.value).err()
+            }
             Page::System => {
                 // Manual layouts have their swap partition, or none.
                 let swap = match self.method {
@@ -773,6 +817,8 @@ impl Wizard {
             root_password: Some(self.root_pw.value.clone()),
             user,
             pptdevs: self.reserved_sorted(),
+            encrypt: self.encrypt,
+            passphrase: self.encrypt.then(|| self.passphrase.value.clone()),
             ..self.base.clone()
         }
     }
@@ -906,6 +952,7 @@ impl Wizard {
             Widget::Quit | Widget::Console => Action::Exit,
             Widget::Reboot => Action::Reboot,
             Widget::AcceptChecks => toggled(&mut self.accept_checks),
+            Widget::Encrypt => toggled(&mut self.encrypt),
             Widget::Desktop => toggled(&mut self.desktop),
             Widget::ShowPw => toggled(&mut self.show_passwords),
             Widget::Confirm => toggled(&mut self.confirm),
@@ -1130,6 +1177,7 @@ impl Wizard {
             ("Layout", layout),
             ("Hostname", p.hostname.clone()),
             ("Keyboard", keyboard),
+            ("Encryption", p.encryption_note().to_string()),
             (
                 "Desktop",
                 if p.gui { "COSMIC" } else { "console only" }.into(),
@@ -1216,6 +1264,15 @@ pub fn validate_system(hostname: &str, swap: &str) -> Result<(), String> {
         Ok(_) => Err("Swap is limited to 512 GiB.".into()),
         Err(_) => Err("The swap size must be a number of GiB (0 for none).".into()),
     }
+}
+
+/// The disk passphrase, as typed twice on the Encryption page.
+pub fn validate_passphrase(passphrase: &str, again: &str) -> Result<(), String> {
+    crate::crypt::check_passphrase(passphrase).map_err(|e| e.to_string())?;
+    if passphrase != again {
+        return Err("The passphrases do not match.".into());
+    }
+    Ok(())
 }
 
 /// Passwords and the optional user, as typed on the Users page.
@@ -1349,6 +1406,29 @@ mod tests {
         }
     }
 
+    const PASSPHRASE: &str = "correct horse";
+
+    /// Defaults with the passphrase already given (as `--passphrase`
+    /// does), for tests that jump to a page.
+    fn with_passphrase() -> InstallPlan {
+        InstallPlan {
+            passphrase: Some(PASSPHRASE.into()),
+            ..Default::default()
+        }
+    }
+
+    /// The Encryption page, from the first widget: the passphrase twice,
+    /// then on to System.
+    fn through_encryption(w: &mut Wizard) {
+        assert_eq!(w.page, Page::Encryption);
+        assert_eq!(w.focused(), Some(Widget::Passphrase));
+        typ(w, PASSPHRASE);
+        w.handle(Key::Enter);
+        typ(w, PASSPHRASE);
+        w.handle(Key::Enter); // the last input: Next
+        assert_eq!(w.page, Page::System, "{:?}", w.error);
+    }
+
     /// Welcome -> Keyboard -> Hardware, keeping the keymap.
     fn past_keyboard(w: &mut Wizard) {
         w.handle(Key::Enter); // Welcome -> Keyboard
@@ -1365,8 +1445,8 @@ mod tests {
         w.handle(Key::Enter); // Hardware -> Disk
         w.handle(Key::Down); // nda0
         w.handle(Key::Enter); // to the choice: erase, preselected
-        w.handle(Key::Enter); // Disk -> System (Enter in the last input = next)
-        assert_eq!(w.page, Page::System);
+        w.handle(Key::Enter); // Disk -> Encryption (Enter in the last input = next)
+        through_encryption(w);
         for _ in 0..4 {
             w.handle(Key::Tab); // Swap, Desktop, Back, Next
         }
@@ -1567,7 +1647,8 @@ mod tests {
         past_keyboard(&mut w);
         w.handle(Key::Enter);
         w.handle(Key::Enter);
-        w.handle(Key::Enter); // Disk -> System, on the hostname
+        w.handle(Key::Enter); // Disk -> Encryption
+        through_encryption(&mut w);
         assert_eq!(w.focused(), Some(Widget::Hostname));
         typ(&mut w, "ab");
         w.handle(Key::Left);
@@ -1589,7 +1670,7 @@ mod tests {
         assert_eq!(w.plan(), before);
         // Enter on Back goes back.
         assert_eq!(w.handle(Key::Enter), Action::None);
-        assert_eq!(w.page, Page::Disk);
+        assert_eq!(w.page, Page::Encryption);
     }
 
     #[test]
@@ -1801,7 +1882,7 @@ mod tests {
         assert_eq!(w.method(), Method::Alongside);
         // Enter on the choice, the last input of the page, moves on.
         w.handle(Key::Enter);
-        assert_eq!(w.page, Page::System);
+        assert_eq!(w.page, Page::Encryption);
         w.handle(Key::Esc);
         // Clicks pick a row; picking a disk again resets the choice.
         w.click(Target::Method(Method::Erase));
@@ -1918,7 +1999,7 @@ mod tests {
         w.handle(Key::Tab);
         w.handle(Key::Tab);
         w.handle(Key::Enter);
-        assert_eq!(w.page, Page::System);
+        through_encryption(&mut w);
         assert_eq!(
             w.widgets(),
             [
@@ -1930,6 +2011,8 @@ mod tests {
         );
         assert_eq!(w.page_error(), None);
         w.handle(Key::Esc);
+        assert_eq!(w.page, Page::Encryption);
+        w.handle(Key::Esc);
         assert_eq!(w.page, Page::Partitions);
         w.handle(Key::Esc);
         assert_eq!(w.page, Page::Disk);
@@ -1939,7 +2022,7 @@ mod tests {
     fn partitions_deleted_and_errors_shown() {
         const MIB: u64 = 1 << 20;
         let mut w = Wizard::new(
-            InstallPlan::default(),
+            with_passphrase(),
             ok_checks(),
             mixed_disks(),
             vec![],
@@ -2042,7 +2125,7 @@ mod tests {
     fn the_summary_confirms_what_the_method_does() {
         let base = InstallPlan {
             disk: "nda0".into(),
-            ..Default::default()
+            ..with_passphrase()
         };
         let mut w = Wizard::new(base, ok_checks(), mixed_disks(), vec![], keymaps());
         assert_eq!(w.method(), Method::Alongside, "preselected disk");

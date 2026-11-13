@@ -339,6 +339,11 @@ pub struct Dom0Options {
     /// The console keymap (`crate::keyboard`), loaded at boot by
     /// `rc.d/syscons`; `None` keeps the kernel's `us`.
     pub keymap: Option<String>,
+    /// The pool is a GELI volume (opened by the boot loader's passphrase
+    /// prompt) with natively encrypted ZFS datasets on it: the GELI and
+    /// AES drivers load at boot, and the ZFS keys are read from their file
+    /// before the datasets mount. Installed systems only.
+    pub encrypted: bool,
 }
 
 impl Default for Dom0Options {
@@ -350,9 +355,14 @@ impl Default for Dom0Options {
             gpu_module: None,
             pptdevs: Vec::new(),
             keymap: None,
+            encrypted: false,
         }
     }
 }
+
+/// The key file of the natively encrypted datasets, in the (GELI-protected)
+/// root dataset: `rc.d/zfskeys` loads the keys from it at boot.
+pub const ZFS_KEY_FILE: &str = "/etc/zfs/juanitos.key";
 
 /// `/etc/rc.conf` for a dom0.
 pub fn rc_conf(flavor: Flavor, opts: &Dom0Options) -> String {
@@ -390,6 +400,12 @@ pub fn rc_conf(flavor: Flavor, opts: &Dom0Options) -> String {
         }
         Flavor::Installed => {
             s.push_str("zfs_enable=\"YES\"\n");
+            if opts.encrypted {
+                s.push_str(
+                    "# Keys of the encrypted datasets (docs/security.md), before they mount\n",
+                );
+                s.push_str("zfskeys_enable=\"YES\"\n");
+            }
             s.push_str("dumpdev=\"AUTO\"\n");
             s.push_str("# JuanitOS qube autostart (see /usr/local/etc/rc.d/jos)\n");
             s.push_str("jos_enable=\"YES\"\n");
@@ -445,6 +461,12 @@ pub fn loader_conf(flavor: Flavor, opts: &Dom0Options) -> String {
         Flavor::Installed => {
             s.push_str("zfs_load=\"YES\"\n");
             s.push_str("cryptodev_load=\"YES\"\n");
+            if opts.encrypted {
+                // The loader asks for the passphrase and hands the key to
+                // the kernel, which opens the pool's GELI volume with it.
+                s.push_str("aesni_load=\"YES\"\n");
+                s.push_str("geom_eli_load=\"YES\"\n");
+            }
             s.push_str("kern.geom.label.disk_ident.enable=\"0\"\n");
             s.push_str("kern.geom.label.gptid.enable=\"0\"\n");
         }
@@ -605,9 +627,31 @@ mod tests {
             gpu_module: None,
             pptdevs: Vec::new(),
             keymap: None,
+            encrypted: false,
         };
         let s = rc_conf(Flavor::Installed, &opts);
         assert!(s.contains("hostname=\"box\""));
+        assert!(!s.contains("zfskeys"), "nothing to unlock");
+        let encrypted = rc_conf(
+            Flavor::Installed,
+            &Dom0Options {
+                encrypted: true,
+                ..opts.clone()
+            },
+        );
+        assert!(
+            encrypted.contains("\nzfskeys_enable=\"YES\"\n"),
+            "{encrypted}"
+        );
+        // The live medium has no pool to unlock.
+        let live = rc_conf(
+            Flavor::Live,
+            &Dom0Options {
+                encrypted: true,
+                ..opts.clone()
+            },
+        );
+        assert!(!live.contains("zfskeys"));
         assert!(
             !s.contains("keymap"),
             "the kernel's us keymap needs no line"
@@ -767,6 +811,21 @@ mod tests {
             },
         );
         assert!(inst.contains("zfs_load=\"YES\""));
+        assert!(!inst.contains("geom_eli") && !inst.contains("aesni"));
+        let encrypted = loader_conf(
+            Flavor::Installed,
+            &Dom0Options {
+                encrypted: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            encrypted.contains("\ngeom_eli_load=\"YES\"\n"),
+            "{encrypted}"
+        );
+        assert!(encrypted.contains("\naesni_load=\"YES\"\n"), "{encrypted}");
+        // The loader asks for the passphrase itself, the kernel does not.
+        assert!(!encrypted.contains("passphrase_prompt"));
         assert!(inst.contains("\nhw.efi.poweroff=\"0\"\n"), "{inst}");
         assert!(!inst.contains("hw.uart.console"));
         assert!(!inst.contains("boot_multicons"));

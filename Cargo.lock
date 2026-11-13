@@ -360,6 +360,7 @@ dependencies = [
  "jos-fb",
  "jos-gfx",
  "juanitos-core",
+ "sha2",
  "toml",
 ]
 

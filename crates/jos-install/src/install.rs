@@ -10,11 +10,17 @@
 //! partition already there. Manual partitioning ([`InstallPlan::manual`])
 //! is the general case of that: partitions deleted, a table or an ESP
 //! created when the disk has none, swap and pool where the user put them.
+//!
+//! Encryption ([`InstallPlan::encrypt`], on by default) puts GELI under
+//! the pool, which the boot loader unlocks with a passphrase, and ZFS's
+//! native encryption on the datasets that hold data, under a key derived
+//! from that passphrase (see [`crate::crypt`]).
 
 use std::path::{Path, PathBuf};
 
+use crate::crypt::{self, GeliMeta};
 use crate::disks::{partition_index, FreeSpace, ESP_LABEL, MIN_POOL_GIB, SWAP_LABEL, ZFS_LABEL};
-use juanitos_core::dom0::{self, Dom0Options, Flavor};
+use juanitos_core::dom0::{self, Dom0Options, Flavor, ZFS_KEY_FILE};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::keyboard;
 use juanitos_core::pci::{self, PciAddr};
@@ -52,6 +58,12 @@ pub struct InstallPlan {
     pub root_password: Option<String>,
     /// `(name, password)` of the first unprivileged (wheel) user.
     pub user: Option<(String, String)>,
+    /// Encrypt the pool and the swap: GELI for the boot, ZFS native
+    /// encryption for the data.
+    pub encrypt: bool,
+    /// The passphrase of the encryption, asked at every boot; required
+    /// with `encrypt` ([`crypt::check_passphrase`] has the rules).
+    pub passphrase: Option<String>,
     /// Directory holding `juanitos-dom0.txz` and `MANIFEST`.
     pub dist_dir: String,
     /// Where the new pool is mounted while installing.
@@ -75,6 +87,8 @@ impl Default for InstallPlan {
             pptdevs: Vec::new(),
             root_password: None,
             user: None,
+            encrypt: true,
+            passphrase: None,
             dist_dir: dom0::DIST_DIR.to_string(),
             target: "/mnt".to_string(),
         }
@@ -164,6 +178,12 @@ impl InstallPlan {
                 return Err(Error::Other(format!("invalid user name {name:?}")));
             }
         }
+        if self.encrypt {
+            let passphrase = self.passphrase.as_deref().ok_or_else(|| {
+                Error::Other("disk encryption needs a passphrase (or turn it off)".into())
+            })?;
+            crypt::check_passphrase(passphrase)?;
+        }
         if let Some(space) = &self.alongside {
             if (self.swap_gb + MIN_POOL_GIB) * 1024 > space.size_mib {
                 return Err(Error::Other(format!(
@@ -213,6 +233,23 @@ impl InstallPlan {
         self.layout().map_or(self.swap_gb > 0, |l| l.swap.is_some())
     }
 
+    /// The provider the pool is made on: the partition, or the GELI volume
+    /// on it.
+    pub fn pool_device(&self) -> String {
+        self.encrypted_device(ZFS_LABEL)
+    }
+
+    /// The swap provider of `/etc/fstab`; with the `.eli` suffix, swapon(8)
+    /// encrypts it with a key made up at every boot.
+    pub fn swap_device(&self) -> String {
+        self.encrypted_device(SWAP_LABEL)
+    }
+
+    fn encrypted_device(&self, label: &str) -> String {
+        let eli = if self.encrypt { ".eli" } else { "" };
+        format!("/dev/gpt/{label}{eli}")
+    }
+
     /// What happens to the disk, for the summaries: the warning before
     /// an erase or a deletion, the free space used next to other systems.
     pub fn disk_note(&self) -> String {
@@ -244,6 +281,16 @@ impl InstallPlan {
             gpu_module: self.gpu_module.clone(),
             pptdevs: self.pptdevs.clone(),
             keymap: self.keymap.clone(),
+            encrypted: self.encrypt,
+        }
+    }
+
+    /// What the encryption is, for the summaries.
+    pub fn encryption_note(&self) -> &'static str {
+        if self.encrypt {
+            "AES-256 (GELI and ZFS), passphrase at every boot"
+        } else {
+            "none"
         }
     }
 
@@ -269,6 +316,7 @@ impl InstallPlan {
              hostname  {host}\n  \
              keyboard  {keymap}\n  \
              swap      {swap} GiB\n  \
+             encrypt   {crypt}\n  \
              desktop   {gui}\n  \
              passthru  {ppt}\n  \
              user      {user}\n  \
@@ -279,6 +327,7 @@ impl InstallPlan {
             host = self.hostname,
             keymap = self.keymap.as_deref().unwrap_or(keyboard::DEFAULT_KEYMAP),
             swap = self.swap_gb,
+            crypt = self.encryption_note(),
             gui = if self.gui { "COSMIC" } else { "console only" },
             ppt = self.passthrough_text(),
             dist = self.dist_dir,
@@ -310,6 +359,17 @@ pub const DATASETS: &[(&str, &[&str])] = &[
     ("var/mail", &["-o", "atime=on"]),
     ("var/tmp", &["-o", "setuid=off"]),
 ];
+
+/// The datasets of [`DATASETS`] that an encrypted install encrypts, each
+/// with its own key load (`var`'s children inherit it). `ROOT/default` is
+/// not among them: FreeBSD's loader cannot mount a natively encrypted
+/// root, so GELI protects it, and the public `usr` trees stay as they are.
+/// `<pool>/juanitos` (the qubes) is encrypted too.
+pub const ENCRYPTION_ROOTS: &[&str] = &["home", "tmp", "var"];
+
+/// The native ZFS encryption (`zfs create -o` properties): AES-256, the
+/// cipher of the GELI volume under it; the key is a file of 64 hex digits.
+const ZFS_CIPHER: &str = "encryption=aes-256-gcm";
 
 /// What [`Installer::run_with`] reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,9 +595,49 @@ impl<'a> Installer<'a> {
         Ok(())
     }
 
+    /// GELI on the pool's partition (boot-time passphrase: `-b -g`, so the
+    /// loader asks for it and hands the key to the kernel), attached as
+    /// `<partition>.eli`. Returns the key of the ZFS encryption, derived
+    /// from the same passphrase and the volume's salt ([`crypt`]).
+    ///
+    /// `-l 256` with AES-XTS is AES-256: XTS takes two keys of that
+    /// length, which geli(8) accounts for itself.
+    fn encrypt_partition(&self) -> Result<String> {
+        let p = self.plan;
+        let passphrase = p
+            .passphrase
+            .as_deref()
+            .ok_or_else(|| Error::Other("disk encryption needs a passphrase".into()))?;
+        self.step("Encrypting the pool partition (GELI, AES-256-XTS)");
+        let partition = format!("/dev/gpt/{ZFS_LABEL}");
+        // Hardware AES; the cipher runs in software without it.
+        let _ = self.runner.run("kldload", &["-n", "aesni"]);
+        // geli(8) reads the passphrase from stdin up to the newline.
+        let input = format!("{passphrase}\n");
+        self.runner.run_with_input_checked(
+            "geli",
+            &[
+                "init", "-b", "-g", "-e", "AES-XTS", "-l", "256", "-s", "4096", "-B", "none", "-J",
+                "-", &partition,
+            ],
+            &input,
+        )?;
+        self.runner
+            .run_with_input_checked("geli", &["attach", "-j", "-", &partition], &input)?;
+        let dump = self.runner.run_checked("geli", &["dump", &partition])?;
+        let meta = match crypt::parse_geli_dump(&dump.stdout) {
+            Ok(meta) => meta,
+            // Nothing was created in a dry run, so there is nothing to dump.
+            Err(_) if self.fs.dry_run => GeliMeta::dry_run(),
+            Err(e) => return Err(e),
+        };
+        Ok(crypt::derive_zfs_key(passphrase, &meta))
+    }
+
     pub fn create_pool(&self) -> Result<()> {
         let p = self.plan;
         self.step(&format!("Creating ZFS pool {}", p.pool));
+        let zfs_key = p.encrypt.then(|| self.encrypt_partition()).transpose()?;
         let altroot = format!("altroot={}", p.target);
         self.runner.run_checked(
             "zpool",
@@ -557,7 +657,7 @@ impl<'a> Installer<'a> {
                 "-m",
                 "none",
                 &p.pool,
-                &format!("/dev/gpt/{ZFS_LABEL}"),
+                &p.pool_device(),
             ],
         )?;
         let root = format!("{}/ROOT", p.pool);
@@ -569,11 +669,40 @@ impl<'a> Installer<'a> {
             &["create", "-o", "mountpoint=/", "-o", "canmount=noauto", &be],
         )?;
         self.runner.run_checked("zfs", &["mount", &be])?;
+
+        // The key goes into the root dataset just mounted, where the
+        // installed system reads it at boot: the encrypted datasets are
+        // made with the file at its place under the target, and told the
+        // path it has once they are booted.
+        let key_file = self.target(ZFS_KEY_FILE);
+        let location = format!("keylocation=file://{key_file}");
+        let encryption = ["-o", ZFS_CIPHER, "-o", "keyformat=hex", "-o", &location];
+        if let Some(key) = &zfs_key {
+            self.fs.write_secret(Path::new(&key_file), key)?;
+        }
+        let encrypted = |name: &str| -> &[&str] {
+            if zfs_key.is_some() && ENCRYPTION_ROOTS.contains(&name) {
+                &encryption
+            } else {
+                &[]
+            }
+        };
         for (name, props) in DATASETS {
             let ds = format!("{}/{name}", p.pool);
             let mut args = vec!["create"];
+            args.extend_from_slice(encrypted(name));
             args.extend_from_slice(props);
             args.push(&ds);
+            self.runner.run_checked("zfs", &args)?;
+        }
+        // The qubes' root is made before `Storage::init` finds it missing;
+        // everything under it inherits the encryption.
+        let cfg = p.global_config();
+        let juanitos = cfg.root_dataset();
+        if zfs_key.is_some() {
+            let mut args = vec!["create"];
+            args.extend_from_slice(&encryption);
+            args.push(&juanitos);
             self.runner.run_checked("zfs", &args)?;
         }
         let bootfs = format!("bootfs={be}");
@@ -585,8 +714,19 @@ impl<'a> Installer<'a> {
         )?;
 
         // JuanitOS datasets (templates/qubes) — same code path as `jos init`.
-        let cfg = p.global_config();
         Storage::new(self.runner, &cfg).init()?;
+
+        if zfs_key.is_some() {
+            // The key's place in the installed system, for `zfskeys`.
+            let location = format!("keylocation=file://{ZFS_KEY_FILE}");
+            let roots = ENCRYPTION_ROOTS
+                .iter()
+                .map(|name| format!("{}/{name}", p.pool))
+                .chain([juanitos]);
+            for ds in roots {
+                self.runner.run_checked("zfs", &["set", &location, &ds])?;
+            }
+        }
         Ok(())
     }
 
@@ -807,9 +947,7 @@ pub fn parse_boot_order(report: &str) -> Vec<String> {
 pub fn fstab(p: &InstallPlan) -> String {
     let mut s = String::from("# Device\t\tMountpoint\tFStype\tOptions\tDump\tPass#\n");
     if p.has_swap() {
-        s.push_str(&format!(
-            "/dev/gpt/{SWAP_LABEL}\t\tnone\t\tswap\tsw\t0\t0\n"
-        ));
+        s.push_str(&format!("{}\t\tnone\t\tswap\tsw\t0\t0\n", p.swap_device()));
     }
     s.push_str(&format!(
         "{}\t/boot/efi\tmsdosfs\trw\t2\t2\n",
@@ -837,8 +975,28 @@ mod tests {
             user: Some(("alice".into(), "pw".into())),
             dist_dir: "/nonexistent".into(),
             pptdevs: vec![PciAddr::new(1, 0, 0), PciAddr::new(1, 0, 1)],
+            encrypt: false,
             ..Default::default()
         }
+    }
+
+    const PASSPHRASE: &str = "correct horse";
+
+    /// `p` with the disk encrypted.
+    fn encrypted(p: InstallPlan) -> InstallPlan {
+        InstallPlan {
+            encrypt: true,
+            passphrase: Some(PASSPHRASE.into()),
+            ..p
+        }
+    }
+
+    /// A runner that answers `geli dump` like a real volume and finds no
+    /// dataset.
+    fn geli_mock() -> MockRunner {
+        MockRunner::new()
+            .respond("zfs", &["list"], CmdOutput::failed(1, ""))
+            .respond("geli", &["dump"], CmdOutput::ok(crate::crypt::tests::DUMP))
     }
 
     /// `plan()` next to the Linux of `disks::tests::linux_disk`.
@@ -983,6 +1141,55 @@ mod tests {
         let err = p.validate().unwrap_err().to_string();
         assert!(err.contains("299.7 GiB of free space"), "{err}");
         assert!(err.contains("300 GiB of swap"), "{err}");
+    }
+
+    #[test]
+    fn encryption_needs_a_good_passphrase() {
+        assert!(encrypted(plan()).validate().is_ok());
+        // Encryption is the default, and asks for its passphrase.
+        let p = InstallPlan {
+            passphrase: None,
+            ..encrypted(plan())
+        };
+        let err = p.validate().unwrap_err().to_string();
+        assert!(err.contains("needs a passphrase"), "{err}");
+        assert!(InstallPlan::default().encrypt);
+        for bad in ["short", "pa\u{df}word-long", &"x".repeat(129)] {
+            let p = InstallPlan {
+                passphrase: Some(bad.into()),
+                ..encrypted(plan())
+            };
+            assert!(p.validate().is_err(), "{bad:?}");
+        }
+        // Without encryption the passphrase is not looked at.
+        let p = InstallPlan {
+            passphrase: Some("x".into()),
+            ..plan()
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn encrypted_plans_use_the_geli_providers() {
+        let p = plan();
+        assert_eq!(p.pool_device(), "/dev/gpt/zfs0");
+        assert_eq!(p.swap_device(), "/dev/gpt/swap0");
+        assert_eq!(p.encryption_note(), "none");
+        assert!(p.summary().contains("encrypt   none\n"));
+        assert!(!p.dom0_options().encrypted);
+        let p = encrypted(plan());
+        assert_eq!(p.pool_device(), "/dev/gpt/zfs0.eli");
+        assert_eq!(p.swap_device(), "/dev/gpt/swap0.eli");
+        assert!(p.dom0_options().encrypted);
+        let summary = p.summary();
+        assert!(
+            summary.contains("encrypt   AES-256 (GELI and ZFS)"),
+            "{summary}"
+        );
+        assert!(!summary.contains(PASSPHRASE), "{summary}");
+        // The swap of /etc/fstab is encrypted with a key of each boot.
+        assert!(fstab(&p).contains("/dev/gpt/swap0.eli\t\tnone\t\tswap"));
+        assert!(!fstab(&p).contains("swap0\t"));
     }
 
     #[test]
@@ -1138,6 +1345,160 @@ mod tests {
     }
 
     #[test]
+    fn an_encrypted_pool_is_made_on_the_geli_volume() {
+        let dir = scratch("encrypted-pool");
+        let p = encrypted(real_plan(&dir));
+        let m = geli_mock();
+        Installer::new(&m, false, &p).create_pool().unwrap();
+        let calls = m.calls();
+        assert_eq!(
+            calls[..4],
+            [
+                "kldload -n aesni",
+                "geli init -b -g -e AES-XTS -l 256 -s 4096 -B none -J - /dev/gpt/zfs0",
+                "geli attach -j - /dev/gpt/zfs0",
+                "geli dump /dev/gpt/zfs0",
+            ]
+        );
+        assert!(calls[4].starts_with("zpool create -f -o altroot="));
+        assert!(
+            calls[4].ends_with("zroot /dev/gpt/zfs0.eli"),
+            "{}",
+            calls[4]
+        );
+        // The passphrase travels on stdin, never in a command line.
+        assert!(!calls.iter().any(|c| c.contains(PASSPHRASE)));
+
+        // The key: derived from the passphrase and the volume's header,
+        // readable by root alone, in the root dataset before any
+        // encrypted dataset is made.
+        let key_file = Path::new(&p.target).join("etc/zfs/juanitos.key");
+        assert_eq!(
+            std::fs::read_to_string(&key_file).unwrap(),
+            crate::crypt::derive_zfs_key(PASSPHRASE, &crate::crypt::tests::meta())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o400);
+        }
+
+        let key = format!("file://{}/etc/zfs/juanitos.key", p.target);
+        let enc = format!("-o encryption=aes-256-gcm -o keyformat=hex -o keylocation={key}");
+        let create = |args: &str| format!("zfs create {args}");
+        let encrypted_creates: Vec<String> = [
+            create(&format!("{enc} -o mountpoint=/home zroot/home")),
+            create(&format!(
+                "{enc} -o mountpoint=/tmp -o exec=on -o setuid=off zroot/tmp"
+            )),
+            create(&format!(
+                "{enc} -o mountpoint=/var -o canmount=off zroot/var"
+            )),
+            create(&format!("{enc} zroot/juanitos")),
+        ]
+        .into();
+        let position = |call: &str| {
+            calls
+                .iter()
+                .position(|c| c == call)
+                .unwrap_or_else(|| panic!("{call} not run, in {calls:?}"))
+        };
+        let mounted = position("zfs mount zroot/ROOT/default");
+        for call in &encrypted_creates {
+            assert!(position(call) > mounted, "{call}");
+        }
+        assert_eq!(
+            calls.iter().filter(|c| c.contains("encryption=")).count(),
+            encrypted_creates.len(),
+            "only the roots are encrypted: {calls:?}"
+        );
+        // The root, the public trees and var's children are not made with
+        // a key of their own.
+        for plain in [
+            "zfs create -o mountpoint=none zroot/ROOT",
+            "zfs create -o mountpoint=/usr -o canmount=off zroot/usr",
+            "zfs create -o exec=off -o setuid=off zroot/var/log",
+        ] {
+            position(plain);
+        }
+        // The qubes' root is there before `Storage::init` looks for it.
+        assert!(
+            position(&create(&format!("{enc} zroot/juanitos")))
+                < position("zfs create -p zroot/juanitos/qubes")
+        );
+        // The key's place in the installed system.
+        let tail: Vec<&str> = calls[calls.len() - 4..]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                "zfs set keylocation=file:///etc/zfs/juanitos.key zroot/home",
+                "zfs set keylocation=file:///etc/zfs/juanitos.key zroot/tmp",
+                "zfs set keylocation=file:///etc/zfs/juanitos.key zroot/var",
+                "zfs set keylocation=file:///etc/zfs/juanitos.key zroot/juanitos",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unencrypted_pool_has_no_keys() {
+        let p = plan();
+        let m = geli_mock();
+        Installer::new(&m, true, &p).create_pool().unwrap();
+        let calls = m.calls();
+        assert!(!calls.iter().any(|c| {
+            c.starts_with("geli")
+                || c.starts_with("kldload")
+                || c.contains("encryption")
+                || c.contains("keylocation")
+        }));
+        assert!(calls.iter().any(|c| c.ends_with("zroot /dev/gpt/zfs0")));
+    }
+
+    #[test]
+    fn encrypting_needs_the_passphrase_and_a_readable_header() {
+        // The plan was not validated: nothing is run without a passphrase.
+        let p = InstallPlan {
+            passphrase: None,
+            ..encrypted(plan())
+        };
+        let m = geli_mock();
+        let err = Installer::new(&m, true, &p).create_pool().unwrap_err();
+        assert!(err.to_string().contains("needs a passphrase"), "{err}");
+        assert!(m.calls().is_empty());
+
+        // A dry run has no volume to dump: a stand-in header goes through
+        // the same commands.
+        let p = encrypted(plan());
+        let m = MockRunner::new();
+        Installer::new(&m, true, &p).create_pool().unwrap();
+        let calls = m.calls();
+        assert!(calls.contains(&"geli dump /dev/gpt/zfs0".to_string()));
+        assert!(calls.iter().any(|c| c.ends_with("zroot /dev/gpt/zfs0.eli")));
+
+        // A real one that cannot be read stops before a pool is made on it.
+        let dir = scratch("unreadable-header");
+        let p = encrypted(real_plan(&dir));
+        let m = MockRunner::new();
+        let err = Installer::new(&m, false, &p).create_pool().unwrap_err();
+        assert!(err.to_string().contains("geli dump"), "{err}");
+        assert_eq!(m.calls().last().unwrap(), "geli dump /dev/gpt/zfs0");
+        assert!(!m.calls().iter().any(|c| c.starts_with("zpool")));
+
+        // The key cannot be written: no dataset is made without it.
+        let key_file = Path::new(&p.target).join("etc/zfs/juanitos.key");
+        std::fs::create_dir_all(&key_file).unwrap();
+        let m = geli_mock();
+        assert!(Installer::new(&m, false, &p).create_pool().is_err());
+        assert_eq!(m.calls().last().unwrap(), "zfs mount zroot/ROOT/default");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn accounts_go_through_chroot_and_stdin() {
         let p = plan();
         let m = MockRunner::new();
@@ -1288,19 +1649,28 @@ mod tests {
     fn every_failing_command_stops_the_install() {
         let dir = scratch("fail-each");
         // No dataset exists yet, so every one is created.
-        let mock = || MockRunner::new().respond("zfs", &["list"], CmdOutput::failed(1, ""));
+        let mock = geli_mock;
         // Failures the installer shrugs off: no partition table to destroy
-        // yet, the ESP already unmounted, no EFI variables, and existence
-        // queries answering "not there".
+        // yet, the ESP already unmounted, no EFI variables, no AES module
+        // to load (the cipher runs in software), and existence queries
+        // answering "not there".
         let tolerated = |c: &str| {
-            ["gpart destroy", "umount", "efibootmgr", "zfs list"]
-                .iter()
-                .any(|t| c.starts_with(t))
+            [
+                "gpart destroy",
+                "umount",
+                "efibootmgr",
+                "zfs list",
+                "kldload",
+            ]
+            .iter()
+            .any(|t| c.starts_with(t))
         };
         for p in [
             real_plan(&dir),
             alongside(real_plan(&dir)),
             manual(real_plan(&dir)),
+            encrypted(real_plan(&dir)),
+            encrypted(manual(real_plan(&dir))),
         ] {
             let m = mock();
             Installer::new(&m, false, &p).run("").unwrap();

@@ -772,6 +772,8 @@ impl<'a> Builder<'a> {
             pptdevs: Vec::new(),
             // The installer's Keyboard page loads keymaps as they are tried.
             keymap: None,
+            // The live medium has no pool of its own to unlock.
+            encrypted: false,
         };
         self.fs
             .write(&root.join("etc/fstab"), &dom0::live_fstab(&p.label))?;

@@ -15,6 +15,7 @@
 //! * line-oriented prompts (`--ui text`), for serial consoles, and flags
 //!   only (`--non-interactive`) for automated installs.
 
+mod crypt;
 mod disks;
 mod gui;
 mod install;
@@ -100,6 +101,19 @@ struct Cli {
     /// Swap partition size; 0 disables swap.
     #[arg(long, default_value_t = 4)]
     swap_gb: u64,
+
+    /// Do not encrypt the disk. By default the pool's partition is a GELI
+    /// volume (AES-256, opened by a passphrase at every boot) and the
+    /// data datasets are encrypted by ZFS (AES-256) with a key derived
+    /// from the same passphrase; see docs/security.md.
+    #[arg(long)]
+    no_encrypt: bool,
+
+    /// Passphrase of the disk encryption, 8 to 128 printable ASCII
+    /// characters (the boot loader types with a US keyboard layout).
+    /// Prompted when omitted and interactive.
+    #[arg(long, conflicts_with = "no_encrypt")]
+    passphrase: Option<String>,
 
     /// Console-only dom0 (no COSMIC services at boot).
     #[arg(long)]
@@ -222,6 +236,9 @@ fn install(
         (Some(u), None) => Some((u, String::new())),
         (None, _) => None,
     };
+    if !interactive && !cli.no_encrypt && cli.passphrase.is_none() {
+        bail!("disk encryption needs --passphrase (or --no-encrypt)");
+    }
     let plan = InstallPlan {
         disk: cli.disk.clone().unwrap_or_default(),
         pool: cli.pool.clone(),
@@ -234,6 +251,8 @@ fn install(
         pptdevs: passthrough_from(cli, &pci_devices),
         root_password: cli.root_password.clone(),
         user,
+        encrypt: !cli.no_encrypt,
+        passphrase: cli.passphrase.clone(),
         dist_dir: cli.dist.clone(),
         target: cli.target.clone(),
         ..InstallPlan::default()
@@ -455,6 +474,12 @@ fn text_install(
     }
 
     if interactive {
+        if !cli.no_encrypt {
+            plan.encrypt = p.ask_yes_no("Encrypt the disk (recommended)?", plan.encrypt)?;
+            if plan.encrypt && plan.passphrase.is_none() {
+                plan.passphrase = Some(ask_passphrase(p)?);
+            }
+        }
         plan.hostname = p.prompt_default("Hostname", &plan.hostname)?;
         plan.swap_gb = p
             .prompt_default("Swap size in GiB (0 = none)", &plan.swap_gb.to_string())?
@@ -500,6 +525,23 @@ fn text_install(
         runner.run("shutdown", &["-r", "now"])?;
     }
     Ok(())
+}
+
+/// The passphrase of the disk encryption, asked twice until it is one
+/// the boot loader can take.
+fn ask_passphrase(p: &mut Prompter<'_>) -> anyhow::Result<String> {
+    p.say(
+        "\nThe passphrase is asked at every boot, by the boot loader: it types with a\n\
+         US keyboard layout (the keyboard chosen here does not apply), so the\n\
+         passphrase takes printable ASCII only. It cannot be recovered: keep it safe.\n",
+    )?;
+    loop {
+        let passphrase = p.password("Encryption passphrase")?;
+        match crypt::check_passphrase(&passphrase) {
+            Ok(()) => return Ok(passphrase),
+            Err(e) => p.say(&format!("  {e}\n"))?,
+        }
+    }
 }
 
 fn banner() {
@@ -556,6 +598,8 @@ mod tests {
         InstallPlan {
             disk: c.disk.clone().unwrap_or_default(),
             root_password: c.root_password.clone(),
+            encrypt: !c.no_encrypt,
+            passphrase: c.passphrase.clone(),
             target: std::env::temp_dir()
                 .join(format!("jos-install-main-{}", std::process::id()))
                 .to_string_lossy()
@@ -646,7 +690,7 @@ mod tests {
 
     #[test]
     fn interactive_text_install_reserves_devices() {
-        let c = cli(&["--dry-run"]);
+        let c = cli(&["--dry-run", "--no-encrypt"]);
         let m = MockRunner::new();
         let devices = pci::passthrough_candidates(&pci::parse_pciconf(PCICONF));
         let plan = InstallPlan {
@@ -675,6 +719,7 @@ mod tests {
         // `--alongside`: into the largest free area of `--disk`.
         let c = cli(&[
             "--dry-run",
+            "--no-encrypt",
             "--non-interactive",
             "--disk",
             "nda0",
@@ -692,7 +737,7 @@ mod tests {
             .any(|c| c.starts_with("gpart add -a 1m -b 205101m")));
         assert!(!calls.iter().any(|c| c.starts_with("gpart create")));
         // Asked when possible, yes by default; declined, the disk is erased.
-        let c = cli(&["--dry-run"]);
+        let c = cli(&["--dry-run", "--no-encrypt"]);
         // disk 1; next to Linux; hostname; swap; desktop; root password
         // twice; no user; proceed.
         let (r, out) = text_with(
@@ -728,6 +773,7 @@ mod tests {
         // the question).
         let flags = [
             "--dry-run",
+            "--no-encrypt",
             "--non-interactive",
             "--root-password",
             "pw",
@@ -833,7 +879,12 @@ mod tests {
     fn install_refusals_before_any_question() {
         let m = MockRunner::new();
         let (r, _) = install_with(
-            &["--non-interactive", "--dist", "/nonexistent"],
+            &[
+                "--non-interactive",
+                "--no-encrypt",
+                "--dist",
+                "/nonexistent",
+            ],
             &m,
             false,
             "",
@@ -841,6 +892,7 @@ mod tests {
         assert!(r.unwrap_err().to_string().contains("dom0 distribution"));
         let flags = [
             "--dry-run",
+            "--no-encrypt",
             "--non-interactive",
             "--user",
             "alice",
@@ -850,7 +902,7 @@ mod tests {
         let (r, _) = install_with(&flags, &m, false, "");
         assert!(r.unwrap_err().to_string().contains("--user-password"));
         let m = MockRunner::new().missing("sysctl");
-        let (r, _) = install_with(&["--dry-run"], &m, false, "");
+        let (r, _) = install_with(&["--dry-run", "--no-encrypt"], &m, false, "");
         assert!(r.unwrap_err().to_string().contains("listing disks"));
     }
 
@@ -859,6 +911,7 @@ mod tests {
         let m = MockRunner::new();
         let base = [
             "--dry-run",
+            "--no-encrypt",
             "--ignore-doctor",
             "--disk",
             "vtbd0",
@@ -884,6 +937,7 @@ mod tests {
         let t = target.to_string_lossy().into_owned();
         let flags = [
             "--dry-run",
+            "--no-encrypt",
             "--non-interactive",
             "--ignore-doctor",
             "--disk",
@@ -909,9 +963,97 @@ mod tests {
     }
 
     #[test]
+    fn unattended_encrypted_install_needs_its_passphrase() {
+        let m = MockRunner::new();
+        let flags = [
+            "--dry-run",
+            "--non-interactive",
+            "--ignore-doctor",
+            "--disk",
+            "vtbd0",
+            "--root-password",
+            "r",
+        ];
+        // Encryption is the default: not silently skipped.
+        let (r, out) = install_with(&flags, &m, false, "");
+        let err = r.unwrap_err().to_string();
+        assert!(err.contains("--passphrase (or --no-encrypt)"), "{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(m.calls().iter().all(|c| !c.starts_with("geli")));
+
+        let args = [&flags[..], &["--passphrase", "correct horse"]].concat();
+        let m = MockRunner::new();
+        let (r, out) = install_with(&args, &m, false, "");
+        r.unwrap();
+        assert!(out.contains("encrypt   AES-256"), "{out}");
+        assert!(!out.contains("correct horse"), "{out}");
+        let calls = m.calls();
+        assert!(calls.iter().any(|c| c.starts_with("geli init -b -g")));
+        assert!(calls.iter().any(|c| c.ends_with("zroot /dev/gpt/zfs0.eli")));
+        assert!(!calls.iter().any(|c| c.contains("correct horse")));
+
+        // Too short a passphrase is refused before anything is touched.
+        let args = [&flags[..], &["--passphrase", "short"]].concat();
+        let m = MockRunner::new();
+        let (r, _) = install_with(&args, &m, false, "");
+        assert!(r.unwrap_err().to_string().contains("at least"));
+        assert!(!m.calls().iter().any(|c| c.starts_with("gpart")));
+
+        let args = [&flags[..], &["--no-encrypt"]].concat();
+        let m = MockRunner::new();
+        let (r, out) = install_with(&args, &m, false, "");
+        r.unwrap();
+        assert!(out.contains("encrypt   none"), "{out}");
+        assert!(m.calls().iter().all(|c| !c.starts_with("geli")));
+        // Choosing both ways is a mistake.
+        let both = ["jos-install", "--no-encrypt", "--passphrase", "x"];
+        assert!(Cli::try_parse_from(both).is_err());
+    }
+
+    #[test]
+    fn interactive_install_asks_about_the_encryption() {
+        let c = cli(&["--dry-run"]);
+        let ok = checks(Status::Ok);
+        // disk 1; encrypt (default yes); a passphrase the boot loader
+        // cannot type, one too short, then a good one, twice; hostname;
+        // swap; desktop; root password twice; no user; proceed.
+        let input = "1\n\nna\u{ef}ve-passphrase\nna\u{ef}ve-passphrase\nshort\nshort\n\
+                     pass phrase\npass phrase\n\n\n\npw\npw\n\ny\n";
+        let m = MockRunner::new();
+        let (r, out) = text(&c, &m, &ok, input);
+        r.unwrap();
+        assert!(
+            out.contains("Encrypt the disk (recommended)? [Y/n]"),
+            "{out}"
+        );
+        assert!(out.contains("US keyboard layout"), "{out}");
+        assert!(out.contains("printable ASCII only"), "{out}");
+        assert!(out.contains("at least"), "{out}");
+        assert!(out.contains("encrypt   AES-256 (GELI and ZFS)"), "{out}");
+        assert!(m.calls().iter().any(|c| c.starts_with("geli init")));
+
+        // Declined: no passphrase is asked, nothing is encrypted.
+        let m = MockRunner::new();
+        let (r, out) = text(&c, &m, &ok, "1\nn\n\n\n\npw\npw\n\ny\n");
+        r.unwrap();
+        assert!(!out.contains("Encryption passphrase"), "{out}");
+        assert!(out.contains("encrypt   none"), "{out}");
+        assert!(m.calls().iter().all(|c| !c.starts_with("geli")));
+
+        // A passphrase from the flags is not asked again.
+        let c = cli(&["--dry-run", "--passphrase", "correct horse"]);
+        let m = MockRunner::new();
+        let (r, out) = text(&c, &m, &ok, "1\n\n\n\n\npw\npw\n\ny\n");
+        r.unwrap();
+        assert!(!out.contains("Encryption passphrase"), "{out}");
+        assert!(m.calls().iter().any(|c| c.starts_with("geli init")));
+    }
+
+    #[test]
     fn non_interactive_install() {
         let c = cli(&[
             "--dry-run",
+            "--no-encrypt",
             "--non-interactive",
             "--disk",
             "vtbd0",
@@ -930,11 +1072,22 @@ mod tests {
     #[test]
     fn non_interactive_refusals() {
         let m = MockRunner::new();
-        let c = cli(&["--dry-run", "--non-interactive", "--disk", "vtbd0"]);
+        let c = cli(&[
+            "--dry-run",
+            "--no-encrypt",
+            "--non-interactive",
+            "--disk",
+            "vtbd0",
+        ]);
         let (r, _) = text(&c, &m, &checks(Status::Fail), "");
         assert!(r.unwrap_err().to_string().contains("--ignore-doctor"));
 
-        let c = cli(&["--dry-run", "--non-interactive", "--ignore-doctor"]);
+        let c = cli(&[
+            "--dry-run",
+            "--no-encrypt",
+            "--non-interactive",
+            "--ignore-doctor",
+        ]);
         let (r, out) = text(&c, &m, &checks(Status::Fail), "");
         assert!(r.unwrap_err().to_string().contains("--disk is required"));
         assert!(out.contains("Continuing anyway"));
@@ -948,7 +1101,7 @@ mod tests {
 
     #[test]
     fn interactive_text_install() {
-        let c = cli(&["--dry-run", "--live"]);
+        let c = cli(&["--dry-run", "--no-encrypt", "--live"]);
         let m = MockRunner::new();
         // failed checks: install anyway; disk 1; hostname; swap; desktop;
         // root password twice; user; user password twice; proceed; reboot.
@@ -969,7 +1122,7 @@ mod tests {
     #[test]
     fn interactive_aborts() {
         let m = MockRunner::new();
-        let c = cli(&["--dry-run"]);
+        let c = cli(&["--dry-run", "--no-encrypt"]);
         let (r, _) = text(&c, &m, &checks(Status::Fail), "n\n");
         assert!(r.unwrap_err().to_string().contains("host checks failed"));
         let (r, _) = text(&c, &m, &checks(Status::Ok), "1\n\nnot-a-number\n");
@@ -986,6 +1139,7 @@ mod tests {
         let m = MockRunner::new();
         let c = cli(&[
             "--dry-run",
+            "--no-encrypt",
             "--disk",
             "vtbd0",
             "--root-password",
@@ -1010,7 +1164,7 @@ mod tests {
         let m = MockRunner::new();
         let devices = pci::passthrough_candidates(&pci::parse_pciconf(PCICONF));
         // Failed checks, installed anyway; every question; reboot.
-        let c = cli(&["--dry-run", "--live"]);
+        let c = cli(&["--dry-run", "--no-encrypt", "--live"]);
         let failed = hw(checks(Status::Fail), devices);
         let input = "y\n1\nbox\n0\nn\n4\nr00t\nr00t\nalice\npw\npw\ny\ny\n";
         prompt::tests::fails_on_every_io_error(input, &|p| {
@@ -1019,6 +1173,7 @@ mod tests {
         // Failed checks, ignored, nothing asked.
         let c = cli(&[
             "--dry-run",
+            "--no-encrypt",
             "--non-interactive",
             "--ignore-doctor",
             "--disk",
@@ -1031,7 +1186,14 @@ mod tests {
             text_install(&c, &m, plan_for(&c), &failed, p)
         });
         // Passed checks, user from the flags without a password.
-        let c = cli(&["--dry-run", "--disk", "vtbd0", "--root-password", "r"]);
+        let c = cli(&[
+            "--dry-run",
+            "--no-encrypt",
+            "--disk",
+            "vtbd0",
+            "--root-password",
+            "r",
+        ]);
         let plan = InstallPlan {
             user: Some(("bob".into(), String::new())),
             ..plan_for(&c)
@@ -1041,7 +1203,7 @@ mod tests {
             text_install(&c, &m, plan.clone(), &passed, p)
         });
         // A disk with room next to its Linux: one more question.
-        let c = cli(&["--dry-run"]);
+        let c = cli(&["--dry-run", "--no-encrypt"]);
         let linux = hw_linux();
         prompt::tests::fails_on_every_io_error("1\ny\n\n\n\npw\npw\n\ny\n", &|p| {
             text_install(&c, &m, plan_for(&c), &linux, p)
@@ -1050,7 +1212,7 @@ mod tests {
 
     #[test]
     fn text_install_failures_after_the_questions() {
-        let c = cli(&["--dry-run", "--live"]);
+        let c = cli(&["--dry-run", "--no-encrypt", "--live"]);
         let ok = checks(Status::Ok);
         // `root` is not a user the plan accepts.
         let m = MockRunner::new();

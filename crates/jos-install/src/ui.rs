@@ -15,6 +15,7 @@ use jos_gfx::icons;
 use jos_gfx::image::{Image, Rect};
 use jos_gfx::Rgba;
 use juanitos_core::doctor::Status;
+use juanitos_core::keyboard;
 
 use crate::partitions::{Row, KINDS};
 use crate::wizard::{InstallState, Method, Page, Stretch, Target, Widget, Wizard, METHODS, PAGES};
@@ -23,6 +24,9 @@ pub const LOGICAL_W: i32 = 1280;
 pub const LOGICAL_H: i32 = 800;
 
 const SIDEBAR_W: i32 = 300;
+/// Distance between the pages of the sidebar: all of them clear the
+/// footer under it.
+const SIDEBAR_PITCH: i32 = 40;
 const CONTENT_X: i32 = 360;
 const CONTENT_R: i32 = 1220;
 const CONTENT_W: i32 = CONTENT_R - CONTENT_X;
@@ -214,6 +218,7 @@ pub fn render_page(w: &Wizard, width: u32, height: u32) -> (Image, Hits) {
         Page::Hardware => hardware(&mut c, w),
         Page::Disk => disk(&mut c, w),
         Page::Partitions => partitions(&mut c, w),
+        Page::Encryption => encryption(&mut c, w),
         Page::System => system(&mut c, w),
         Page::Passthrough => passthrough(&mut c, w),
         Page::Users => users(&mut c, w),
@@ -231,12 +236,12 @@ fn sidebar(c: &mut Canvas, w: &Wizard) {
     c.text_centered(cx, 152, "JUANITOS", 3, THEME.text);
     c.text_centered(cx, 186, "Installer", 2, THEME.text_muted);
     for (i, page) in PAGES.iter().enumerate() {
-        let y = 250 + i as i32 * 46;
+        let y = 250 + i as i32 * SIDEBAR_PITCH;
         let current = *page == w.page;
         let skipped = !w.shows(*page);
         let done = *page < w.page && !skipped;
         if current {
-            c.rounded(22, y - 12, SIDEBAR_W - 44, 40, 8, THEME.highlight);
+            c.rounded(22, y - 10, SIDEBAR_W - 44, 36, 8, THEME.highlight);
         }
         let dot_y = y + 7;
         if current {
@@ -975,6 +980,81 @@ fn passthrough(c: &mut Canvas, w: &Wizard) {
             2,
             CONTENT_W,
             THEME.text_muted,
+        );
+    }
+}
+
+fn encryption(c: &mut Canvas, w: &Wizard) {
+    title(
+        c,
+        "Encryption",
+        "Protect the disk with a passphrase, asked at every boot.",
+    );
+    checkbox(
+        c,
+        w,
+        Widget::Encrypt,
+        CONTENT_X,
+        BODY_Y,
+        "Encrypt the disk (recommended)",
+    );
+    if !w.encrypt {
+        paragraph(
+            c,
+            BODY_Y + 60,
+            &[
+                "Without it, anyone holding the disk reads everything on it:",
+                "the dom0 and every qube.",
+            ],
+        );
+        return;
+    }
+    field(
+        c,
+        w,
+        Widget::Passphrase,
+        CONTENT_X,
+        BODY_Y + 60,
+        "Passphrase",
+        "8 to 128 characters",
+    );
+    field(
+        c,
+        w,
+        Widget::Passphrase2,
+        CONTENT_X,
+        BODY_Y + 140,
+        "Repeat",
+        "",
+    );
+    checkbox(
+        c,
+        w,
+        Widget::ShowPw,
+        CONTENT_X,
+        BODY_Y + 224,
+        "Show the passphrase (to see what the keyboard makes of it)",
+    );
+    let mut y = paragraph(
+        c,
+        BODY_Y + 280,
+        &[
+            "AES-256 (GELI for the boot, ZFS for the data). The boot loader",
+            "asks for the passphrase and types with a US keyboard layout.",
+            "Lose it and the disk cannot be read.",
+        ],
+    );
+    if w.selected_keymap()
+        .is_some_and(|k| k.name != keyboard::DEFAULT_KEYMAP)
+    {
+        y += 10;
+        c.text_clip(
+            CONTENT_X,
+            y,
+            "Your layout is not US: type the passphrase as on a US keyboard.",
+            2,
+            CONTENT_W,
+            FAIL,
         );
     }
 }
