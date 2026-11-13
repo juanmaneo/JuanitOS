@@ -11,6 +11,7 @@ mod disk;
 mod oci;
 mod profile;
 mod qemu;
+mod secureboot;
 #[cfg(test)]
 #[path = "../tests/common/gpt.rs"]
 mod test_gpt;
@@ -47,8 +48,8 @@ struct Cli {
     #[arg(long, global = true)]
     work: Option<PathBuf>,
 
-    /// OVMF code file for `qemu`, `builder --auto` and `selfhost`
-    /// (auto-detected).
+    /// OVMF code file for `qemu`, `builder --auto`, `selfhost`, `oci` and
+    /// (a Secure Boot build) `secureboot-test` (auto-detected).
     #[arg(long, global = true)]
     firmware: Option<PathBuf>,
 
@@ -91,6 +92,26 @@ enum Cmd {
     /// a FreeBSD VM under QEMU (the builder's disk, under an overlay), or
     /// on this FreeBSD host with --on-host.
     Oci(OciArgs),
+    /// Secure Boot under QEMU: enroll fresh keys in a Secure Boot OVMF,
+    /// then check that a signed jos-boot.efi starts and chain-loads a
+    /// signed loader, and that unsigned images are refused.
+    SecurebootTest(SecurebootArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct SecurebootArgs {
+    /// The pre-loader to sign and boot (default: the one `bins` built in
+    /// <repo>/target/uefi).
+    #[arg(long)]
+    boot_efi: Option<PathBuf>,
+    /// Keys, signed images, variable stores and console logs (default
+    /// <work>/secureboot).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// The variable store template of --firmware (default: the VARS file
+    /// next to it).
+    #[arg(long)]
+    vars: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -417,6 +438,34 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 },
                 cli.dry_run,
             )
+        }
+        Cmd::SecurebootTest(a) => {
+            let code = cli
+                .firmware
+                .or_else(secureboot::find_code)
+                .filter(|f| f.is_file())
+                .context(
+                    "no Secure Boot build of OVMF (OVMF_CODE*.secboot*.fd) found; \
+                     install the ovmf/edk2 package or pass --firmware",
+                )?;
+            let vars = a
+                .vars
+                .or_else(|| secureboot::vars_for(&code))
+                .with_context(|| {
+                    format!(
+                        "no variable store template next to {}; pass --vars",
+                        code.display()
+                    )
+                })?;
+            let test = secureboot::Test {
+                boot_efi: a.boot_efi.unwrap_or_else(|| {
+                    make_builder(&plain).uefi_release_dir().join("jos-boot.efi")
+                }),
+                out: a.out.unwrap_or_else(|| work.join("secureboot")),
+                code,
+                vars,
+            };
+            secureboot::run(&test, runner, cli.dry_run)
         }
         Cmd::Compare(a) => {
             let report = compare::compare_tarballs(

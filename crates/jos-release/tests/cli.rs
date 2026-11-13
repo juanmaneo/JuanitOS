@@ -986,3 +986,224 @@ fn bad_arguments_are_rejected() {
     let (ok, out) = w.run(&["--profile", "/nonexistent/profile.toml", "fetch"]);
     assert!(!ok, "{out}");
 }
+
+/// A minimal PE32+ image: one section, room for a certificate table.
+fn efi_image(tag: u8) -> Vec<u8> {
+    fn put(b: &mut [u8], off: usize, v: u32) {
+        b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let mut b = vec![tag; 0x400];
+    b[..2].copy_from_slice(b"MZ");
+    put(&mut b, 0x3c, 0x40);
+    b[0x40..0x44].copy_from_slice(b"PE\0\0");
+    b[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
+    b[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
+    b[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
+    put(&mut b, 0x58 + 60, 0x200);
+    put(&mut b, 0x58 + 108, 16);
+    put(&mut b, 0x58 + 144, 0);
+    put(&mut b, 0x58 + 148, 0);
+    put(&mut b, 0x58 + 240 + 16, 0x200);
+    put(&mut b, 0x58 + 240 + 20, 0x200);
+    b
+}
+
+/// A Secure Boot OVMF: `fw-sb/OVMF_CODE.secboot.fd`, and next to it an
+/// empty store of authenticated variables, `OVMF_VARS.fd`.
+fn secboot_firmware(w: &Work) -> String {
+    let dir = w.0.join("fw-sb");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut vars = vec![0u8; 0x48];
+    vars.extend([
+        0x78, 0x2c, 0xf3, 0xaa, 0x7b, 0x94, 0x9a, 0x43, 0xa1, 0x80, 0x2e, 0x14, 0x4e, 0xc3, 0x77,
+        0x92,
+    ]);
+    vars.extend(0x10000u32.to_le_bytes());
+    vars.extend([0x5a, 0xfe, 0, 0, 0, 0, 0, 0]);
+    vars.resize(0x48 + 0x10000, 0xff);
+    std::fs::write(dir.join("OVMF_VARS.fd"), vars).unwrap();
+    let code = dir.join("OVMF_CODE.secboot.fd");
+    std::fs::write(&code, [1u8; 64]).unwrap();
+    code.to_string_lossy().into_owned()
+}
+
+/// QEMU for `secureboot-test`: prints what the firmware and jos-boot
+/// print for the case its ESP belongs to; for the case named by
+/// `FAKE_FAIL`, what a firmware without Secure Boot prints.
+const SB_QEMU: (&str, &str) = (
+    "qemu-system-x86_64",
+    r#"#!/bin/sh
+for a; do case $a in file=*/esp.img,*) esp=${a#file=}; esp=${esp%%,*} ;; esac; done
+dir=${esp%/esp.img}
+case=${dir##*/}
+b='jos-boot: no graphics output, booting \EFI\FREEBSD\LOADER.EFI'
+[ "$FAKE_FAIL" = "$case" ] && case=insecure
+case $case in
+    unsigned-loader) printf '%s\r\n%s\r\n' "$b" 'jos-boot: loading \EFI\FREEBSD\LOADER.EFI: Error { status: ACCESS_DENIED, data: () }' ;;
+    unsigned-boot) printf 'BdsDxe: failed to load Boot0002: Access Denied\r\n' ;;
+    *) printf '%s\r\n%s\r\n' "$b" "$b" ;;
+esac
+"#,
+);
+
+#[test]
+fn secure_boot_test_plans_its_boots() {
+    let w = Work::new("sb-plan");
+    let fw = secboot_firmware(&w);
+    let out = w.ok(&["--firmware", &fw, "secureboot-test"]);
+    let has = |line: String| assert!(out.contains(&line), "{line}\n{out}");
+    let sb = w.path("secureboot");
+    has("+ openssl req -new -x509 -newkey rsa:2048".into());
+    has(format!(
+        "+ cp {}/target/uefi/x86_64-unknown-uefi/release/jos-boot.efi {sb}/unsigned.efi",
+        repo_root().canonicalize().unwrap().display()
+    ));
+    has(format!("+ sign {sb}/signed.efi"));
+    has(format!(
+        "+ enroll {sb}/keys/{{PK,KEK,db}}.esl: {} -> {sb}/vars.fd",
+        w.path("fw-sb/OVMF_VARS.fd")
+    ));
+    has(format!(
+        "+ mcopy -i {sb}/unsigned-boot/esp.img {sb}/unsigned.efi ::/EFI/BOOT/BOOTX64.EFI"
+    ));
+    has(format!(
+        "+ mcopy -i {sb}/unsigned-loader/esp.img {sb}/unsigned.efi ::/EFI/FREEBSD/LOADER.EFI"
+    ));
+    has(format!(
+        "-drive if=pflash,format=raw,unit=0,readonly=on,file={fw} \
+         -drive if=pflash,format=raw,unit=1,file={sb}/signed/vars.fd"
+    ));
+    has("Secure Boot works".into());
+
+    let out = w.ok(&[
+        "--firmware",
+        &fw,
+        "secureboot-test",
+        "--vars",
+        "/x/v.fd",
+        "--out",
+        "/o",
+        "--boot-efi",
+        "/b.efi",
+    ]);
+    assert!(
+        out.contains("+ enroll /o/keys/{PK,KEK,db}.esl: /x/v.fd -> /o/vars.fd"),
+        "{out}"
+    );
+    assert!(out.contains("+ cp /b.efi /o/signed.efi"), "{out}");
+
+    let (ok, out) = w.run(&["--firmware", &w.path("missing.fd"), "secureboot-test"]);
+    assert!(!ok && out.contains("no Secure Boot build of OVMF"), "{out}");
+    let lone = w.firmware(false);
+    let (ok, out) = w.run(&["--firmware", &lone, "secureboot-test"]);
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains(&format!(
+            "no variable store template next to {lone}; pass --vars"
+        )),
+        "{out}"
+    );
+}
+
+#[test]
+fn secure_boot_test_drives_a_fake_firmware() {
+    let w = Work::new("sb-run");
+    let fw = secboot_firmware(&w);
+    let tools = ["openssl", "mformat", "mmd", "mcopy"];
+    let qemu = fake_path(&w.0.join("bin"), &[SB_QEMU], &tools);
+    let no_qemu = fake_path(&w.0.join("bin-tools"), &[], &tools);
+    let no_openssl = fake_path(&w.0.join("bin-qemu"), &[SB_QEMU], &[]);
+    std::fs::write(w.0.join("boot.efi"), efi_image(7)).unwrap();
+    std::fs::write(w.0.join("junk.efi"), b"junk").unwrap();
+    std::fs::write(w.0.join("junk.fd"), b"junk").unwrap();
+    let sb = |out: &str, efi: &str, extra: &[&str], path: &Path, fail: &str| {
+        let (out, efi, work) = (w.path(out), w.path(efi), w.path(""));
+        let args = [
+            "--work",
+            &work,
+            "--firmware",
+            &fw,
+            "secureboot-test",
+            "--out",
+            &out,
+            "--boot-efi",
+            &efi,
+        ];
+        jos(
+            &repo_root(),
+            Some(path),
+            &[("FAKE_FAIL", fail)],
+            &[&args[..], extra].concat(),
+        )
+    };
+    let failed = |out: &str, efi: &str, extra: &[&str], path: &Path, fail: &str, why: &str| {
+        let (ok, text) = sb(out, efi, extra, path, fail);
+        assert!(!ok, "{text}");
+        assert!(text.contains(why), "missing {why:?} in:\n{text}");
+    };
+
+    let (ok, out) = sb("ok", "boot.efi", &[], &qemu, "");
+    assert!(ok && out.contains("Secure Boot works"), "{out}");
+    let ok_dir = w.0.join("ok");
+    let unsigned = std::fs::read(ok_dir.join("unsigned.efi")).unwrap();
+    let signed = std::fs::read(ok_dir.join("signed.efi")).unwrap();
+    assert_eq!(unsigned, efi_image(7));
+    assert!(signed.len() > unsigned.len());
+    let vars = std::fs::read(ok_dir.join("vars.fd")).unwrap();
+    let pk: &[u8] = b"P\0K\0\0\0";
+    assert!(vars.windows(pk.len()).any(|w| w == pk));
+    assert!(ok_dir.join("keys/db.key").is_file());
+    for case in ["signed", "unsigned-loader", "unsigned-boot"] {
+        let log = std::fs::read_to_string(ok_dir.join(case).join("console.log")).unwrap();
+        assert!(!log.is_empty(), "{case}");
+        assert!(ok_dir.join(case).join("esp.img").is_file(), "{case}");
+    }
+
+    // A firmware that boots anything.
+    failed(
+        "ok",
+        "boot.efi",
+        &[],
+        &qemu,
+        "unsigned-boot",
+        "Secure Boot test failed: the firmware refuses an unsigned jos-boot.efi",
+    );
+    failed(
+        "x",
+        "missing.efi",
+        &[],
+        &qemu,
+        "",
+        "does not exist; build it with `jos-release bins`",
+    );
+    failed("x", "boot.efi", &[], &no_openssl, "", "running openssl");
+    failed("x", "junk.efi", &[], &qemu, "", "not a usable PE image");
+    let dir = w.path("bin");
+    let reading = format!("reading {dir}: ");
+    failed("x", "boot.efi", &["--vars", &dir], &qemu, "", &reading);
+    failed(
+        "x",
+        "boot.efi",
+        &["--vars", &w.path("junk.fd")],
+        &qemu,
+        "",
+        "enrolling the keys into a copy of",
+    );
+    failed(
+        "x",
+        "boot.efi",
+        &[],
+        &no_qemu,
+        "",
+        "running qemu-system-x86_64",
+    );
+    std::fs::create_dir_all(w.0.join("store/vars.fd")).unwrap();
+    failed("store", "boot.efi", &[], &qemu, "", "Is a directory");
+    std::fs::create_dir_all(w.0.join("copy/unsigned.efi")).unwrap();
+    failed("copy", "boot.efi", &[], &qemu, "", "copying");
+    std::fs::create_dir_all(w.0.join("case")).unwrap();
+    std::fs::write(w.0.join("case/signed"), b"").unwrap();
+    failed("case", "boot.efi", &[], &qemu, "", "preparing");
+    std::fs::create_dir_all(w.0.join("esp/signed/esp.img")).unwrap();
+    failed("esp", "boot.efi", &[], &qemu, "", "mformat exited with");
+}
