@@ -9,8 +9,9 @@ one text file written by `jos doctor --report` plus a few photos.
 
 In the firmware (BIOS/UEFI) setup:
 
-- **Secure Boot: off.** `jos-boot.efi` and FreeBSD's loader are not
-  signed.
+- **Secure Boot: off.** The ISO's `jos-boot.efi` and FreeBSD's loader
+  are not signed. Once installed, it can go back on with your own keys
+  (`docs/secure-boot.md`).
 - **Intel Virtualization Technology (VT-x) and VT-d: on** (AMD: SVM and
   IOMMU/AMD-Vi). Without VT-x the doctor fails `cpu virtualization` and
   no qube can start; without VT-d it warns on `iommu hardware` (no ACPI

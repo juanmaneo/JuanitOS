@@ -72,10 +72,13 @@ JuanitOS is less the architecture than the engineering discipline:
   for one person; the price is a larger TCB than CLIP OS or Qubes' dom0.
   The mitigations in `sysctl.conf.sample` and a HardenedBSD base (supported
   but untested) narrow the gap.
-- **No secure boot chain yet.** `jos-boot.efi` and `loader.efi` are not
-  signed. UEFI Secure Boot with a project key, and ZFS-level integrity
-  (`sha512` checksums are on by default; `bectl` snapshots before updates)
-  are future work.
+- **Secure Boot uses the owner's keys and ends at the loader.** No key
+  is signed by Microsoft. `jos secureboot` makes the owner a PK/KEK/db
+  hierarchy, signs `jos-boot.efi` and `loader.efi` on the ESP, and
+  enrolls the keys (`docs/secure-boot.md`). FreeBSD's loader does not
+  verify the kernel, so the chain proves the bootloader and not the
+  kernel. ZFS-level integrity (`sha512` checksums are on by default;
+  `bectl` snapshots before updates) is future work.
 - **GPU passthrough is a trade-off.** A Linux qube owning an NVIDIA card
   is exactly the kind of large driver surface CLIP OS avoids. It lives in
   its own qube with no network by default for that reason.

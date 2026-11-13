@@ -42,6 +42,7 @@ See `docs/` for details:
 - `docs/boot-splash.md` — the graphical boot: pre-loader, kernel splash, daemon
 - `docs/relibc-cosmic.md` — where Relibc and COSMIC fit (host vs. guest)
 - `docs/security.md` — what is borrowed from QubesOS, CLIP OS and HardenedBSD
+- `docs/secure-boot.md` — UEFI Secure Boot with your own keys (`jos secureboot`)
 - `docs/hardware-testing.md` — first boot on a new machine and `jos doctor --report`
 
 ## Repository layout
@@ -388,6 +389,7 @@ with 100 % coverage (lines, functions and regions, enforced in CI by
 | NIC passthrough to `sys-net` | nested dom0 with an emulated AMD IOMMU | `docs/gpu-passthrough.md` |
 | `jos setup` (first-boot qubes) | nested dom0, no GPU | `docs/architecture.md` |
 | dom0 userland as an OCI image (`jos-release oci`) | podman on FreeBSD, nested in QEMU | `docs/installer.md` |
+| Secure Boot: signed chain, unsigned images refused | QEMU + Secure Boot OVMF (`jos-release secureboot-test`) | `docs/secure-boot.md` |
 
 ### On real hardware
 
@@ -408,6 +410,8 @@ in manual partitioning.
 * **Passthrough on real hardware**: the nested run proves the plumbing,
   not IOMMU groups, device resets or GPU option ROMs.
 * **`jos setup` on real hardware**.
+* **Secure Boot on real hardware**: `jos secureboot enroll` has only run
+  against a fake `efivar`.
 * **A display for Redox qubes**: blocked by a Redox `pci_types` bug,
   reported upstream (`tools/dev/redox-fbuf/`, `docs/templates.md`).
 
