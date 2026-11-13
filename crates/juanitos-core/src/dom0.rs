@@ -125,6 +125,14 @@ pub const EFIFB_MODULE: &str = "jos_efifb";
 /// its text login.
 pub const LOGIN_VT: i32 = 9;
 
+/// Written by `jos-firstboot` once the first-boot wizard is done or
+/// skipped; `rc.d/jos-firstboot` does nothing while it exists.
+pub const FIRSTBOOT_MARKER: &str = "/var/db/juanitos/firstboot.done";
+
+/// Runs the first-boot wizard (`jos_firstboot_enable`) before the login
+/// screen, on the same VT.
+pub const RC_D_JOS_FIRSTBOOT: &str = include_str!("../../../freebsd/rc.d/jos-firstboot");
+
 /// PAM policy of the login screen (its PAM service is `jos-greet`).
 pub const PAM_JOS_GREET_PATH: &str = "/etc/pam.d/jos-greet";
 pub const PAM_JOS_GREET: &str = include_str!("../../../freebsd/pam.d/jos-greet");
@@ -394,6 +402,8 @@ pub fn rc_conf(flavor: Flavor, opts: &Dom0Options) -> String {
         if flavor == Flavor::Installed {
             s.push_str("# Login screen: jos-greet on ttyv8 (Alt+F9), see rc.d/jos-login\n");
             s.push_str("jos_login_enable=\"YES\"\n");
+            s.push_str("# First-boot wizard (creates the qubes), see rc.d/jos-firstboot\n");
+            s.push_str("jos_firstboot_enable=\"YES\"\n");
         }
     }
     s.push_str("# Graphical boot (see docs/boot-splash.md); Esc shows the console\n");
@@ -540,6 +550,11 @@ pub fn static_files() -> Vec<(&'static str, String, bool)> {
             true,
         ),
         ("/usr/local/etc/rc.d/jos-login", lf(RC_D_JOS_LOGIN), true),
+        (
+            "/usr/local/etc/rc.d/jos-firstboot",
+            lf(RC_D_JOS_FIRSTBOOT),
+            true,
+        ),
         ("/etc/rc.d/jos-bootok", lf(RC_D_JOS_BOOTOK), true),
         ("/usr/local/libexec/jos-session", lf(JOS_SESSION), true),
         (PAM_JOS_GREET_PATH, lf(PAM_JOS_GREET), false),
@@ -563,6 +578,7 @@ pub const BINARIES: &[&str] = &[
     "jos-release",
     "jos-splash",
     "jos-greet",
+    "jos-firstboot",
 ];
 
 #[cfg(test)]
@@ -608,6 +624,7 @@ mod tests {
         assert!(s.contains("jos_enable=\"YES\""));
         assert!(s.contains("seatd_enable=\"YES\""));
         assert!(s.contains("jos_login_enable=\"YES\""));
+        assert!(s.contains("jos_firstboot_enable=\"YES\""));
         assert!(!s.contains("cosmic_greeter"), "no greetd on FreeBSD");
         assert!(s.contains("kld_list=\"vmm nmdm if_bridge\""));
 
@@ -621,6 +638,7 @@ mod tests {
         );
         assert!(!no_gui.contains("seatd_enable"));
         assert!(!no_gui.contains("jos_login_enable"));
+        assert!(!no_gui.contains("jos_firstboot_enable"));
         assert!(
             !no_gui.contains("jos_kms_module") && !no_gui.contains("jos_kms_fallback"),
             "no KMS driver without a desktop"
@@ -805,6 +823,7 @@ mod tests {
             ("/usr/local/etc/rc.d", "jos-splash-finish"),
             ("/usr/local/etc/rc.d", "jos-splash-shutdown"),
             ("/usr/local/etc/rc.d", "jos-login"),
+            ("/usr/local/etc/rc.d", "jos-firstboot"),
             ("/etc/rc.d", "jos-bootok"),
         ] {
             let path = format!("{dir}/{name}");
@@ -814,6 +833,13 @@ mod tests {
             assert!(!f.1.contains('\r'), "{name} must have LF line endings");
         }
         assert!(BINARIES.contains(&"jos-splash"));
+        assert!(BINARIES.contains(&"jos-firstboot"));
+        // The wizard has the login screen's VT before the login screen.
+        assert!(RC_D_JOS_FIRSTBOOT.contains("BEFORE: jos-login"));
+        assert!(RC_D_JOS_FIRSTBOOT.contains(&format!("jos_firstboot_vt:=\"{LOGIN_VT}\"")));
+        assert!(
+            RC_D_JOS_FIRSTBOOT.contains(&format!("jos_firstboot_marker:=\"{FIRSTBOOT_MARKER}\""))
+        );
         assert_eq!(JOS_SPLASH_BIN, "/usr/local/bin/jos-splash");
         // The live installer ends the splash itself (jos-install's
         // `end_splash`); the picture stays up until then.

@@ -212,6 +212,7 @@ Hooks:
 | `jos-splash-network`  | `NETWORKING`    | `stage network`                         |
 | `jos`                 | `LOGIN`         | `stage qubes`                           |
 | `jos-splash-finish`   | `LOGIN jos`     | `stage desktop`, then `finish` if the login screen is enabled and installed, else `finish --console` |
+| `jos-firstboot`       | `LOGIN jos jos-splash-finish`, before `jos-login` | nothing; runs the first-boot wizard once, in the foreground, on the login screen's VT |
 | `jos-login`           | `LOGIN seatd dbus jos-splash-finish` | nothing; starts `jos-greet` under daemon(8) |
 
 At shutdown, rc.shutdown stops the scripts that carry `KEYWORD: shutdown`

@@ -306,6 +306,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jos-firstboot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "jos-fb",
+ "jos-gfx",
+ "juanitos-core",
+]
+
+[[package]]
 name = "jos-fwcfg"
 version = "0.1.0"
 dependencies = [

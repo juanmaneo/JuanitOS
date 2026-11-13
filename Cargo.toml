@@ -8,6 +8,7 @@ members = [
     "crates/jos-fb",
     "crates/jos-splash",
     "crates/jos-greet",
+    "crates/jos-firstboot",
     "crates/juanitos-core",
     "crates/jos",
     "crates/jos-install",

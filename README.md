@@ -59,6 +59,7 @@ crates/jos-boot        graphical UEFI pre-loader that chain-loads loader.efi
 crates/jos-splash      boot splash daemon on the vt(4) framebuffer + rc.d clients
 crates/jos-fb          vt(4) framebuffer display, keyboard and mouse decoders (splash, installer, greeter)
 crates/jos-greet       login screen: PAM, then the COSMIC session on the same VT
+crates/jos-firstboot   first-boot wizard: picks sys-net's card and the app qubes, runs `jos setup`
 crates/jos-ventoy-chain no_std reader of Ventoy's chain blob, linked into geom_ventoy.ko
 xtask/                 `cargo xtask`: CI pipeline, coverage gate, screenshots
 coverage.toml          per-file uncovered-line/function/region allowances (ratcheted down to 0)
@@ -142,7 +143,10 @@ screens: `docs/installer.md`. Trying it on a
 new machine: `docs/hardware-testing.md` (what each boot icon means, and
 `jos doctor --report FILE` to bring back what the hardware looks like).
 
-After the first boot, `jos setup` does what the QubesOS firstboot does,
+On the first boot, a graphical wizard (`jos-firstboot`, like QubesOS's
+initial setup; `docs/architecture.md`) asks which network card
+`sys-net` gets and which app qubes to create, then runs `jos setup`,
+which can also be run by hand. `jos setup` does what the QubesOS firstboot does,
 and the network only ever goes through the qubes: the dom0 gets no
 address and downloads nothing. It builds the `fbsd15-net` template from
 the FreeBSD image shipped on the install media (its provisioning boot is

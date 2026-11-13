@@ -110,7 +110,9 @@ loads its driver when devmatch did not — all USB NIC modules ship in the
 kernel), but no one runs DHCP on it, and none should: the dom0 never
 gets an address, the qubes do. Two ways to get connectivity:
 
-- **The qube chain (the normal way):** `jos setup --uplink ue0` as root.
+- **The qube chain (the normal way):** the first-boot wizard does this
+  (plug the adapter in, then Rescan on its Network page), or
+  `jos setup --uplink ue0` as root.
   The dom0 downloads nothing (it has no route to download through): the
   FreeBSD VM image is on the install media, in `/var/cache/juanitos/
   images`. `jos` creates the bridge `bru-ue0` with `ue0` as member and

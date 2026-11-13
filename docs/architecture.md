@@ -123,6 +123,44 @@ network card was reserved at install time has nothing to download
 through, so the templates have to come from local images
 (`jos template install --image --checksums`) before `jos setup`.
 
+### The first-boot wizard: `jos-firstboot`
+
+On the first boot of an installed system `rc.d/jos-firstboot` runs
+`jos-firstboot` (`crates/jos-firstboot`) before the login screen, on the
+same terminal (`ttyv8`, VT 9), the way QubesOS's initial setup follows
+Anaconda. It is a front end to `jos setup`, drawn like the installer:
+
+1. **Network**: the cards `ifconfig -a` lists (USB adapters' drivers are
+   loaded first; Rescan after plugging one in), with their link state.
+   The one picked becomes `--uplink`. A PCI card on a machine with IOMMU
+   is passed through to `sys-net` unless the box is unticked
+   (`--no-passthrough`); everything else is bridged. Wi-Fi is listed but
+   cannot be the uplink yet. The dom0 never gets an address and never
+   runs `dhclient`: only `sys-net` talks to the network.
+2. **Qubes**: the app qubes to create (`work`, `personal`, `untrusted`,
+   and `vault` offline; `--app NAME[:offline]`), the template they clone
+   (`--app-template`, `fbsd15-dev` by default, whose image is on the
+   media) and whether a reserved NVIDIA card gets a `gpu` qube.
+3. **Summary**: the plan in words, and the exact `jos setup` command.
+4. **Creating**: `jos setup` runs as a child process; its `==> [i/n]`
+   steps drive the progress bar, the whole output goes to
+   `/var/log/jos-firstboot.log`.
+5. **Done**: Log in (or Reboot, when `jos setup` reserved devices for
+   passthrough). A failure shows the last lines of `jos setup`'s errors,
+   with Retry, or Later (the wizard comes back at the next boot).
+
+Finishing or skipping it writes `/var/db/juanitos/firstboot.done`;
+after that the boot goes straight to the login screen. `jos-firstboot run
+--force` (as root, from a text console) shows it again, `--dry-run`
+passes `--dry-run` to `jos setup` and writes no marker, and
+`jos-firstboot screenshots DIR` renders the pages on any host.
+
+| | |
+|---|---|
+| ![welcome](images/firstboot-1-welcome.png) | ![network](images/firstboot-2-network.png) |
+| ![qubes](images/firstboot-3-qubes.png) | ![summary](images/firstboot-4-summary.png) |
+| ![progress](images/firstboot-5-progress.png) | ![done](images/firstboot-6-done.png) |
+
 ## VM lifecycle
 
 `jos start <name>` spawns a detached `jos supervise <name>` (own process

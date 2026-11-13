@@ -225,6 +225,9 @@ The flow borrows from the two installers QubesOS users know:
 | ![summary](images/installer-7-summary.png) | ![install](images/installer-8-install.png) |
 | ![finish](images/installer-9-finish.png) | |
 
+The installed system starts with the first-boot wizard, which creates
+the qubes (`docs/architecture.md`, The first-boot wizard).
+
 ### Keyboard layout
 
 The kernel boots with its built-in `us` keymap, so on any other keyboard
@@ -454,7 +457,8 @@ free space rather than erasing the disk.
 5. `tar -xpf juanitos-dom0.txz -C /mnt --unlink` after verifying the sha256,
    then `dist/images/` into `/var/cache/juanitos/images`, where `jos
    setup` finds the template image without the dom0 downloading it.
-6. `rc.conf` (`zfs_enable`, `jos_enable`, `seatd`, `dbus`, `jos_login`;
+6. `rc.conf` (`zfs_enable`, `jos_enable`, `seatd`, `dbus`, `jos_login`,
+   `jos_firstboot`;
    `jos_kms_module` names the `drm-kmod` driver for the GPU `pciconf`
    reports, loaded by `rc.d/jos-kms` before the boot splash, and
    `jos_kms_fallback="jos_efifb"` the KMS driver on the UEFI frame buffer

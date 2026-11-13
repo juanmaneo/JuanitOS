@@ -1,0 +1,70 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# PROVIDE: jos-firstboot
+# REQUIRE: LOGIN jos jos-splash-finish syscons
+# BEFORE: jos-login
+#
+# The JuanitOS first-boot wizard: jos-firstboot on the login screen's VT
+# (9, Alt+F9), once, on the first boot of an installed system. It asks
+# which network card sys-net gets and which qubes to create, then runs
+# `jos setup`. The boot waits for it (it runs in the foreground); the
+# login screen starts when it is done.
+#
+# jos_firstboot_enable="YES"   run the wizard while the marker is missing
+# jos_firstboot_bin            the wizard (/usr/local/bin/jos-firstboot)
+# jos_firstboot_vt             its virtual terminal, 1-based (9 = ttyv8)
+# jos_firstboot_marker         written when the wizard is done or skipped
+#
+# Run it again later with `service jos-firstboot onestart` after removing
+# the marker, or `jos-firstboot run --force` from a root shell.
+
+. /etc/rc.subr
+
+name="jos_firstboot"
+rcvar="jos_firstboot_enable"
+
+load_rc_config $name
+
+: ${jos_firstboot_enable:="NO"}
+: ${jos_firstboot_bin:="/usr/local/bin/jos-firstboot"}
+: ${jos_firstboot_vt:="9"}
+: ${jos_firstboot_marker:="/var/db/juanitos/firstboot.done"}
+: ${jos_firstboot_log:="/var/log/jos-firstboot.log"}
+
+start_cmd="jos_firstboot_start"
+stop_cmd=":"
+
+jos_firstboot_start()
+{
+	if [ -e "${jos_firstboot_marker}" ]; then
+		return 0
+	fi
+	if [ ! -x "${jos_firstboot_bin}" ]; then
+		warn "${jos_firstboot_bin} is not installed; run jos setup by hand"
+		return 0
+	fi
+	if ! jos_firstboot_has_framebuffer; then
+		warn "console is in VGA text mode; run jos setup by hand"
+		return 0
+	fi
+	# rc(8)'s PATH has no /usr/local: jos setup runs packaged tools.
+	if ! PATH="${PATH}:/usr/local/sbin:/usr/local/bin" "${jos_firstboot_bin}" run --vt "${jos_firstboot_vt}" \
+	    --marker "${jos_firstboot_marker}" >> "${jos_firstboot_log}" 2>&1; then
+		warn "first-boot wizard failed; see ${jos_firstboot_log}"
+	fi
+}
+
+# Same test as rc.d/jos-login: vt(4) names its driver at boot, and a
+# BIOS boot without a KMS driver leaves it in text mode.
+jos_firstboot_has_framebuffer()
+{
+	local last
+	last=$(/sbin/dmesg -a 2>/dev/null | grep -E '^VT(\(|: Replacing driver)' | tail -n 1)
+	case "${last}" in
+	"VT(vga): text"*) return 1 ;;
+	esac
+	return 0
+}
+
+run_rc_command "$1"
