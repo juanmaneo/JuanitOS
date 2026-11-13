@@ -23,6 +23,7 @@ pub mod pci;
 pub mod release;
 pub mod report;
 pub mod requests;
+pub mod secureboot;
 pub mod setup;
 pub mod share;
 pub mod supervisor;

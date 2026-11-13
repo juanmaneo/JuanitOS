@@ -211,6 +211,8 @@ fn is_query(program: &str, args: &[&str]) -> bool {
         "kenv" => !args.iter().any(|a| *a == "-u" || a.contains('=')),
         "gpart" => args.first() == Some(&"show"),
         "acpidump" => args == ["-t"],
+        // `efivar -p` prints a variable; `-w` writes and `-d` deletes one.
+        "efivar" => args.first() == Some(&"-p"),
         "mount" => args == ["-p"],
         "ifconfig" => args.len() == 1,
         "route" => args.contains(&"get"),
@@ -510,6 +512,8 @@ mod tests {
         assert!(!is_query("kenv", &["hw.dmar.enable=1"]));
         assert!(!is_query("kenv", &["-u", "hw.dmar.enable"]));
         assert!(is_query("gpart", &["show"]));
+        assert!(is_query("efivar", &["-p", "-b", "-N", "-n", "x-SetupMode"]));
+        assert!(!is_query("efivar", &["-w", "-n", "x-PK", "-f", "PK.auth"]));
         assert!(is_query("acpidump", &["-t"]));
         assert!(!is_query("acpidump", &["-o", "/tmp/dsdt"]));
         assert!(is_query("kill", &["-0", "42"]));
