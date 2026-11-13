@@ -138,7 +138,7 @@ What `jos-release all` does, step by step (each is also a subcommand):
 | `bins`   | `cargo build --release --workspace`                                                       | —                                               |
 | `rootfs` | extract the sets, `pkg -c rootfs install` the dom0 package set, add JuanitOS files        | `tar(1)`, `pkg(8)` as in `release/tools/vmimage.subr` |
 | `pack`   | `juanitos-dom0.txz` + `MANIFEST` (sha256, size)                                           | `tar(1)`                                        |
-| `iso`    | live overlay (`rc.conf`, `loader.conf`, `rc.local`), ESP image, `makefs -t cd9660`        | `makefs(8)` as in `release/amd64/mkisoimages.sh` |
+| `iso`    | live overlay (`rc.conf`, `loader.conf`, `rc.local`), FreeBSD's VM image for the templates (verified; kept in `<work>/images`, or taken from the running dom0's cache in stage 2), ESP image, `makefs -t cd9660` | `makefs(8)` as in `release/amd64/mkisoimages.sh` |
 
 Output lands in `release/out/`: the ISO, its `.sha256`, the dom0 tarball
 and the extracted `rootfs/` for inspection.

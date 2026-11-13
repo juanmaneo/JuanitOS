@@ -296,6 +296,11 @@ pub const RELEASE_INFO_PATH: &str = "/usr/local/share/juanitos/release.toml";
 pub const DIST_DIR: &str = "/usr/local/share/juanitos/dist";
 pub const DIST_TARBALL: &str = "juanitos-dom0.txz";
 pub const DIST_MANIFEST: &str = "MANIFEST";
+/// Subdirectory of [`DIST_DIR`] with template images and their checksum
+/// lists, laid out like the dom0's image cache (`cache_dir/images`), into
+/// which the installer copies them: `jos setup` builds `sys-net` without
+/// the dom0 downloading anything.
+pub const DIST_IMAGES: &str = "images";
 
 /// Which flavour of dom0 configuration to render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

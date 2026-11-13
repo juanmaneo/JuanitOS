@@ -11,10 +11,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context};
 
+use juanitos_core::config::{GlobalConfig, QubeStore};
 use juanitos_core::dom0::{self, Dom0Options, Flavor};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::release::{parse_freebsd_manifest, sha256_file, DistManifest, ReleaseInfo};
 use juanitos_core::sys::Runner;
+use juanitos_core::template::{self, Recipe, TemplateInstaller};
 
 use crate::profile::{Profile, Tarball};
 use crate::ventoy;
@@ -38,6 +40,10 @@ pub const DRM_KMOD_MEMBERS: &[&str] = &[
 ];
 /// Where the dom0 keeps its own sources (stage 2 builds from here).
 pub const INSTALLED_SOURCE: &str = "/usr/local/src/juanitos";
+/// Templates whose image the medium carries (both are FreeBSD's VM
+/// image): `jos setup` builds `sys-net` from it with no download in the
+/// dom0, which has no network of its own.
+pub const SHIPPED_TEMPLATES: &[&str] = &["fbsd15-net", "fbsd15-dev"];
 
 pub struct Builder<'a> {
     pub runner: &'a dyn Runner,
@@ -176,6 +182,10 @@ impl<'a> Builder<'a> {
     }
     pub fn iso(&self) -> PathBuf {
         self.work.join(self.profile.iso_name())
+    }
+    /// Template images downloaded by earlier builds.
+    pub fn images_cache(&self) -> PathBuf {
+        self.work.join("images")
     }
 
     fn step(&self, msg: &str) {
@@ -800,6 +810,7 @@ impl<'a> Builder<'a> {
             .copy(&self.tarball(), &dist.join(dom0::DIST_TARBALL))?;
         self.fs
             .copy(&self.manifest(), &dist.join(dom0::DIST_MANIFEST))?;
+        self.ship_template_images(&dist.join(dom0::DIST_IMAGES));
 
         // EFI system partition image: jos-boot.efi as the default boot
         // file when shipped, FreeBSD's loader next to it.
@@ -862,6 +873,61 @@ impl<'a> Builder<'a> {
 }
 
 impl Builder<'_> {
+    /// [`SHIPPED_TEMPLATES`]' images and checksum lists into `dst`, which
+    /// the installer copies into the new dom0's image cache. Best effort:
+    /// without them, `jos setup` needs the image from a USB stick.
+    fn ship_template_images(&self, dst: &Path) {
+        self.step("Shipping the template images");
+        let recipes = template::RECIPES
+            .iter()
+            .filter(|r| SHIPPED_TEMPLATES.contains(&r.name));
+        for r in recipes {
+            if let Err(e) = self.ship_template_image(r, dst) {
+                println!(
+                    "   warning: no {} image on the medium ({e:#}); `jos setup` will need \
+                     --image and --checksums",
+                    r.name
+                );
+            }
+        }
+    }
+
+    /// One recipe's image and checksum list, verified: from the build's
+    /// cache, else the running dom0's (stage 2), else downloaded.
+    fn ship_template_image(&self, r: &Recipe, dst: &Path) -> anyhow::Result<()> {
+        let cache = self.images_cache();
+        let cfg = GlobalConfig {
+            cache_dir: Self::s(&self.work),
+            ..GlobalConfig::default()
+        };
+        let installed = self
+            .installed_root
+            .join(GlobalConfig::default().cache_dir.trim_start_matches('/'))
+            .join("images");
+        let sums = format!("{}.checksums", r.name);
+        for name in [sums.as_str(), r.image_file()] {
+            let (from, to) = (installed.join(name), cache.join(name));
+            if from.is_file() && !to.is_file() {
+                self.fs.copy(&from, &to)?;
+            }
+        }
+        let store = QubeStore::new(self.work.join("qubes"));
+        let image = TemplateInstaller {
+            runner: self.runner,
+            cfg: &cfg,
+            store: &store,
+            dry_run: self.fs.dry_run,
+        }
+        .fetch(r, None)?;
+        self.fs.copy(&cache.join(&sums), &dst.join(&sums))?;
+        // The recipes share the image: it is copied once.
+        let shipped = dst.join(r.image_file());
+        if !shipped.is_file() {
+            self.fs.copy(&image, &shipped)?;
+        }
+        Ok(())
+    }
+
     /// FreeBSD kernel sources for building modules: the running system's
     /// `/usr/src/sys` when it matches, else `src.txz` of the profile's
     /// release (verified against its MANIFEST), extracted under the work
@@ -1589,6 +1655,9 @@ mod tests {
         assert!(has("makefs -t msdos"));
         assert!(has("makefs -t cd9660"));
         assert!(has("JuanitOS-"));
+        assert!(has(
+            "fetch -o /work/images/fbsd15-net.checksums https://download.freebsd.org/"
+        ));
     }
 
     #[test]
@@ -1747,6 +1816,76 @@ mod tests {
             chain_object: None,
             installed_root: dir.join("root"),
         }
+    }
+
+    /// FreeBSD's VM image and the shipped templates' checksum lists under
+    /// `rel` (an image cache), verified; returns the image's name.
+    fn cached_images(s: &Scratch, rel: &str) -> &'static str {
+        let file = template::find("fbsd15-net").unwrap().image_file();
+        let sum = juanitos_core::release::sha256_bytes(b"image");
+        s.put(&format!("{rel}/{file}"), b"image");
+        for name in SHIPPED_TEMPLATES {
+            s.put(
+                &format!("{rel}/{name}.checksums"),
+                format!("SHA256 ({file}) = {sum}\n").as_bytes(),
+            );
+        }
+        file
+    }
+
+    #[test]
+    fn template_images_come_from_the_cache_the_dom0_or_the_network() {
+        let s = Scratch::new("images");
+        let profile = Profile::default();
+        let dst = s.0.join("medium");
+        let shipped = |m: &MockRunner| {
+            let _ = std::fs::remove_dir_all(&dst);
+            real_builder(m, &profile, &s.0).ship_template_images(&dst);
+            let mut names: Vec<String> = std::fs::read_dir(&dst)
+                .into_iter()
+                .flatten()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        // Stage 2: the running dom0's cache, copied into the build's.
+        let file = cached_images(&s, "root/var/cache/juanitos/images");
+        let m = MockRunner::new();
+        let all = [
+            file.to_string(),
+            "fbsd15-dev.checksums".to_string(),
+            "fbsd15-net.checksums".to_string(),
+        ];
+        assert_eq!(shipped(&m), all);
+        assert_eq!(m.calls(), Vec::<String>::new());
+        assert_eq!(std::fs::read(dst.join(file)).unwrap(), b"image");
+        assert!(s.0.join("work/images").join(file).is_file());
+
+        // The build's cache alone does as well.
+        std::fs::remove_dir_all(s.0.join("root")).unwrap();
+        assert_eq!(shipped(&m), all);
+
+        // A corrupt image is left out, with a warning.
+        s.put(&format!("work/images/{file}"), b"tampered");
+        assert_eq!(shipped(&m), Vec::<String>::new());
+
+        // Nothing cached: downloaded (the mock writes nothing, so the
+        // checksum list cannot be read and the image is left out).
+        std::fs::remove_dir_all(s.0.join("work")).unwrap();
+        assert_eq!(shipped(&m), Vec::<String>::new());
+        let freebsd = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest";
+        assert!(m.calls().contains(&format!(
+            "fetch -o {} {freebsd}/CHECKSUM.SHA256",
+            unix(&s.0.join("work/images/fbsd15-net.checksums"))
+        )));
+
+        // The dom0's copy cannot go into the build's cache.
+        cached_images(&s, "root/var/cache/juanitos/images");
+        std::fs::create_dir_all(s.0.join("work/images/fbsd15-net.checksums")).unwrap();
+        std::fs::create_dir_all(s.0.join("work/images/fbsd15-dev.checksums")).unwrap();
+        assert_eq!(shipped(&m), Vec::<String>::new());
     }
 
     #[test]
@@ -2370,6 +2509,7 @@ mod tests {
         s.put("repo/freebsd/grub/Makefile", b"MOD=jos_efi\n");
         // `make` is mocked: the module it would build.
         s.put("repo/freebsd/grub/jos_efi.mod", b"\x7fELF module");
+        cached_images(&s, "work/images");
         let tarball = grub_tarball(&s, &mut profile);
         let m = MockRunner::new();
         let b = real_builder(&m, &profile, &s.0);
@@ -2832,22 +2972,29 @@ mod tests {
             s.put(&format!("work/{}", profile.iso_name()), b"iso9660");
             std::fs::create_dir_all(tarball.parent().unwrap()).unwrap();
             std::fs::write(&tarball, &grub).unwrap();
+            cached_images(&s, "work/images");
         };
         let passed = obstacles(&b.work, &setup, &|| b.iso_build());
         // The ESP and the module builds start from an empty directory, and
-        // geom_ventoy and the GRUB module are best effort.
+        // geom_ventoy, the GRUB module and the template images are best
+        // effort.
         let passed: Vec<String> = passed.iter().map(|p| unix(p)).collect();
+        let image = template::find("fbsd15-net").unwrap().image_file();
+        let images = "rootfs/usr/local/share/juanitos/dist/images";
         assert_eq!(
             passed,
             [
-                "efiboot/EFI/BOOT/BOOTX64.EFI",
-                "efiboot/EFI/FREEBSD/LOADER.EFI",
-                "geom_ventoy/Makefile",
-                "geom_ventoy/geom_ventoy.ko",
-                "grub/Makefile",
-                "grub/jos_efi.mod",
-                "rootfs/boot/grub/x86_64-efi/jos_efi.mod",
-                "rootfs/boot/kernel/geom_ventoy.ko",
+                "efiboot/EFI/BOOT/BOOTX64.EFI".to_string(),
+                "efiboot/EFI/FREEBSD/LOADER.EFI".to_string(),
+                "geom_ventoy/Makefile".to_string(),
+                "geom_ventoy/geom_ventoy.ko".to_string(),
+                "grub/Makefile".to_string(),
+                "grub/jos_efi.mod".to_string(),
+                "rootfs/boot/grub/x86_64-efi/jos_efi.mod".to_string(),
+                "rootfs/boot/kernel/geom_ventoy.ko".to_string(),
+                format!("{images}/{image}"),
+                format!("{images}/fbsd15-dev.checksums"),
+                format!("{images}/fbsd15-net.checksums"),
             ]
         );
     }

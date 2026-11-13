@@ -38,6 +38,7 @@ installs, but no qube will start.
     release.toml          version, FreeBSD release, build stage, package list
     loader.conf.sample, sysctl.conf.sample
     dist/juanitos-dom0.txz, dist/MANIFEST
+    dist/images/          FreeBSD's VM image + checksum lists (fbsd15-net, fbsd15-dev)
 /usr/local/src/juanitos   this repository + vendored crates (stage 2)
 El Torito: EFI (efiboot.img: jos-boot.efi as BOOTX64.EFI + EFI/FREEBSD/LOADER.EFI
            + loader_ia32.efi as BOOTIA32.EFI) and, when present, BIOS cdboot
@@ -450,7 +451,9 @@ free space rather than erasing the disk.
 4. `zpool create` with `altroot=/mnt`, `compression=lz4`, `atime=off`;
    datasets as `bsdinstall zfsboot` makes them, `bootfs=zroot/ROOT/default`,
    and `zroot/juanitos/{templates,qubes}` via the same code as `jos init`.
-5. `tar -xpf juanitos-dom0.txz -C /mnt --unlink` after verifying the sha256.
+5. `tar -xpf juanitos-dom0.txz -C /mnt --unlink` after verifying the sha256,
+   then `dist/images/` into `/var/cache/juanitos/images`, where `jos
+   setup` finds the template image without the dom0 downloading it.
 6. `rc.conf` (`zfs_enable`, `jos_enable`, `seatd`, `dbus`, `jos_login`;
    `jos_kms_module` names the `drm-kmod` driver for the GPU `pciconf`
    reports, loaded by `rc.d/jos-kms` before the boot splash, and

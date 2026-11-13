@@ -597,6 +597,15 @@ impl<'a> Installer<'a> {
             "tar",
             &["-xpf", &tarball, "-C", &self.plan.target, "--unlink"],
         )?;
+        // The template images the medium carries go into the new dom0's
+        // image cache, where `jos setup` finds them.
+        let images = Path::new(&self.plan.dist_dir).join(dom0::DIST_IMAGES);
+        if images.is_dir() {
+            let cache = format!("{}/images", self.plan.global_config().cache_dir);
+            let dst = self.target_path(&cache);
+            self.fs.copy_tree(&images, &dst, &[])?;
+            println!("   template images copied to {}", dst.display());
+        }
         Ok(())
     }
 
@@ -1161,6 +1170,29 @@ mod tests {
             m.calls()[0],
             "tar -xpf /nonexistent/juanitos-dom0.txz -C /mnt --unlink"
         );
+    }
+
+    #[test]
+    fn extract_copies_the_template_images_into_the_cache() {
+        let dir = scratch("images");
+        let p = real_plan(&dir);
+        let images = Path::new(&p.dist_dir).join(dom0::DIST_IMAGES);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("fbsd15-net.checksums"), b"sums").unwrap();
+        std::fs::write(images.join("image.raw.xz"), b"image").unwrap();
+        let m = MockRunner::new();
+        Installer::new(&m, false, &p).extract().unwrap();
+        let cache = Path::new(&p.target).join("var/cache/juanitos/images");
+        assert_eq!(std::fs::read(cache.join("image.raw.xz")).unwrap(), b"image");
+        assert_eq!(
+            std::fs::read(cache.join("fbsd15-net.checksums")).unwrap(),
+            b"sums"
+        );
+        // A file where the cache goes stops the install.
+        std::fs::remove_dir_all(&cache).unwrap();
+        std::fs::write(&cache, b"").unwrap();
+        assert!(Installer::new(&m, false, &p).extract().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
