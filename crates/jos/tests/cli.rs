@@ -2600,3 +2600,174 @@ fn forcing_off_a_guest_that_stays_up_can_fail() {
     agent.join().unwrap();
     assert!(!out.status.success(), "{out:?}");
 }
+
+/// The smallest PE32+ image that can be signed: 0x200 bytes of headers and
+/// one section of `tag`s.
+#[cfg(unix)]
+fn efi_image(tag: u8) -> Vec<u8> {
+    fn put(b: &mut [u8], off: usize, v: u32) {
+        b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let mut b = vec![tag; 0x400];
+    b[..2].copy_from_slice(b"MZ");
+    put(&mut b, 0x3c, 0x40);
+    b[0x40..0x44].copy_from_slice(b"PE\0\0");
+    b[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
+    b[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
+    b[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
+    put(&mut b, 0x58 + 60, 0x200);
+    put(&mut b, 0x58 + 108, 16);
+    put(&mut b, 0x58 + 144, 0);
+    put(&mut b, 0x58 + 148, 0);
+    put(&mut b, 0x58 + 240 + 16, 0x200);
+    put(&mut b, 0x58 + 240 + 20, 0x200);
+    b
+}
+
+/// A `PATH` directory for the Secure Boot commands: the real `openssl` and
+/// `sh` and `cat`, and an `efivar` over the files of `efi/` in the sandbox (it prints
+/// the variable `-p` asks for, and logs its calls to `efivar.log`).
+#[cfg(unix)]
+fn secureboot_host(e: &Env) -> PathBuf {
+    let efi = e.dir.join("efi");
+    std::fs::create_dir_all(&efi).unwrap();
+    let bin = fake_host(
+        e,
+        &[(
+            "efivar",
+            &format!(
+                "echo \"$@\" >> '{}'\ncase \"$1\" in -p) cat '{}'/\"${{5##*-}}\" ;; esac",
+                e.dir.join("efivar.log").display(),
+                efi.display()
+            ),
+        )],
+    );
+    for tool in ["openssl", "sh", "cat"] {
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join(tool))
+            .find(|path| path.is_file())
+            .unwrap();
+        std::os::unix::fs::symlink(real, bin.join(tool)).unwrap();
+    }
+    bin
+}
+
+/// Keys, signed boot files and enrollment through the CLI, with the real
+/// `openssl`.
+#[cfg(unix)]
+#[test]
+fn secure_boot_keys_signing_and_enrollment() {
+    let e = Env::new("sb");
+    let bin = secureboot_host(&e);
+    let cfg = sandbox_config(&e, &[]);
+    let sb = |args: &[&str]| {
+        let args: Vec<&str> = ["secureboot"]
+            .into_iter()
+            .chain(args.iter().copied())
+            .collect();
+        let out = jos_on(&e, &cfg, &bin, false, &args);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    };
+    let (root, esp) = (e.dir.join("root"), e.dir.join("esp"));
+    let put = |path: PathBuf, image: Vec<u8>| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, image).unwrap();
+    };
+    put(root.join("boot/jos-boot.efi"), efi_image(1));
+    put(root.join("boot/loader.efi"), efi_image(2));
+    put(esp.join("EFI/JUANITOS/BOOTX64.EFI"), efi_image(1));
+    put(esp.join("EFI/FREEBSD/LOADER.EFI"), efi_image(2));
+    let boot = e.dir.join("boot.efi");
+    put(boot.clone(), efi_image(3));
+    let (root_arg, esp_arg, boot_arg) = (
+        root.to_str().unwrap(),
+        esp.to_str().unwrap(),
+        boot.to_str().unwrap(),
+    );
+
+    // Nothing is known, and nothing works without keys.
+    let (ok, text) = sb(&["status", "--esp", esp_arg]);
+    assert!(ok, "{text}");
+    assert!(text.contains("Secure Boot: unknown"), "{text}");
+    assert!(text.contains("none (jos secureboot keygen)"), "{text}");
+    let signing = ["sign-esp", "--esp", esp_arg, "--root", root_arg];
+    for args in [&["sign", boot_arg][..], &signing, &["enroll"]] {
+        let (ok, text) = sb(args);
+        assert!(!ok && text.contains("jos secureboot keygen"), "{text}");
+    }
+
+    // Keys: made once, replaced on request.
+    let (ok, text) = sb(&["keygen"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("sign-esp") && text.contains("EFI/JUANITOS/keys"));
+    assert!(e.dir.join("secureboot/db.auth").is_file());
+    let (ok, text) = sb(&["keygen"]);
+    assert!(!ok && text.contains("already holds"), "{text}");
+    let (ok, text) = sb(&["keygen", "--force", "--no-vendor"]);
+    assert!(ok, "{text}");
+
+    // Signing: one file, then the boot files of the ESP.
+    let (ok, text) = sb(&["sign", boot_arg]);
+    assert!(ok && text.contains("signed"), "{text}");
+    assert!(std::fs::read(&boot).unwrap().len() > 0x400);
+    let (ok, text) = sb(&signing);
+    assert!(ok && text.contains("signed 2 boot file(s)"), "{text}");
+    assert!(esp.join("EFI/JUANITOS/keys/db.auth").is_file());
+    let (_, text) = sb(&["status", "--esp", esp_arg]);
+    assert!(text.contains("Keys:        generated"), "{text}");
+    assert!(
+        text.contains("EFI/JUANITOS/BOOTX64.EFI: signed with the JuanitOS key"),
+        "{text}"
+    );
+    let nowhere = e.dir.join("nowhere");
+    let (ok, text) = sb(&[
+        "sign-esp",
+        "--esp",
+        nowhere.to_str().unwrap(),
+        "--root",
+        root_arg,
+    ]);
+    assert!(!ok && text.contains("is the ESP mounted there?"), "{text}");
+
+    // Enrolling needs a firmware in setup mode.
+    let (ok, text) = sb(&["enroll"]);
+    assert!(!ok && text.contains("not in setup mode"), "{text}");
+    std::fs::write(e.dir.join("efi/SetupMode"), [1u8]).unwrap();
+    let (ok, text) = sb(&["enroll"]);
+    assert!(ok && text.contains("enrolled db, KEK and PK"), "{text}");
+    let log = std::fs::read_to_string(e.dir.join("efivar.log")).unwrap();
+    let writes: Vec<&str> = log.lines().filter(|l| l.starts_with("-w")).collect();
+    assert_eq!(writes.len(), 3, "{log}");
+    for (line, name) in writes.iter().zip(["db", "KEK", "PK"]) {
+        let auth = e.dir.join(format!("secureboot/{name}.auth"));
+        assert!(line.starts_with("-w -t 0x27 -n "), "{line}");
+        assert!(
+            line.ends_with(&format!("-{name} -f {}", auth.display())),
+            "{line}"
+        );
+    }
+    std::fs::write(e.dir.join("efi/SecureBoot"), [1u8]).unwrap();
+    std::fs::write(e.dir.join("efi/SetupMode"), [0u8]).unwrap();
+    let (_, text) = sb(&["status", "--esp", esp_arg]);
+    assert!(text.contains("Secure Boot: enabled"), "{text}");
+    assert!(text.contains("Setup mode:  no"), "{text}");
+}
+
+/// A dry run makes no keys, and the parser wants something to sign.
+#[test]
+fn secure_boot_dry_run() {
+    let e = Env::new("sb-dry");
+    let out = e.ok(&["secureboot", "keygen"]);
+    assert!(out.contains("sign-esp"), "{out}");
+    assert!(!e.dir.join("secureboot").exists());
+    assert!(e.ok(&["secureboot", "status"]).contains("Keys:"));
+    assert!(e.err(&["secureboot", "sign"]).contains("required"));
+    assert!(e
+        .err(&["secureboot", "sign", "boot.efi"])
+        .contains("jos secureboot keygen"));
+}

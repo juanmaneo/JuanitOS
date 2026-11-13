@@ -15,6 +15,7 @@ use juanitos_core::firewall::{self, Action, Rule};
 use juanitos_core::fsops::FsOps;
 use juanitos_core::pci::{self, PciAddr};
 use juanitos_core::requests::{self, Broker, Disposition, Found, Policy, Verdict};
+use juanitos_core::secureboot::{self, SecureBoot};
 use juanitos_core::setup;
 use juanitos_core::share::{self, Share};
 use juanitos_core::supervisor::{self, Supervisor};
@@ -176,6 +177,52 @@ enum Cmd {
     /// the gpu qube and the app qubes. Skips what exists, so it can be run
     /// again.
     Setup(SetupArgs),
+    /// Secure Boot with your own keys: make them, sign the boot files,
+    /// put the keys into the firmware.
+    Secureboot {
+        #[command(subcommand)]
+        cmd: SecurebootCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecurebootCmd {
+    /// What the firmware, the keys and the boot files on the ESP say.
+    Status {
+        /// Where the EFI system partition is mounted.
+        #[arg(long, value_name = "PATH", default_value = secureboot::ESP_MOUNT)]
+        esp: PathBuf,
+    },
+    /// Make the Platform, Key Exchange and database keys. The firmware's
+    /// own keys stay enrolled next to them (some graphics and network
+    /// cards need them to run their option ROMs).
+    Keygen {
+        /// Do not keep the firmware's own keys: only yours are trusted.
+        #[arg(long)]
+        no_vendor: bool,
+        /// Replace keys that exist. Whatever they enrolled in the firmware
+        /// stops working.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Sign EFI images in place with the database key.
+    Sign {
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
+    },
+    /// Sign the JuanitOS boot files on the EFI system partition, and put
+    /// the public keys there. Run it again after the loader is updated.
+    SignEsp {
+        /// Where the EFI system partition is mounted.
+        #[arg(long, value_name = "PATH", default_value = secureboot::ESP_MOUNT)]
+        esp: PathBuf,
+        /// The installed system whose boot files are the ones to sign.
+        #[arg(long, value_name = "PATH", hide = true, default_value = "/")]
+        root: PathBuf,
+    },
+    /// Write the keys to the firmware, which must be in setup mode (its
+    /// Platform Key cleared).
+    Enroll,
 }
 
 #[derive(Args)]
@@ -501,6 +548,60 @@ impl App {
             PolicyCmd::Clear => {
                 policy.rules.clear();
                 policy.save(&path)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// The Secure Boot keys live next to the qube definitions too.
+    fn secureboot_keys(&self) -> PathBuf {
+        self.store
+            .dir
+            .parent()
+            .unwrap_or(std::path::Path::new(&self.cfg.config_dir))
+            .join(secureboot::KEYS_DIR)
+    }
+
+    fn secureboot(&self, cmd: SecurebootCmd) -> Result<()> {
+        let sb = SecureBoot::new(self.runner.as_ref(), self.dry_run, self.secureboot_keys());
+        match cmd {
+            SecurebootCmd::Status { esp } => {
+                print!("{}", sb.status(&esp));
+                Ok(())
+            }
+            SecurebootCmd::Keygen { no_vendor, force } => {
+                sb.keygen(!no_vendor, force)?;
+                println!(
+                    "\nKeys: {keys}\n\
+                     Back that directory up: db.key signs what the firmware boots, and PK.key \
+                     is what lets you change the keys.\n\n\
+                     Next:\n  \
+                     1. jos secureboot sign-esp     (sign the boot files on the ESP)\n  \
+                     2. Clear the Platform Key in the firmware setup, which leaves it in setup mode.\n  \
+                     3. jos secureboot enroll       (or import {esp}/*.auth with the firmware's menu)\n  \
+                     4. Turn Secure Boot on in the firmware setup and reboot.",
+                    keys = sb.keys.display(),
+                    esp = secureboot::ESP_KEYS,
+                );
+                Ok(())
+            }
+            SecurebootCmd::Sign { files } => {
+                for file in &files {
+                    sb.sign_file(file)?;
+                }
+                Ok(())
+            }
+            SecurebootCmd::SignEsp { esp, root } => {
+                let signed = sb.sign_esp(&esp, &root)?;
+                println!(
+                    "signed {signed} boot file(s); the public keys are in {}",
+                    esp.join(secureboot::ESP_KEYS).display()
+                );
+                Ok(())
+            }
+            SecurebootCmd::Enroll => {
+                sb.enroll()?;
+                println!("enrolled db, KEK and PK: turn Secure Boot on in the firmware setup");
                 Ok(())
             }
         }
@@ -1717,5 +1818,6 @@ fn main() -> Result<()> {
         Cmd::Serve { once, interval } => app.serve(once, interval),
         Cmd::Autostart => app.autostart(),
         Cmd::Setup(a) => app.setup(a),
+        Cmd::Secureboot { cmd } => app.secureboot(cmd),
     }
 }
