@@ -65,7 +65,7 @@ no `/boot` contents.
 QEMU + OVMF on any Linux (WSL2 included; `/dev/kvm` makes it fast), with
 serial logs and screenshots in `target/work/uefi-test/`. `tools/fetch-freebsd.sh
 loader` gets the real `loader.efi` from the release `base.txz` (SHA-256
-verified) so the chain-load and `console=nullconsole` path are tested with
+verified) so the chain-load path is tested with
 the genuine loader. `target/work/` (or `$JOS_WORK`) holds downloads, VM
 disks and test output, so `cargo clean` reclaims it with the build; set
 `JOS_WORK` elsewhere to keep large downloads across a clean.

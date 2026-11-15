@@ -74,7 +74,7 @@ program prints the reason on the firmware text console and resets after
 Without a Graphics Output Protocol at all (a serial-only server, `qemu
 -vga none`) there is nothing to draw on, so the card and the menu are
 skipped: `loader.efi` is chain-loaded immediately with `autoboot_delay=-1
-beastie_disable=YES` and *without* `-m`/`console=nullconsole`, so the
+beastie_disable=YES` and *without* `-m`, so the
 loader and the kernel talk on the firmware's text console, i.e. the
 serial port. The live installer then runs in its text mode there.
 
@@ -324,12 +324,9 @@ once they have switched terminals, which covers the pointer drawn at boot.
   `-s`, and `name=value` → `setenv`. This happens *after* `cons_probe()`
   (which always initialises the EFI console, clearing the screen) and
   *before* any `printf`.
-- `console=nullconsole` is a valid loader console on amd64. Set from the
-  arguments, it switches output away from the screen before the banner is
-  printed, and `bi_getboothowto` turns it into `RB_MUTE` for the kernel.
-  Because the EFI console was initialised first, `gfx_state` still holds
-  the GOP framebuffer and `bi_load_efi_data` passes `MODINFOMD_EFI_FB` to
-  the kernel — `vt(4)` keeps working.
+- The loader console is not muted (no `console=nullconsole`), so GELI's
+  passphrase prompt shows. `-m` mutes only the kernel. A loader that
+  cannot find a kernel prints its error on the screen.
 - `autoboot_delay=-1` and `beastie_disable=YES` make `loader.lua` skip the
   menu and boot immediately. `/boot/defaults/loader.conf` leaves
   `autoboot_delay`, `beastie_disable`, `console` and `boot_mute` commented
@@ -372,11 +369,9 @@ once they have switched terminals, which covers the pointer drawn at boot.
   the stock loader to avoid it; patching `loader.efi` is out of scope while
   the project reuses FreeBSD binaries unchanged, and the gap is considered
   acceptable.
-- **Silent loader failures.** With `console=nullconsole` a loader that
-  cannot find a kernel waits at an invisible prompt (unlike the kernel's
-  root mount, the loader has no module hook to reveal it). Use the *FreeBSD
-  loader menu* entry (no arguments) to see it. The next start of
-  `jos-boot` falls back to *Boot verbose* (see *Failed-boot fallback*).
+- **Loader failures.** A loader that cannot find a kernel now prints its
+  error on the screen, since the console is no longer muted. The next start
+  of `jos-boot` falls back to *Boot verbose* (see *Failed-boot fallback*).
 - **BIOS boot** (`cdboot`/`isoboot`/`gptzfsboot`, legacy machines) is the
   classic text boot. FreeBSD builds its BIOS loader `LOADER_BIOS_TEXTONLY`
   (no `vbe` command, `screen.textmode` is ignored), so the kernel only

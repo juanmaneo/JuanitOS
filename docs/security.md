@@ -94,3 +94,54 @@ JuanitOS is less the architecture than the engineering discipline:
   dom0 has no network interface besides the bridges to `sys-net`.
 - Keep `jos_enable="YES"` as the only service that starts VMs; app qubes
   get their network only through `sys-firewall`.
+
+## Disk encryption at install
+
+The installer encrypts the pool by default (`--no-encrypt` turns it off,
+and `--passphrase-file` reads the passphrase non-interactively). Two layers
+use one passphrase:
+
+- **GELI** (`geli init -b -g -e AES-XTS -l 256 -s 4096`) encrypts the whole
+  ZFS partition and the swap. The boot loader asks for the passphrase
+  before the kernel starts.
+- **ZFS native encryption** (`aes-256-gcm`) encrypts `home`, `tmp`, `var`
+  and the qubes dataset. Its key is not the GELI key. It is derived from
+  the passphrase with PBKDF2-HMAC-SHA512:
+
+  ```
+  zfs_key = PBKDF2-HMAC-SHA512(passphrase,
+                               salt = "JuanitOS zfs key v1" || 0x00 || geli_salt,
+                               iterations = geli_iterations,
+                               dkLen = 32)   # hex-encoded for keyformat=hex
+  ```
+
+  `geli_salt` (64 bytes) and `geli_iterations` come from `geli dump`. The
+  derived key is stored in `/etc/zfs/juanitos.key` (mode 0400) under the
+  encrypted pool and loaded by `zfskeys` at boot.
+
+Test vector (`crates/jos-install/src/crypt.rs`), for an audit:
+
+```
+python3 -c "import hashlib; print(hashlib.pbkdf2_hmac('sha512', b'correct horse', b'JuanitOS zfs key v1\0' + bytes(range(64)), 1000, 32).hex())"
+# 5405e2e0ecfc0a2a9c1552d69e5352fb3ca9ddbe113d1664832255286b0e8200
+```
+
+Why two ciphers: GELI supports only XTS (a sector cipher with no
+authentication) and ZFS supports only GCM (authenticated) for native
+encryption. Both use AES-256. The shared part is the key material, not the
+mode. The ZFS key is separate from the GELI key, so one cipher's output
+does not reveal the other's key.
+
+What is not encrypted: `ROOT/default` and the `usr*` datasets. The loader
+cannot mount an encrypted root, so GELI covers them instead. The EFI system
+partition and `jos-boot` are not encrypted and are not secret.
+
+Passphrase rules: 8 to 128 printable ASCII characters (0x20 to 0x7e). The
+boot loader types on a US layout, so other characters cannot be entered
+there.
+
+Recovery: keep the passphrase. `geli backup` saves the GELI metadata. The
+GELI header holds the salt and iteration count, so losing it makes the pool
+unreadable even with the passphrase.
+
+Status: the encrypted boot path is not yet tested on hardware.

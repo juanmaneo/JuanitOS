@@ -220,10 +220,10 @@ The flow borrows from the two installers QubesOS users know:
 |---|---|
 | ![welcome](images/installer-1-welcome.png) | ![keyboard](images/installer-1b-keyboard.png) |
 | ![hardware](images/installer-2-hardware.png) | ![disk](images/installer-3-disk.png) |
-| ![partitions](images/installer-3b-partitions.png) | ![system](images/installer-4-system.png) |
-| ![passthrough](images/installer-5-passthrough.png) | ![users](images/installer-6-users.png) |
-| ![summary](images/installer-7-summary.png) | ![install](images/installer-8-install.png) |
-| ![finish](images/installer-9-finish.png) | |
+| ![partitions](images/installer-3b-partitions.png) | ![encryption](images/installer-4-encryption.png) |
+| ![system](images/installer-5-system.png) | ![passthrough](images/installer-6-passthrough.png) |
+| ![users](images/installer-7-users.png) | ![summary](images/installer-8-summary.png) |
+| ![install](images/installer-9-install.png) | ![finish](images/installer-10-finish.png) |
 
 The installed system starts with the first-boot wizard, which creates
 the qubes (`docs/architecture.md`, The first-boot wizard).
@@ -279,6 +279,16 @@ The Summary page then says what happens to the disk: "next to the
 systems there: N GiB free, nothing is erased" or "partitions are added,
 nothing is erased" (green), "ALL DATA WILL BE ERASED" or "nda0p2, nda0p3
 WILL BE DELETED" (red), and its checkbox names the same thing.
+
+### Encryption
+
+The **Encryption** page (after Partitions) turns on disk encryption, which is
+on by default. The passphrase is typed twice (or shown with the eye button)
+and must be 8 to 128 printable ASCII characters, because the boot loader
+types on a US layout. The same passphrase protects the whole pool with GELI
+at boot and the home, tmp and var datasets with ZFS native encryption. The
+ZFS key is derived from the passphrase, not reused from GELI. See
+`docs/security.md` for the derivation, what is encrypted, and recovery.
 
 ### Manual partitioning
 
@@ -384,11 +394,16 @@ install is:
 
 ```sh
 jos-install --non-interactive --disk nda0 --hostname lab --swap-gb 8 \
-    --keymap fr.macbook \
+    --keymap fr.macbook --passphrase-file /root/disk.pass \
     --root-password '...' --user alice --user-password '...' \
     --pci 1/0/0 --pci 1/0/1     # or --no-pci; default: as on the Passthrough page
 jos-install --non-interactive --disk nda0 --alongside ...   # next to the Linux on nda0
 ```
+
+The disk passphrase is read from a file, never from argv: the file must be
+a regular file, mode 0600 or stricter, one line of 8 to 128 printable ASCII
+characters. `--no-encrypt` skips encryption (and then `--passphrase-file` is
+refused).
 
 ## Next to another system
 
