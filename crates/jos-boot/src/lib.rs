@@ -13,17 +13,15 @@
 //!
 //! - `autoboot_delay=-1` — boot immediately, no countdown;
 //! - `beastie_disable=YES` — never show the Lua menu;
-//! - `console=nullconsole` — the loader's own output goes nowhere. This
-//!   is applied *after* the firmware console was probed, so the loader
-//!   still records the GOP framebuffer for the kernel (`MODINFOMD_EFI_FB`)
-//!   and `bi_getboothowto` also derives `RB_MUTE` from it.
-//!
-//! With `RB_MUTE` the kernel's `vt(4)` paints the `splash=` PNG from
+//! The loader console stays visible: encrypted GELI disks need its
+//! passphrase prompt before the kernel starts. `-m` still mutes kernel
+//! console output, so its `vt(4)` paints the `splash=` PNG from
 //! `loader.conf` instead of console text, and `jos-splash` takes over once
 //! `rc(8)` runs. The loader does clear the screen once while it starts
 //! (its console init erases the terminal area), so there is a short black
 //! gap between this program and the kernel splash; the stock loader offers
-//! no way around that.
+//! no way around that. The loader's own startup text and GELI prompt remain
+//! visible; only the kernel boot is quiet.
 //!
 //! # When a quiet boot never finishes
 //!
@@ -90,7 +88,7 @@ pub struct Entry {
 pub const ENTRIES: [Entry; 5] = [
     Entry {
         title: "Boot JuanitOS",
-        args: "-m autoboot_delay=-1 beastie_disable=YES console=nullconsole",
+        args: "-m autoboot_delay=-1 beastie_disable=YES",
         action: Action::Chain,
     },
     Entry {
@@ -164,10 +162,9 @@ impl ConsoleMode {
     }
 }
 
-/// The console mode `loader.efi` should start in with `args`: graphics
-/// for the quiet boot (nothing is printed and the card stays up until the
-/// kernel splash), text for everything that talks to the user on the
-/// firmware console (verbose, single user, the loader menu, headless).
+/// The console mode `loader.efi` should start in with `args`. Even the
+/// quiet boot uses text so GELI can ask for its boot passphrase; the kernel
+/// then stays muted and switches to its splash.
 pub fn console_mode_for(args: &str) -> ConsoleMode {
     if args.split(' ').any(|w| w == "console=nullconsole") {
         ConsoleMode::Graphics
@@ -335,15 +332,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_entry_boots_quietly() {
+    fn default_entry_keeps_the_loader_prompt_visible_and_boots_quietly() {
         let e = ENTRIES[DEFAULT_ENTRY];
         assert_eq!(e.action, Action::Chain);
-        for needle in [
-            "-m",
-            "autoboot_delay=-1",
-            "beastie_disable=YES",
-            "console=nullconsole",
-        ] {
+        for needle in ["-m", "autoboot_delay=-1", "beastie_disable=YES"] {
             assert!(e.args.split(' ').any(|w| w == needle), "missing {needle}");
         }
         // The loader splits on spaces and does not understand quotes.
@@ -358,7 +350,7 @@ mod tests {
         );
         assert_eq!(ConsoleMode::Text.raw(), 0);
         assert_eq!(ConsoleMode::Graphics.raw(), 1);
-        assert_eq!(console_mode_for(ENTRIES[0].args), ConsoleMode::Graphics);
+        assert_eq!(console_mode_for(ENTRIES[0].args), ConsoleMode::Text);
         for e in &ENTRIES[1..4] {
             assert_eq!(console_mode_for(e.args), ConsoleMode::Text, "{}", e.title);
         }
