@@ -306,6 +306,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hex_is_decoded_strictly() {
+        assert_eq!(decode_hex("00ff"), Some(vec![0x00, 0xff]));
+        assert_eq!(decode_hex("0"), None, "odd tail");
+        assert_eq!(decode_hex("g0"), None, "bad high nibble");
+        assert_eq!(decode_hex("0g"), None, "bad low nibble");
+        assert_eq!(decode_hex(""), Some(Vec::new()));
+    }
+
+    #[test]
     fn the_zfs_key_derivation_is_fixed() {
         // Python: hashlib.pbkdf2_hmac('sha512', b'correct horse',
         //   b'JuanitOS zfs key v1\0' + bytes(range(64)), 1000, 32).hex()

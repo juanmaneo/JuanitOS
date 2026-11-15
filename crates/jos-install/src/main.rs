@@ -1014,6 +1014,13 @@ mod tests {
         let dir = std::env::temp_dir();
         let err = read_passphrase_file(&dir).unwrap_err().to_string();
         assert!(err.contains("not a regular file"), "{err}");
+        // Mode 0 passes the permission check, so the read itself fails.
+        let locked = std::env::temp_dir().join(format!("jos-locked-{}", std::process::id()));
+        std::fs::write(&locked, b"correct horse").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = read_passphrase_file(&locked).unwrap_err().to_string();
+        assert!(err.contains("reading passphrase file"), "{err}");
+        let _ = std::fs::remove_file(&locked);
 
         let path =
             std::env::temp_dir().join(format!("jos-passphrase-validation-{}", std::process::id()));

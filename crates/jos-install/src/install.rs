@@ -1395,10 +1395,9 @@ mod tests {
         ]
         .into();
         let position = |call: &str| {
-            calls
-                .iter()
-                .position(|c| c == call)
-                .unwrap_or_else(|| panic!("{call} not run, in {calls:?}"))
+            let at = calls.iter().position(|c| c == call);
+            assert!(at.is_some(), "{call} not run, in {calls:?}");
+            at.unwrap_or_default()
         };
         let mounted = position("zfs mount zroot/ROOT/default");
         for call in &encrypted_creates {

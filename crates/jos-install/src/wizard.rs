@@ -2494,14 +2494,15 @@ mod tests {
             w.passphrase = TextField::new(one);
             w.passphrase2 = TextField::new(two);
         };
-        let error = |w: &Wizard| w.page_error().unwrap_or_default();
-
-        set(&mut w, "short", "short");
-        assert!(error(&w).contains("8"), "{}", error(&w));
-        set(&mut w, "correct horse", "correct hors");
-        assert!(error(&w).contains("do not match"), "{}", error(&w));
-        set(&mut w, "pässphrase ok", "pässphrase ok");
-        assert!(error(&w).contains("printable ASCII"), "{}", error(&w));
+        for (one, two, want) in [
+            ("short", "short", "8"),
+            ("correct horse", "correct hors", "do not match"),
+            ("pässphrase ok", "pässphrase ok", "printable ASCII"),
+        ] {
+            set(&mut w, one, two);
+            let err = w.page_error().unwrap_or_default();
+            assert!(err.contains(want), "{err}");
+        }
         set(&mut w, PASSPHRASE, PASSPHRASE);
         assert_eq!(w.page_error(), None);
 
