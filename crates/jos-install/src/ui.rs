@@ -1951,5 +1951,23 @@ mod tests {
             title: "Verifying".into(),
         });
         assert!(differs(&waiting, &render(&w, 1280, 800)));
+        for i in 0..12 {
+            w.on_progress(crate::install::Progress::Step {
+                index: i,
+                total: 12,
+                title: format!("Step {i}"),
+            });
+        }
+        let _ = render(&w, 1280, 800);
+    }
+
+    #[test]
+    fn the_encryption_page_warns_when_it_is_off() {
+        let mut w = sample_wizard();
+        w.page = Page::Encryption;
+        w.encrypt = false;
+        let off = render(&w, 1280, 800);
+        w.encrypt = true;
+        assert!(differs(&off, &render(&w, 1280, 800)));
     }
 }

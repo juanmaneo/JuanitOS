@@ -1361,11 +1361,7 @@ mod tests {
             ]
         );
         assert!(calls[4].starts_with("zpool create -f -o altroot="));
-        assert!(
-            calls[4].ends_with("zroot /dev/gpt/zfs0.eli"),
-            "{}",
-            calls[4]
-        );
+        assert!(calls[4].ends_with("zroot /dev/gpt/zfs0.eli"));
         // The passphrase travels on stdin, never in a command line.
         assert!(!calls.iter().any(|c| c.contains(PASSPHRASE)));
 

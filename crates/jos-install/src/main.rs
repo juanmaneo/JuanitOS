@@ -1008,6 +1008,13 @@ mod tests {
     fn passphrase_files_are_private_bounded_and_single_line() {
         use std::os::unix::fs::PermissionsExt;
 
+        let missing = std::env::temp_dir().join(format!("jos-no-such-{}", std::process::id()));
+        let err = read_passphrase_file(&missing).unwrap_err().to_string();
+        assert!(err.contains("reading passphrase file metadata"), "{err}");
+        let dir = std::env::temp_dir();
+        let err = read_passphrase_file(&dir).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+
         let path =
             std::env::temp_dir().join(format!("jos-passphrase-validation-{}", std::process::id()));
         let write = |contents: &[u8], mode: u32| {
@@ -1109,6 +1116,19 @@ mod tests {
         ];
         assert!(Cli::try_parse_from(both).is_err());
         let _ = std::fs::remove_file(&passphrase_file);
+    }
+
+    #[test]
+    fn the_encryption_dialogue_stops_on_io_errors() {
+        let m = MockRunner::new();
+        let c = cli(&["--dry-run"]);
+        let ok = hw(checks(Status::Ok), vec![]);
+        let input = "1\n\nna\u{ef}ve-passphrase\nna\u{ef}ve-passphrase\nshort\nshort\n\
+                     pass phrase\npass phrase\n\n\n\npw\npw\n\ny\n";
+        prompt::tests::fails_on_every_io_error(input, &|p| {
+            let plan = plan_for(&c);
+            text_install(&c, &m, plan, &ok, p)
+        });
     }
 
     #[test]

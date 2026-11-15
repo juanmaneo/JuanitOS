@@ -2453,6 +2453,17 @@ mod tests {
     }
 
     #[test]
+    fn the_summary_needs_the_confirmation_box() {
+        let mut w = wizard();
+        to_summary(&mut w);
+        w.confirm = false;
+        let err = w.page_error().unwrap_or_default();
+        assert!(err.starts_with("Tick the confirmation"), "{err}");
+        w.confirm = true;
+        assert_eq!(w.page_error(), None);
+    }
+
+    #[test]
     fn invalid_plan_is_caught_before_install() {
         let base = InstallPlan {
             pool: "Bad Pool".into(),
