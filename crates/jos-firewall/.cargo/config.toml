@@ -1,3 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 [build]
 target = "x86_64-unknown-uefi"
+
+# Never let Cargo hand a UEFI PE binary to the host's binfmt/Wine handler.
+# Firmware execution belongs in the QEMU-based UEFI test harness.
+[target.x86_64-unknown-uefi]
+runner = ["sh", "-c", "echo 'UEFI binaries cannot run directly; use the QEMU-based UEFI test harness.' >&2; exit 1"]
