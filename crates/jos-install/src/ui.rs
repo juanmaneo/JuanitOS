@@ -1313,13 +1313,24 @@ fn sample_pages() -> Vec<(&'static str, Wizard)> {
     pages.push(("installer-3-disk", w.clone()));
     pages.push(("installer-3b-partitions", manual_sample(w.clone())));
     w.handle(Key::Enter); // to the choice (keeping Linux is preselected)
+    w.handle(Key::Enter); // Encryption
+    pages.push(("installer-4-encryption", w.clone()));
+    for ch in "correct horse".chars() {
+        w.handle(Key::Char(ch));
+    }
     w.handle(Key::Enter);
-    pages.push(("installer-4-system", w.clone()));
+    for ch in "correct horse".chars() {
+        w.handle(Key::Char(ch));
+    }
+    w.handle(Key::Tab);
+    w.handle(Key::Tab);
+    w.handle(Key::Enter); // System
+    pages.push(("installer-5-system", w.clone()));
     for _ in 0..4 {
         w.handle(Key::Tab);
     }
     w.handle(Key::Enter);
-    pages.push(("installer-5-passthrough", w.clone()));
+    pages.push(("installer-6-passthrough", w.clone()));
     w.handle(Key::Enter);
     for (text, enter) in [
         ("secret", true),
@@ -1334,14 +1345,14 @@ fn sample_pages() -> Vec<(&'static str, Wizard)> {
             w.handle(Key::Enter);
         }
     }
-    pages.push(("installer-6-users", w.clone()));
+    pages.push(("installer-7-users", w.clone()));
     w.handle(Key::Enter);
     for ch in "pw".chars() {
         w.handle(Key::Char(ch));
     }
     w.handle(Key::Enter);
     w.handle(Key::Char(' '));
-    pages.push(("installer-7-summary", w.clone()));
+    pages.push(("installer-8-summary", w.clone()));
     w.handle(Key::Tab);
     w.handle(Key::Tab);
     w.handle(Key::Enter);
@@ -1352,9 +1363,9 @@ fn sample_pages() -> Vec<(&'static str, Wizard)> {
             title: (*t).to_string(),
         });
     }
-    pages.push(("installer-8-install", w.clone()));
+    pages.push(("installer-9-install", w.clone()));
     w.finished(Ok(()));
-    pages.push(("installer-9-finish", w));
+    pages.push(("installer-10-finish", w));
     pages
 }
 

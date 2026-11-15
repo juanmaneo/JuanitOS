@@ -275,9 +275,8 @@ mod tests {
         assert_eq!(d.inner.presented, 5);
     }
 
-    // Welcome -> Keyboard (the list, the test field) -> ... -> Summary,
-    // ticking the confirmation, then Install.
-    const TO_INSTALL: &[u8] = b"\r\r\r\r\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\t\r \t\t\r";
+    // Walk every page with encryption on, set a user, then confirm Install.
+    const TO_INSTALL: &[u8] = b"\r\r\r\r\r\rcorrect horse\rcorrect horse\r\t\t\t\t\r\t\t\rsecret\rsecret\ralice\rsecret\rsecret\r \t\t\r";
 
     #[test]
     fn full_install_then_reboot() {
@@ -311,7 +310,7 @@ mod tests {
         // Down picks the disk with a Linux on it, where keeping it is
         // preselected; Enter goes to the choice, Enter again moves on.
         let mut d = script(&[
-            b"\r\r\r\r\x1b[B\r\r\t\t\t\t\r\rsecret\rsecret\r\t\t\t\t\t\r \t\t\r",
+            b"\r\r\r\r\x1b[B\r\rcorrect horse\rcorrect horse\r\t\t\t\t\r\t\t\rsecret\rsecret\ralice\rsecret\rsecret\r \t\t\r",
             b"\r",
         ]);
         let mut w = sample_wizard();
@@ -354,8 +353,8 @@ mod tests {
             b"\x1b[B\r\r",
             b"\r",
             b"\x1b[Z\x1b[B\r\r\r\r",
-            // On through System (no swap field) and the other pages.
-            b"\t\t\r\t\t\t\r\rsecret\rsecret\r\t\t\t\t\t\r \t\t\r",
+            // Advance from Partitions, enter Encryption, then the shorter Manual System page.
+            b"\t\t\rcorrect horse\rcorrect horse\r\t\t\t\r\t\t\rsecret\rsecret\ralice\rsecret\rsecret\r \t\t\r",
             b"\r",
         ]);
         let mut w = sample_wizard();

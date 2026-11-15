@@ -2466,4 +2466,50 @@ mod tests {
         assert!(w.error.as_deref().unwrap_or("").contains("pool"));
         assert_eq!(w.page, Page::Summary);
     }
+
+    #[test]
+    fn the_encryption_page_checks_the_passphrase() {
+        let mut w = wizard();
+        past_keyboard(&mut w);
+        w.handle(Key::Enter); // Hardware -> Disk
+        w.handle(Key::Down); // nda0
+        w.handle(Key::Enter); // to the choice: erase
+        w.handle(Key::Enter); // Disk -> Encryption
+        assert_eq!(w.page, Page::Encryption);
+        assert!(w.encrypt, "encryption is on by default");
+        assert_eq!(w.focused(), Some(Widget::Passphrase));
+
+        let set = |w: &mut Wizard, one: &str, two: &str| {
+            w.passphrase = TextField::new(one);
+            w.passphrase2 = TextField::new(two);
+        };
+        let error = |w: &Wizard| w.page_error().unwrap_or_default();
+
+        set(&mut w, "short", "short");
+        assert!(error(&w).contains("8"), "{}", error(&w));
+        set(&mut w, "correct horse", "correct hors");
+        assert!(error(&w).contains("do not match"), "{}", error(&w));
+        set(&mut w, "pässphrase ok", "pässphrase ok");
+        assert!(error(&w).contains("printable ASCII"), "{}", error(&w));
+        set(&mut w, PASSPHRASE, PASSPHRASE);
+        assert_eq!(w.page_error(), None);
+
+        let box_at = w
+            .widgets()
+            .iter()
+            .position(|x| *x == Widget::Encrypt)
+            .unwrap();
+        w.focus = box_at;
+        w.handle(Key::Enter); // the box: encryption off
+        assert!(!w.encrypt);
+        assert_eq!(
+            w.page_error(),
+            None,
+            "without encryption no passphrase is needed"
+        );
+        assert_eq!(w.plan().passphrase, None);
+        w.handle(Key::Tab); // Back
+        w.handle(Key::Tab); // Next
+        assert_eq!(w.focused(), Some(Widget::Next));
+    }
 }

@@ -39,7 +39,13 @@ fn stderr(out: &Output) -> String {
 #[test]
 fn errors_exit_1_except_on_the_live_medium() {
     let dir = scratch("errors");
-    let args = ["--dry-run", "--non-interactive", "--disk", "vtbd0"];
+    let args = [
+        "--dry-run",
+        "--non-interactive",
+        "--no-encrypt",
+        "--disk",
+        "vtbd0",
+    ];
     let out = jos_install(&dir, &args);
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
@@ -61,6 +67,7 @@ fn a_dry_run_only_prints_what_it_would_do() {
             "--dry-run",
             "--non-interactive",
             "--ignore-doctor",
+            "--no-encrypt",
             "--disk",
             "vtbd0",
             "--root-password",
@@ -83,7 +90,12 @@ fn a_real_run_needs_the_dom0_distribution() {
     let none = dir.join("no-dist");
     let out = jos_install(
         &dir,
-        &["--non-interactive", "--dist", &none.to_string_lossy()],
+        &[
+            "--non-interactive",
+            "--no-encrypt",
+            "--dist",
+            &none.to_string_lossy(),
+        ],
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("does not contain the dom0 distribution"));
@@ -97,7 +109,7 @@ fn screenshots_of_every_page() {
     let out = jos_install(&dir, &["--screenshots", &shots.to_string_lossy()]);
     assert!(out.status.success(), "{}", stderr(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout.lines().count(), 11, "{stdout}");
+    assert_eq!(stdout.lines().count(), 12, "{stdout}");
     assert!(shots.join("installer-1-welcome.png").is_file());
     assert!(shots.join("installer-1b-keyboard.png").is_file());
     // Not into a file.

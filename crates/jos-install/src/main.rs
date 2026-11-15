@@ -109,11 +109,12 @@ struct Cli {
     #[arg(long)]
     no_encrypt: bool,
 
-    /// Passphrase of the disk encryption, 8 to 128 printable ASCII
-    /// characters (the boot loader types with a US keyboard layout).
-    /// Prompted when omitted and interactive.
-    #[arg(long, conflicts_with = "no_encrypt")]
-    passphrase: Option<String>,
+    /// Read the disk-encryption passphrase from a file (never put the
+    /// secret itself in argv, where other users may see it with ps(1)).
+    /// The file must contain 8 to 128 printable ASCII characters, optionally
+    /// followed by one newline. Prompted when omitted and interactive.
+    #[arg(long, value_name = "FILE", conflicts_with = "no_encrypt")]
+    passphrase_file: Option<PathBuf>,
 
     /// Console-only dom0 (no COSMIC services at boot).
     #[arg(long)]
@@ -236,8 +237,13 @@ fn install(
         (Some(u), None) => Some((u, String::new())),
         (None, _) => None,
     };
-    if !interactive && !cli.no_encrypt && cli.passphrase.is_none() {
-        bail!("disk encryption needs --passphrase (or --no-encrypt)");
+    let passphrase = cli
+        .passphrase_file
+        .as_deref()
+        .map(read_passphrase_file)
+        .transpose()?;
+    if !interactive && !cli.no_encrypt && passphrase.is_none() {
+        bail!("disk encryption needs --passphrase-file (or --no-encrypt)");
     }
     let plan = InstallPlan {
         disk: cli.disk.clone().unwrap_or_default(),
@@ -252,7 +258,7 @@ fn install(
         root_password: cli.root_password.clone(),
         user,
         encrypt: !cli.no_encrypt,
-        passphrase: cli.passphrase.clone(),
+        passphrase,
         dist_dir: cli.dist.clone(),
         target: cli.target.clone(),
         ..InstallPlan::default()
@@ -527,6 +533,42 @@ fn text_install(
     Ok(())
 }
 
+/// Read a passphrase without exposing it in this process's arguments.
+/// Accept at most one final line ending; whitespace is otherwise part of
+/// the passphrase and is validated normally.
+fn read_passphrase_file(path: &std::path::Path) -> anyhow::Result<String> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading passphrase file metadata {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("passphrase path {} is not a regular file", path.display());
+    }
+    if metadata.len() > 130 {
+        bail!("passphrase file must be at most 130 bytes");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!(
+                "passphrase file {} must not be readable by group or others (chmod 600)",
+                path.display()
+            );
+        }
+    }
+    let mut passphrase = std::fs::read_to_string(path)
+        .with_context(|| format!("reading passphrase file {}", path.display()))?;
+    if passphrase.ends_with("\r\n") {
+        passphrase.truncate(passphrase.len() - 2);
+    } else if passphrase.ends_with('\n') {
+        passphrase.pop();
+    }
+    if passphrase.contains(['\r', '\n']) {
+        bail!("passphrase file must contain exactly one line");
+    }
+    crypt::check_passphrase(&passphrase)?;
+    Ok(passphrase)
+}
+
 /// The passphrase of the disk encryption, asked twice until it is one
 /// the boot loader can take.
 fn ask_passphrase(p: &mut Prompter<'_>) -> anyhow::Result<String> {
@@ -599,7 +641,7 @@ mod tests {
             disk: c.disk.clone().unwrap_or_default(),
             root_password: c.root_password.clone(),
             encrypt: !c.no_encrypt,
-            passphrase: c.passphrase.clone(),
+            passphrase: None,
             target: std::env::temp_dir()
                 .join(format!("jos-install-main-{}", std::process::id()))
                 .to_string_lossy()
@@ -963,6 +1005,48 @@ mod tests {
     }
 
     #[test]
+    fn passphrase_files_are_private_bounded_and_single_line() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path =
+            std::env::temp_dir().join(format!("jos-passphrase-validation-{}", std::process::id()));
+        let write = |contents: &[u8], mode: u32| {
+            std::fs::write(&path, contents).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        write(b"correct horse", 0o600);
+        assert_eq!(read_passphrase_file(&path).unwrap(), "correct horse");
+        write(b"correct horse\r\n", 0o600);
+        assert_eq!(read_passphrase_file(&path).unwrap(), "correct horse");
+        write(b"correct horse\nsecond line", 0o600);
+        assert!(read_passphrase_file(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one line"));
+        write(&[b'x'; 131], 0o600);
+        assert!(read_passphrase_file(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("at most 130 bytes"));
+        write(b"correct horse", 0o644);
+        assert!(read_passphrase_file(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("group or others"));
+        let _ = std::fs::remove_file(&path);
+
+        let dir =
+            std::env::temp_dir().join(format!("jos-passphrase-directory-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_passphrase_file(&dir)
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular file"));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
     fn unattended_encrypted_install_needs_its_passphrase() {
         let m = MockRunner::new();
         let flags = [
@@ -977,11 +1061,21 @@ mod tests {
         // Encryption is the default: not silently skipped.
         let (r, out) = install_with(&flags, &m, false, "");
         let err = r.unwrap_err().to_string();
-        assert!(err.contains("--passphrase (or --no-encrypt)"), "{err}");
+        assert!(err.contains("--passphrase-file (or --no-encrypt)"), "{err}");
         assert!(out.is_empty(), "{out}");
         assert!(m.calls().iter().all(|c| !c.starts_with("geli")));
 
-        let args = [&flags[..], &["--passphrase", "correct horse"]].concat();
+        let passphrase_file =
+            std::env::temp_dir().join(format!("jos-passphrase-{}", std::process::id()));
+        std::fs::write(&passphrase_file, "correct horse\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&passphrase_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let passphrase_file = passphrase_file.to_string_lossy().into_owned();
+        let args = [&flags[..], &["--passphrase-file", &passphrase_file]].concat();
         let m = MockRunner::new();
         let (r, out) = install_with(&args, &m, false, "");
         r.unwrap();
@@ -993,7 +1087,8 @@ mod tests {
         assert!(!calls.iter().any(|c| c.contains("correct horse")));
 
         // Too short a passphrase is refused before anything is touched.
-        let args = [&flags[..], &["--passphrase", "short"]].concat();
+        std::fs::write(&passphrase_file, "short\n").unwrap();
+        let args = [&flags[..], &["--passphrase-file", &passphrase_file]].concat();
         let m = MockRunner::new();
         let (r, _) = install_with(&args, &m, false, "");
         assert!(r.unwrap_err().to_string().contains("at least"));
@@ -1006,8 +1101,14 @@ mod tests {
         assert!(out.contains("encrypt   none"), "{out}");
         assert!(m.calls().iter().all(|c| !c.starts_with("geli")));
         // Choosing both ways is a mistake.
-        let both = ["jos-install", "--no-encrypt", "--passphrase", "x"];
+        let both = [
+            "jos-install",
+            "--no-encrypt",
+            "--passphrase-file",
+            "/tmp/key",
+        ];
         assert!(Cli::try_parse_from(both).is_err());
+        let _ = std::fs::remove_file(&passphrase_file);
     }
 
     #[test]
@@ -1041,12 +1142,33 @@ mod tests {
         assert!(m.calls().iter().all(|c| !c.starts_with("geli")));
 
         // A passphrase from the flags is not asked again.
-        let c = cli(&["--dry-run", "--passphrase", "correct horse"]);
+        let passphrase_file =
+            std::env::temp_dir().join(format!("jos-passphrase-interactive-{}", std::process::id()));
+        std::fs::write(&passphrase_file, "correct horse").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&passphrase_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let passphrase_file = passphrase_file.to_string_lossy().into_owned();
+        let c = cli(&["--dry-run", "--passphrase-file", &passphrase_file]);
         let m = MockRunner::new();
-        let (r, out) = text(&c, &m, &ok, "1\n\n\n\n\npw\npw\n\ny\n");
+        let plan = InstallPlan {
+            passphrase: Some("correct horse".into()),
+            ..plan_for(&c)
+        };
+        let (r, out) = text_with(
+            &c,
+            &m,
+            plan,
+            &hw(ok.clone(), vec![]),
+            "1\n\n\n\n\npw\npw\n\ny\n",
+        );
         r.unwrap();
         assert!(!out.contains("Encryption passphrase"), "{out}");
         assert!(m.calls().iter().any(|c| c.starts_with("geli init")));
+        let _ = std::fs::remove_file(&passphrase_file);
     }
 
     #[test]
