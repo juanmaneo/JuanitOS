@@ -8,11 +8,12 @@
 //!
 //! `loader.efi` splits its `LoadOptions` on spaces and feeds every word to
 //! `boot_parse_arg`: `-m` sets `RB_MUTE`, `-v`/`-s` the usual flags, and
-//! `name=value` becomes a loader environment variable. Three variables
+//! `name=value` becomes a loader environment variable. Two variables
 //! make the loader go straight to the kernel without drawing anything:
 //!
 //! - `autoboot_delay=-1` — boot immediately, no countdown;
 //! - `beastie_disable=YES` — never show the Lua menu;
+//!
 //! The loader console stays visible: encrypted GELI disks need its
 //! passphrase prompt before the kernel starts. `-m` still mutes kernel
 //! console output, so its `vt(4)` paints the `splash=` PNG from
@@ -20,8 +21,7 @@
 //! `rc(8)` runs. The loader does clear the screen once while it starts
 //! (its console init erases the terminal area), so there is a short black
 //! gap between this program and the kernel splash; the stock loader offers
-//! no way around that. The loader's own startup text and GELI prompt remain
-//! visible; only the kernel boot is quiet.
+//! no way around that.
 //!
 //! # When a quiet boot never finishes
 //!
