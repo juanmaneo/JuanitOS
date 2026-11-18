@@ -138,9 +138,12 @@ Anaconda. It is a front end to `jos setup`, drawn like the installer:
    cannot be the uplink yet. The dom0 never gets an address and never
    runs `dhclient`: only `sys-net` talks to the network.
 2. **Qubes**: the app qubes to create (`work`, `personal`, `untrusted`,
-   and `vault` offline; `--app NAME[:offline]`), the template they clone
-   (`--app-template`, `fbsd15-dev` by default, whose image is on the
-   media) and whether a reserved NVIDIA card gets a `gpu` qube.
+   and `vault` offline; `--app NAME[:offline][@RECIPE]`). Each app picks
+   its own template from the list (the Summary warns about a template whose
+   image is not on the disk). Apps that name no
+   template use `--app-template`, `fbsd15-dev` by default, whose image is
+   on the media. Whether a reserved NVIDIA card gets a `gpu` qube is
+   asked too.
 3. **Summary**: the plan in words, and the exact `jos setup` command.
 4. **Creating**: `jos setup` runs as a child process; its `==> [i/n]`
    steps drive the progress bar, the whole output goes to

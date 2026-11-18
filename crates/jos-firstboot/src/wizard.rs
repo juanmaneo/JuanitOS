@@ -144,11 +144,12 @@ pub struct Wizard {
     pub iommu: bool,
     /// Pass the card through rather than bridge it (when it can be).
     pub passthrough: bool,
-    /// Every proposed app qube, ticked or not.
+    /// Every proposed app qube, ticked or not. Its template is the
+    /// default unless the operator picked another one for it.
     pub apps: Vec<(AppSpec, bool)>,
+    /// The app the cursor is on: the Templates list is for it.
     pub app: usize,
     pub templates: Vec<Template>,
-    pub template: usize,
     pub gpu: bool,
     pub(crate) focus: usize,
     pub run: RunState,
@@ -174,10 +175,6 @@ impl Wizard {
                 local: local.iter().any(|l| l == r.name),
             })
             .collect();
-        let template = templates
-            .iter()
-            .position(|t| t.name == setup::APP_TEMPLATE)
-            .unwrap_or(0);
         let mut w = Wizard {
             page: Page::Welcome,
             ifaces: Vec::new(),
@@ -190,7 +187,6 @@ impl Wizard {
                 .collect(),
             app: 0,
             templates,
-            template,
             gpu: true,
             focus: 0,
             run: RunState::Idle,
@@ -332,7 +328,11 @@ impl Wizard {
                 self.iface = Some(moved(self.iface.unwrap_or(0), self.ifaces.len()));
             }
             Some(Widget::Apps) => self.app = moved(self.app, self.apps.len()),
-            Some(Widget::Templates) => self.template = moved(self.template, self.templates.len()),
+            Some(Widget::Templates) if !self.templates.is_empty() => {
+                let current = self.selected_template().unwrap_or(0);
+                self.pick_template(moved(current, self.templates.len()));
+            }
+            Some(Widget::Templates) => {}
             _ => self.focus_by(delta),
         }
     }
@@ -393,10 +393,35 @@ impl Wizard {
             }
             Target::Template(i) => {
                 self.focus_on(Widget::Templates);
-                self.template = i;
+                self.pick_template(i);
             }
         }
         Action::None
+    }
+
+    /// The recipe app `app` is cloned from: its own, else the default.
+    pub fn recipe_of(&self, app: usize) -> &str {
+        self.apps
+            .get(app)
+            .and_then(|(a, _)| a.template.as_deref())
+            .unwrap_or(setup::APP_TEMPLATE)
+    }
+
+    /// Index in [`Wizard::templates`] of the recipe the cursor app uses.
+    pub fn selected_template(&self) -> Option<usize> {
+        let recipe = self.recipe_of(self.app);
+        self.templates.iter().position(|t| t.name == recipe)
+    }
+
+    /// Clone the cursor app from template `index`. The default recipe is
+    /// kept implicit, so the command line only names the others.
+    fn pick_template(&mut self, index: usize) {
+        let Some(name) = self.templates.get(index).map(|t| t.name) else {
+            return;
+        };
+        if let Some((app, _)) = self.apps.get_mut(self.app) {
+            app.template = (name != setup::APP_TEMPLATE).then(|| name.to_string());
+        }
     }
 
     fn toggle_app(&mut self) {
@@ -455,9 +480,6 @@ impl Wizard {
         for (app, _) in self.apps.iter().filter(|(_, on)| *on) {
             a.extend(["--app".to_string(), app.to_string()]);
         }
-        if let Some(t) = self.templates.get(self.template) {
-            a.extend(["--app-template".to_string(), t.name.to_string()]);
-        }
         a
     }
 
@@ -478,17 +500,40 @@ impl Wizard {
             .apps
             .iter()
             .filter(|(_, on)| *on)
-            .map(|(a, _)| a.to_string())
+            .map(|(a, _)| match a.network {
+                true => a.name.clone(),
+                false => format!("{}:offline", a.name),
+            })
             .collect();
         let apps = if apps.is_empty() {
             "none".to_string()
         } else {
             apps.join(", ")
         };
-        let template = match self.templates.get(self.template) {
-            Some(t) if t.local => t.name.to_string(),
-            Some(t) => format!("{} (its image is not on this disk)", t.name),
-            None => "none".to_string(),
+        let mut by_recipe: Vec<(&str, Vec<&str>)> = Vec::new();
+        for (i, (app, _)) in self.apps.iter().enumerate().filter(|(_, (_, on))| *on) {
+            let recipe = self.recipe_of(i);
+            match by_recipe.iter_mut().find(|(r, _)| *r == recipe) {
+                Some((_, names)) => names.push(&app.name),
+                None => by_recipe.push((recipe, vec![&app.name])),
+            }
+        }
+        let template = if by_recipe.is_empty() {
+            "none".to_string()
+        } else {
+            by_recipe
+                .iter()
+                .map(|(recipe, names)| {
+                    let off_disk = self.templates.iter().any(|t| t.name == *recipe && !t.local);
+                    let note = if off_disk {
+                        " (its image is not on this disk)"
+                    } else {
+                        ""
+                    };
+                    format!("{recipe}: {}{note}", names.join(", "))
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
         };
         let gpu = if self.gpu {
             "if an NVIDIA card is reserved"
@@ -611,9 +656,9 @@ pub(crate) mod tests {
     #[test]
     fn the_keyboard_walks_to_the_setup() {
         let mut w = Wizard::new(sample_ifaces(), false, &local());
-        // The USB adapter with a cable is preselected; the fbsd15 template.
+        // The USB adapter with a cable is preselected; the apps use fbsd15.
         assert_eq!(w.selected_iface().unwrap().name, "ue0");
-        assert_eq!(w.templates[w.template].name, "fbsd15-dev");
+        assert_eq!(w.recipe_of(0), "fbsd15-dev");
         assert_eq!(w.focused(), Some(Widget::Next));
         assert_eq!(w.next_label(), "Next");
         w.handle(Key::Enter);
@@ -643,16 +688,19 @@ pub(crate) mod tests {
         w.handle(Key::Up);
         assert_eq!(w.handle(Key::Enter), Action::None);
         assert_eq!(w.page, Page::Qubes);
-        // Untick personal, pick the Debian template, no gpu qube.
+        // Untick personal, clone untrusted from the Debian template, no
+        // gpu qube.
         assert_eq!(w.focused(), Some(Widget::Next));
         keys(&mut w, &[Key::Tab, Key::Down, Key::Char(' ')]);
         assert!(!w.apps[1].1);
-        keys(&mut w, &[Key::Tab, Key::Up, Key::Tab, Key::Char(' ')]);
-        assert_eq!(w.templates[w.template].name, "debian-13-dev");
+        keys(&mut w, &[Key::Down, Key::Tab, Key::Up]);
+        assert_eq!(w.recipe_of(2), "debian-13-dev");
+        assert_eq!(w.recipe_of(0), "fbsd15-dev", "the other apps keep theirs");
+        keys(&mut w, &[Key::Tab, Key::Char(' ')]);
         assert!(!w.gpu);
         // Space on the template list does nothing more.
         keys(&mut w, &[Key::BackTab, Key::Char(' ')]);
-        assert_eq!(w.templates[w.template].name, "debian-13-dev");
+        assert_eq!(w.recipe_of(2), "debian-13-dev");
         w.handle(Key::Enter);
         assert_eq!(w.page, Page::Summary);
         assert_eq!(w.next_label(), "Create qubes");
@@ -662,10 +710,13 @@ pub(crate) mod tests {
             "{rows:?}"
         );
         assert_eq!(rows[2].1, "work, untrusted, vault:offline");
-        assert_eq!(rows[3].1, "debian-13-dev (its image is not on this disk)");
+        assert_eq!(
+            rows[3].1,
+            "fbsd15-dev: work, vault; debian-13-dev: untrusted (its image is not on this disk)"
+        );
         assert_eq!(rows[4].1, "no");
         let args = "setup --uplink ue0 --no-passthrough --no-gpu --app work \
-                    --app untrusted --app vault:offline --app-template debian-13-dev";
+                    --app untrusted@debian-13-dev --app vault:offline";
         assert_eq!(rows[5].1, format!("jos {args}"));
         // Esc goes back, Enter comes again; Space presses Create qubes.
         w.handle(Key::Esc);
@@ -776,22 +827,39 @@ pub(crate) mod tests {
         }
         assert_eq!(w.focused(), Some(Widget::Apps));
         assert_eq!(w.summary_rows()[2].1, "none");
-        w.click(Target::Template(1));
+        // The template list is for the cursor app (vault): Debian for it
+        // only.
+        w.click(Target::Template(0));
         assert_eq!(w.focused(), Some(Widget::Templates));
-        assert_eq!(w.summary_rows()[3].1, "fbsd15-dev");
+        assert_eq!(w.recipe_of(3), "debian-13-dev");
+        assert_eq!(w.recipe_of(0), "fbsd15-dev");
         assert_eq!(w.summary_rows()[4].1, "if an NVIDIA card is reserved");
+        // Clicking an app ticks it and moves the cursor to it.
+        w.click(Target::App(0));
+        assert_eq!(w.selected_template(), Some(1));
         w.click(Target::Widget(Widget::Gpu));
         assert!(!w.gpu);
         w.click(Target::Widget(Widget::Apps));
-        assert!(w.apps[3].1);
-        // No app under the cursor: nothing to tick.
+        assert!(!w.apps[0].1, "Space on the list unticks the cursor app");
+        // No app under the cursor: nothing to tick, nothing to clone.
         w.app = w.apps.len();
         w.click(Target::Widget(Widget::Apps));
-        assert!(w.apps.iter().filter(|(_, on)| *on).count() == 1);
-        // A template list without a selection (no recipe found).
+        assert_eq!(w.apps.iter().filter(|(_, on)| *on).count(), 0);
+        w.click(Target::Template(0));
+        assert_eq!(
+            w.apps.iter().filter(|(a, _)| a.template.is_some()).count(),
+            1
+        );
+        // A template list without a recipe: the apps keep their names.
+        w.click(Target::App(0));
         w.templates.clear();
-        assert_eq!(w.summary_rows()[3].1, "none");
+        assert_eq!(w.summary_rows()[3].1, "fbsd15-dev: work");
         assert!(!w.setup_args().contains(&"--app-template".to_string()));
+        // Nothing to pick or move to.
+        w.click(Target::Template(0));
+        w.handle(Key::Up);
+        assert_eq!(w.focused(), Some(Widget::Templates));
+        assert_eq!(w.selected_template(), None);
     }
 
     #[test]

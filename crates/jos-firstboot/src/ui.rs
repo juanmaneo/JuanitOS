@@ -427,10 +427,14 @@ fn qubes(c: &mut Canvas, w: &Wizard) {
     title(
         c,
         "Qubes",
-        "The app qubes to create, and the template they are cloned from.",
+        "The app qubes to create, and the template each one is cloned from.",
     );
     c.text(CONTENT_X, BODY_Y, "App qubes", 2, THEME.accent);
-    c.text(RIGHT_X, BODY_Y, "Template", 2, THEME.accent);
+    let for_app = match w.apps.get(w.app) {
+        Some((app, _)) => format!("Template of {}", app.name),
+        None => "Template".to_string(),
+    };
+    c.text_clip(RIGHT_X, BODY_Y, &for_app, 2, HALF_W, THEME.accent);
     let apps_focused = w.focused() == Some(Widget::Apps);
     let mut y = BODY_Y + 36;
     for (i, (app, on)) in w.apps.iter().enumerate() {
@@ -439,18 +443,19 @@ fn qubes(c: &mut Canvas, w: &Wizard) {
         c.boxed(CONTENT_X, y, HALF_W, ROW_H, border, THEME.highlight);
         c.hit(CONTENT_X, y, HALF_W, ROW_H, Target::App(i));
         tick_box(c, CONTENT_X + 14, y + 14, *on, THEME.text_muted);
-        c.text_clip(CONTENT_X + 56, y + 18, &app.name, 2, 160, THEME.text);
+        c.text_clip(CONTENT_X + 56, y + 8, &app.name, 2, 160, THEME.text);
         let net = if app.network {
             "via sys-firewall"
         } else {
             "offline"
         };
+        let line = format!("{net}, {}", w.recipe_of(i));
         c.text_clip(
-            CONTENT_X + 220,
-            y + 18,
-            net,
-            2,
-            HALF_W - 230,
+            CONTENT_X + 56,
+            y + 34,
+            &line,
+            1,
+            HALF_W - 70,
             THEME.text_muted,
         );
         y += ROW_PITCH;
@@ -458,9 +463,10 @@ fn qubes(c: &mut Canvas, w: &Wizard) {
     let gpu_y = y + 30;
 
     let templates_focused = w.focused() == Some(Widget::Templates);
+    let chosen = w.selected_template();
     let mut y = BODY_Y + 36;
     for (i, t) in w.templates.iter().enumerate() {
-        let selected = i == w.template;
+        let selected = chosen == Some(i);
         let border = row_border(selected, templates_focused);
         c.boxed(RIGHT_X, y, HALF_W, ROW_H, border, THEME.highlight);
         c.hit(RIGHT_X, y, HALF_W, ROW_H, Target::Template(i));
@@ -474,7 +480,7 @@ fn qubes(c: &mut Canvas, w: &Wizard) {
         c.text_clip(RIGHT_X + 260, y + 18, label, 2, HALF_W - 270, colour);
         y += ROW_PITCH;
     }
-    if let Some(t) = w.templates.get(w.template) {
+    if let Some(t) = chosen.and_then(|i| w.templates.get(i)) {
         for line in wrap(t.summary, 32).iter().take(4) {
             c.text(RIGHT_X, y + 6, line, 2, THEME.text_muted);
             y += 26;
@@ -889,6 +895,9 @@ mod tests {
         let _ = frame(&w);
         // No template recipe at all.
         w.templates.clear();
+        let _ = frame(&w);
+        // The cursor past the last app: no template of its own to show.
+        w.app = w.apps.len();
         let _ = frame(&w);
     }
 
