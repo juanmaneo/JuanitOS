@@ -248,10 +248,12 @@ struct SetupArgs {
     #[arg(long, value_name = "PATH")]
     firewall_image: Option<PathBuf>,
     /// App qube to create: NAME behind sys-firewall, NAME:offline without
-    /// a network (repeatable).
-    #[arg(long = "app", value_name = "NAME[:offline]", value_parser = parse_app)]
+    /// a network; NAME@RECIPE or NAME:offline@RECIPE clones it from that
+    /// template instead of --app-template (repeatable).
+    #[arg(long = "app", value_name = "NAME[:offline][@RECIPE]", value_parser = parse_app)]
     apps: Vec<setup::AppSpec>,
-    /// Template recipe the app qubes are cloned from.
+    /// Template recipe the app qubes are cloned from, unless they name
+    /// their own.
     #[arg(long, value_name = "RECIPE", default_value = setup::APP_TEMPLATE)]
     app_template: String,
     /// Bridge sys-net to its card even when the IOMMU could pass the card

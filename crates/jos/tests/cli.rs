@@ -2405,8 +2405,8 @@ fn setup_failures() {
         String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"),
         "{out:?}"
     );
-    // An app qube is NAME or NAME:offline, and never a system qube.
-    for app in ["alice:online", "sys-net"] {
+    // An app qube is NAME[:offline][@RECIPE], and never a system qube.
+    for app in ["alice:online", "sys-net", "alice@nope"] {
         let out = jos_on(&e, &cfg, &bin, true, &["setup", "--app", app]);
         assert!(!out.status.success(), "{out:?}");
         assert!(

@@ -84,12 +84,24 @@ impl Host {
     }
 }
 
-/// An app qube to create (`jos setup --app NAME[:offline]`).
+/// An app qube to create (`jos setup --app NAME[:offline][@RECIPE]`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSpec {
     pub name: String,
     /// Behind `sys-firewall`; else `netvm = "none"`.
     pub network: bool,
+    /// Recipe of the template this qube is cloned from; else
+    /// [`SetupOptions::app_template`].
+    pub template: Option<String>,
+}
+
+/// The recipe called `name`, for `what` (an error names it).
+fn find_recipe(name: &str, what: &str) -> Result<&'static Recipe> {
+    template::find(name).ok_or_else(|| {
+        Error::Other(format!(
+            "unknown template recipe {name:?} for {what} (see `jos template recipes`)"
+        ))
+    })
 }
 
 impl AppSpec {
@@ -97,6 +109,22 @@ impl AppSpec {
         AppSpec {
             name: name.to_string(),
             network,
+            template: None,
+        }
+    }
+
+    /// This qube cloned from `recipe` instead of the default template.
+    pub fn with_template(mut self, recipe: &str) -> Self {
+        self.template = Some(recipe.to_string());
+        self
+    }
+
+    /// The recipe this qube is cloned from: its own, else `default`.
+    pub fn recipe(&self, default: &'static Recipe) -> Result<&'static Recipe> {
+        self.check()?;
+        match &self.template {
+            Some(t) => find_recipe(t, &self.name),
+            None => Ok(default),
         }
     }
 
@@ -118,18 +146,26 @@ impl AppSpec {
 impl FromStr for AppSpec {
     type Err = Error;
 
-    /// `work` or `vault:offline`.
+    /// `work`, `vault:offline`, `work@debian-13-dev` or
+    /// `vault:offline@fbsd15-dev`.
     fn from_str(s: &str) -> Result<Self> {
-        let app = match s.split_once(':') {
-            None => AppSpec::new(s, true),
+        let (qube, recipe) = match s.split_once('@') {
+            Some((qube, recipe)) => (qube, Some(recipe)),
+            None => (s, None),
+        };
+        let mut app = match qube.split_once(':') {
+            None => AppSpec::new(qube, true),
             Some((name, "offline")) => AppSpec::new(name, false),
             Some(_) => {
                 return Err(Error::Other(format!(
-                    "{s:?}: expected NAME or NAME:offline"
+                    "{s:?}: expected NAME[:offline][@RECIPE]"
                 )))
             }
         };
         app.check()?;
+        if let Some(recipe) = recipe {
+            app.template = Some(find_recipe(recipe, &app.name)?.name.to_string());
+        }
         Ok(app)
     }
 }
@@ -137,7 +173,11 @@ impl FromStr for AppSpec {
 impl fmt::Display for AppSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let suffix = if self.network { "" } else { ":offline" };
-        write!(f, "{}{suffix}", self.name)
+        let recipe = self
+            .template
+            .as_deref()
+            .map_or(String::new(), |t| format!("@{t}"));
+        write!(f, "{}{suffix}{recipe}", self.name)
     }
 }
 
@@ -172,7 +212,8 @@ pub struct SetupOptions {
     pub firewall_image: Option<String>,
     /// App qubes to create.
     pub apps: Vec<AppSpec>,
-    /// Recipe the app qubes clone from.
+    /// Recipe the app qubes clone from unless they name their own
+    /// ([`AppSpec::template`]).
     pub app_template: String,
 }
 
@@ -582,7 +623,9 @@ fn gpu_plan(
     Some(q)
 }
 
-/// The app qubes still missing.
+/// The app qubes still missing, each cloned from its own template. The
+/// apps whose template cannot be had wait (a note per template); the
+/// others are created.
 fn app_qubes(
     host: &Host,
     has: &dyn Fn(&str) -> bool,
@@ -592,34 +635,30 @@ fn app_qubes(
     if opts.apps.is_empty() {
         return Ok(Vec::new());
     }
-    let recipe = template::find(&opts.app_template).ok_or_else(|| {
-        Error::Other(format!(
-            "unknown template recipe {:?} for the app qubes (see `jos template recipes`)",
-            opts.app_template
-        ))
-    })?;
+    let default = find_recipe(&opts.app_template, "the app qubes")?;
+    let mut wanted = Vec::new();
     for (i, app) in opts.apps.iter().enumerate() {
-        app.check()?;
+        let recipe = app.recipe(default)?;
         if opts.apps.iter().take(i).any(|a| a.name == app.name) {
             return Err(Error::Other(format!(
                 "app qube {} is listed twice",
                 app.name
             )));
         }
-    }
-    if !has(recipe.name) && !host.can_fetch(recipe.name) {
-        let names: Vec<&str> = opts.apps.iter().map(|a| a.name.as_str()).collect();
-        notes.push(format!(
-            "no app qubes yet ({}): {}",
-            names.join(", "),
-            unobtainable(recipe.name)
-        ));
-        return Ok(Vec::new());
+        wanted.push((app, recipe));
     }
     let mut out = Vec::new();
-    for app in &opts.apps {
+    let mut waiting: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (app, recipe) in wanted {
         if has(&app.name) {
             notes.push(format!("{} exists", app.name));
+            continue;
+        }
+        if !has(recipe.name) && !host.can_fetch(recipe.name) {
+            match waiting.iter_mut().find(|(r, _)| *r == recipe.name) {
+                Some((_, names)) => names.push(&app.name),
+                None => waiting.push((recipe.name, vec![&app.name])),
+            }
             continue;
         }
         let mut q = clone_of(&app.name, QubeKind::App, recipe.name);
@@ -629,6 +668,13 @@ fn app_qubes(
             q.netvm = Some(NO_NETVM.to_string());
         }
         out.push(q);
+    }
+    for (recipe, names) in waiting {
+        notes.push(format!(
+            "no app qubes yet ({}): {}",
+            names.join(", "),
+            unobtainable(recipe)
+        ));
     }
     Ok(out)
 }
@@ -998,15 +1044,133 @@ mod tests {
 
     #[test]
     fn app_specs_round_trip() {
-        for s in ["work", "vault:offline"] {
+        for s in [
+            "work",
+            "vault:offline",
+            "work@debian-13-dev",
+            "vault:offline@fbsd15-dev",
+        ] {
             assert_eq!(s.parse::<AppSpec>().unwrap().to_string(), s);
         }
         assert!(!"vault:offline".parse::<AppSpec>().unwrap().network);
+        let linux: AppSpec = "work@debian-13-dev".parse().unwrap();
+        assert_eq!(
+            linux,
+            AppSpec::new("work", true).with_template(GPU_TEMPLATE)
+        );
+        assert_eq!("work".parse::<AppSpec>().unwrap().template, None);
         assert!("work:online".parse::<AppSpec>().is_err());
         assert!("gpu".parse::<AppSpec>().is_err());
         assert!(":offline".parse::<AppSpec>().is_err());
+        let err = "work@nope".parse::<AppSpec>().unwrap_err().to_string();
+        assert!(
+            err.contains("unknown template recipe \"nope\" for work"),
+            "{err}"
+        );
+        assert!("work@".parse::<AppSpec>().is_err());
+        assert!("gpu@fbsd15-dev".parse::<AppSpec>().is_err());
         let names: Vec<String> = default_apps().iter().map(|a| a.to_string()).collect();
         assert_eq!(names, ["work", "personal", "untrusted", "vault:offline"]);
+    }
+
+    #[test]
+    fn each_app_qube_is_cloned_from_its_own_template() {
+        let mut h = usb_host();
+        h.local_templates.push(GPU_TEMPLATE.into());
+        let opts = SetupOptions {
+            apps: vec![
+                AppSpec::new("alice", true),
+                AppSpec::new("bob", true).with_template(GPU_TEMPLATE),
+                AppSpec::new("chuck", false).with_template(GPU_TEMPLATE),
+                AppSpec::new("dave", true).with_template(APP_TEMPLATE),
+            ],
+            ..usb_opts()
+        };
+        let p = plan(&h, &[], &opts).unwrap();
+        let qubes = created(&p);
+        let from = |name: &str| get(&qubes, name).template.clone();
+        assert_eq!(from("alice").as_deref(), Some(APP_TEMPLATE), "the default");
+        assert_eq!(from("bob").as_deref(), Some(GPU_TEMPLATE));
+        assert_eq!(from("chuck").as_deref(), Some(GPU_TEMPLATE));
+        assert_eq!(from("dave").as_deref(), Some(APP_TEMPLATE));
+        assert_eq!(get(&qubes, "alice").os, OsType::Freebsd);
+        assert_eq!(get(&qubes, "bob").os, OsType::Linux);
+        assert_eq!(get(&qubes, "chuck").netvm.as_deref(), Some(NO_NETVM));
+        // Each template is built once, and only the ones in use.
+        let built: Vec<&Step> = p
+            .steps
+            .iter()
+            .filter(|s| matches!(s, Step::InstallTemplate { .. }))
+            .collect();
+        assert_eq!(
+            built,
+            [
+                &install(NET_TEMPLATE, Via::Uplink("ue0".into())),
+                &install(APP_TEMPLATE, Via::Chain),
+                &install(GPU_TEMPLATE, Via::Chain),
+            ]
+        );
+
+        // The default template follows --app-template; a named one wins.
+        let opts = SetupOptions {
+            apps: vec![
+                AppSpec::new("alice", true),
+                AppSpec::new("bob", true).with_template(APP_TEMPLATE),
+            ],
+            app_template: GPU_TEMPLATE.into(),
+            ..usb_opts()
+        };
+        let qubes = created(&plan(&h, &[], &opts).unwrap());
+        assert_eq!(get(&qubes, "alice").template.as_deref(), Some(GPU_TEMPLATE));
+        assert_eq!(get(&qubes, "bob").template.as_deref(), Some(APP_TEMPLATE));
+
+        // A template the app names must exist.
+        let bad = SetupOptions {
+            apps: vec![AppSpec::new("alice", true).with_template("nope")],
+            ..usb_opts()
+        };
+        let err = plan(&h, &[], &bad).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown template recipe \"nope\" for alice"),
+            "{err}"
+        );
+
+        // The name check applies whatever template the app names.
+        let named = SetupOptions {
+            apps: vec![AppSpec::new(GPU, true).with_template(APP_TEMPLATE)],
+            ..usb_opts()
+        };
+        let err = plan(&h, &[], &named).unwrap_err().to_string();
+        assert!(err.contains("not an app qube"), "{err}");
+    }
+
+    #[test]
+    fn apps_wait_for_their_own_template_only() {
+        // Only the FreeBSD images are on the disk: the apps cloned from
+        // anything else wait, a note per template, the others go.
+        let opts = SetupOptions {
+            apps: vec![
+                AppSpec::new("alice", true),
+                AppSpec::new("bob", true).with_template(GPU_TEMPLATE),
+                AppSpec::new("chuck", true).with_template("redox"),
+                AppSpec::new("dave", false).with_template(GPU_TEMPLATE),
+            ],
+            ..usb_opts()
+        };
+        let p = plan(&usb_host(), &[], &opts).unwrap();
+        let names: Vec<String> = created(&p).into_iter().map(|q| q.name).collect();
+        assert_eq!(names, [SYS_NET, SYS_FIREWALL, "alice"]);
+        let waiting: Vec<&String> = p
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("no app qubes yet"))
+            .collect();
+        assert_eq!(waiting.len(), 2, "{:?}", p.notes);
+        assert!(waiting[0].starts_with("no app qubes yet (bob, dave): "));
+        assert!(waiting[0].contains("no local image of debian-13-dev"));
+        assert!(waiting[1].starts_with("no app qubes yet (chuck): "));
+        assert!(waiting[1].contains("no local image of redox"));
+        assert!(!p.steps.contains(&install(GPU_TEMPLATE, Via::Chain)));
     }
 
     #[test]
